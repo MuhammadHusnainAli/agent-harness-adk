@@ -6,7 +6,8 @@ import ast
 import operator
 import time
 from collections.abc import Callable, Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import datetime
+from datetime import timezone as _tz
 from typing import Any
 
 from ..errors import ToolError
@@ -23,7 +24,7 @@ def now(timezone: str = "UTC") -> str:
         timezone: an IANA timezone name, or UTC.
     """
     if timezone.upper() == "UTC":
-        return datetime.now(UTC).isoformat(timespec="seconds")
+        return datetime.now(_tz.utc).isoformat(timespec="seconds")
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(timezone)).isoformat(timespec="seconds")

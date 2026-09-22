@@ -23,6 +23,9 @@ from ..types import new_id
 
 __all__ = ["Workspace", "DockerWorkspace", "WorkspaceBroker"]
 
+# On Python 3.10 asyncio.TimeoutError is a distinct class from the builtin.
+_Timeout = (TimeoutError, asyncio.TimeoutError)
+
 
 class Workspace:
     """A jailed directory plus the tools that operate inside it."""
@@ -123,7 +126,7 @@ class Workspace:
         try:
             out, err = await asyncio.wait_for(proc.communicate(),
                                               timeout or self.timeout)
-        except TimeoutError:
+        except _Timeout:
             proc.kill()
             await proc.wait()
             raise ToolError(f"command timed out after {timeout or self.timeout}s",
@@ -236,7 +239,7 @@ class DockerWorkspace(Workspace):
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout or self.timeout)
-        except TimeoutError:
+        except _Timeout:
             proc.kill()
             await proc.wait()
             raise ToolError(f"container timed out after {timeout or self.timeout}s",

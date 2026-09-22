@@ -1,4 +1,9 @@
-# agent-harness
+# agent-harness-adk
+
+[![CI](https://github.com/MuhammadHusnainAli/agent-harness-adk/actions/workflows/ci.yml/badge.svg)](https://github.com/MuhammadHusnainAli/agent-harness-adk/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/agent-harness-adk.svg)](https://pypi.org/project/agent-harness-adk/)
+[![Python](https://img.shields.io/pypi/pyversions/agent-harness-adk.svg)](https://pypi.org/project/agent-harness-adk/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A fast, lightweight harness for building production AI agents in Python.
 
@@ -7,13 +12,17 @@ rails underneath them: permissions, budgets, hooks, guardrails, tracing,
 checkpoints and isolated workspaces. Three model providers, one loop, no
 framework lock-in.
 
-```
-pip install agent-harness        # or: uv add agent-harness
+```bash
+pip install agent-harness-adk     # or: uv add agent-harness-adk
 ```
 
-Three dependencies (`pydantic`, `httpx`, `pyyaml`), ~100 ms to import, and no
-vendor SDKs — the provider adapters speak HTTP directly so Anthropic, OpenAI and
-Gemini all travel the same retry, cost and tracing path.
+```python
+import agent_harness              # installed as agent-harness-adk, imported as agent_harness
+```
+
+Python 3.10 – 3.14. Three dependencies (`pydantic`, `httpx`, `pyyaml`), ~100 ms
+to import, and no vendor SDKs — the provider adapters speak HTTP directly so
+Anthropic, OpenAI and Gemini all travel the same retry, cost and tracing path.
 
 ---
 
@@ -387,9 +396,24 @@ agent-harness mcp npx -y @modelcontextprotocol/server-filesystem /data
 - **Everything is optional.** An `Agent` with no memory, no skills and no
   sub-agents is a tight `while` loop around one model call.
 
+## Contributing
+
+```bash
+git clone https://github.com/MuhammadHusnainAli/agent-harness-adk
+cd agent-harness-adk
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check src tests examples
+```
+
+Every push to `main` runs the suite on Python 3.10, 3.11, 3.12, 3.13 and 3.14,
+lints, builds the wheel and smoke-tests it. Releases are cut by pushing a tag —
+see [RELEASING.md](RELEASING.md).
+
 ## Status
 
 0.1.0 — the first release. The public API above is what we intend to keep.
+Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 Not in this release: a vector-database backend (the built-in index is exact
 brute force, fine to ~50k records), OCR and document parsing, and provider-side
@@ -397,4 +421,4 @@ batch APIs.
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).

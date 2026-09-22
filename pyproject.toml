@@ -1,5 +1,5 @@
 [project]
-name = "agent-harness"
+name = "agent-harness-adk"
 version = "0.1.0"
 description = "A fast, lightweight harness for building production AI agents: agents, sub-agents, skills, prompts, tools, MCP, memory and the runtime rails underneath them."
 readme = "README.md"
@@ -7,15 +7,17 @@ authors = [
     { name = "MuhammadHusnainAli", email = "muhammad.husnain.ali.738@gmail.com" }
 ]
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 keywords = ["agents", "llm", "ai", "mcp", "orchestration", "anthropic", "openai", "gemini"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Typing :: Typed",
 ]
@@ -34,8 +36,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MuhammadHusnainAli/agent-harness"
-Issues = "https://github.com/MuhammadHusnainAli/agent-harness/issues"
+Homepage = "https://github.com/MuhammadHusnainAli/agent-harness-adk"
+Issues = "https://github.com/MuhammadHusnainAli/agent-harness-adk/issues"
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"
@@ -44,13 +46,17 @@ agent-harness = "agent_harness.cli:main"
 requires = ["uv_build>=0.12.9,<0.13.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+# Published as agent-harness-adk, imported as agent_harness.
+module-name = "agent_harness"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

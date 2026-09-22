@@ -25,6 +25,9 @@ __all__ = ["MCPServer", "MCPClient", "MCPManager"]
 
 PROTOCOL_VERSION = "2025-06-18"
 
+# On Python 3.10 asyncio.TimeoutError is a distinct class from the builtin.
+_Timeout = (TimeoutError, asyncio.TimeoutError)
+
 
 class MCPServer(BaseModel):
     """How to reach one MCP server."""
@@ -110,7 +113,7 @@ class MCPClient:
                 if self._proc.stderr:
                     try:
                         err = await asyncio.wait_for(self._proc.stderr.read(2000), 0.5)
-                    except TimeoutError:
+                    except _Timeout:
                         err = b""
                 raise MCPError(f"{self.server.name} closed the connection: "
                                f"{err.decode(errors='replace')[:500]}")

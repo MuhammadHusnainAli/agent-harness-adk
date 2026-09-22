@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from pydantic import BaseModel
@@ -100,9 +101,9 @@ async def test_parallel_tool_calls_run_together():
         ToolUseBlock(id="b", name="slow", input={"label": "second"}),
     ])
     agent = build([both, "both done"], tools=[slow])
-    started = asyncio.get_event_loop().time()
+    started = time.perf_counter()
     result = await agent.run("run both")
-    elapsed = asyncio.get_event_loop().time() - started
+    elapsed = time.perf_counter() - started
     assert result.output == "both done"
     assert len(order) == 2
     assert elapsed < 0.035  # they overlapped rather than queued
