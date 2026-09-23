@@ -6,7 +6,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+**Budgets that stop rather than fail**
+- `Budget(max_input_tokens=..., max_output_tokens=...)` — per-axis token
+  ceilings, so a sub-agent can be given "10k in, 2k out" and held to it.
+- `on_exceed` decides what reaching one means. The default, `"stop"`, ends the
+  run cleanly: the work the agent had done is kept, a line saying the budget is
+  exceeded is appended, and the parent receives an answer rather than an
+  exception. `"raise"` restores the old behaviour.
+- `BudgetGuard.remaining()` and `.would_exceed()` report what is left and what
+  the next call would cross.
+
+**Model fallback**
+- `ModelRouter(fallbacks=["claude-sonnet-5", "gpt-4.1"])`. When a model cannot
+  be reached the loop moves to the next one, resolving its provider as it goes.
+  A 4xx is not retried — the request is wrong and the next model will reject it
+  too. Every switch is journalled and audited.
+
+**Versions**
+- `Agent(version="v2", versions={...})` — several configurations of one agent,
+  each with its own instructions, model, tools, sub-agents, guardrails and
+  budget. `agent.use("v1")` returns that version, `run(task, version="v1")`
+  runs it, and both share the harness so they are directly comparable — run the
+  same golden tasks against each and see what changed.
+
+**Blueprints**
+- `Blueprint.from_file("agents.yaml")` — declare prompts, sub-agents, agents,
+  guardrail sets, versions and a memory backend in YAML or JSON, then
+  `build("support", tools=[...])`. Tools stay in code; everything else is
+  declaration. Tools may also be named as import paths.
+
+**Guardrails at industry scale**
+- Algorithmic detectors that are exact where they can be: `PIIDetector`
+  (Luhn-checked cards, mod-97 IBANs, precedence-ordered so a card is not also
+  reported as a phone number), `SecretDetector` (known formats plus Shannon
+  entropy for keys nobody has seen), `InjectionDetector` (weighted signals
+  scored 0-1 rather than a single regex hit), `ToxicityDetector`,
+  `GroundednessDetector` and `RepetitionDetector`.
+- Ready-made checks: `NoPII`, `NoSecrets`, `NoInjection`, `NotToxic`,
+  `NoRepetition`, `Grounded`, and `DetectorCheck` to wrap your own.
+- `LLMGuard` — a model judging against a policy, with a structured verdict, a
+  severity threshold, per-content caching, and an `on_error` that decides
+  whether a broken judge blocks or lets work through. Seven ready policies.
+- `AgentGuardrails.check_async()` runs the cheap deterministic checks first and
+  only pays for a judge if they are all happy.
 
 ## [0.1.1] — 2026-09-23
 

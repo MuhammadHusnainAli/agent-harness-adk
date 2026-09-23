@@ -15,6 +15,7 @@ from agent_harness import (
     HookEngine,
     Message,
     PolicyGate,
+    SubAgentSpec,
     tool,
     tool_call,
 )
@@ -119,16 +120,58 @@ async def test_max_steps_stops_a_runaway_loop():
     assert result.steps == 3
 
 
-async def test_the_budget_ceiling_stops_the_run():
-    harness = Harness.testing(FakeProvider(["x"], loop=True))
+async def test_a_budget_ends_the_run_cleanly_and_says_so():
+    """A ceiling is not a failure: keep the work, say why it stopped."""
+    harness = Harness.testing(FakeProvider([tool_call("add", a=1, b=1)], loop=True))
     harness.reset_budget(Budget(max_steps=2))
     agent = Agent("spender", provider=harness.provider, model=MODEL, harness=harness,
                   memory=False, tools=[add], max_steps=10)
-    provider = harness.provider
-    provider.responses = [tool_call("add", a=1, b=1)]
-    provider.loop = True
+
+    result = await agent.run("go")
+
+    assert result.ok                      # no exception reaches the caller
+    assert result.stop_reason == "budget"
+    assert result.budget_exceeded == "steps"
+    assert "budget for this agent is exceeded" in result.output
+    assert "steps 3 of 2" in result.output
+
+
+async def test_a_budget_can_be_made_an_error_instead():
+    harness = Harness.testing(FakeProvider([tool_call("add", a=1, b=1)], loop=True))
+    harness.reset_budget(Budget(max_steps=2, on_exceed="raise"))
+    agent = Agent("spender", provider=harness.provider, model=MODEL, harness=harness,
+                  memory=False, tools=[add], max_steps=10)
+
     result = await agent.run("go")
     assert not result.ok and "BudgetExceeded" in result.error
+
+
+async def test_token_ceilings_stop_a_sub_agent_and_hand_back_what_it_had():
+    """The stated case: 10k in, 2k out, then stop and report to the parent."""
+    provider = FakeProvider([
+        tool_call("delegate", agent_name="worker", task="summarise everything"),
+        "I got through three of the five documents",
+        "still going", "still going",
+        "The worker ran out of budget; here is what it found.",
+    ], loop=True)
+    harness = Harness.testing(provider)
+    manager = Agent("manager", provider=provider, model=MODEL, harness=harness,
+                    memory=False,
+                    subagents=[SubAgentSpec(
+                        name="worker", description="Reads documents.",
+                        budget=Budget(max_input_tokens=10_000, max_output_tokens=2))])
+
+    result = await manager.run("summarise the documents")
+    child = result.children[0]
+
+    assert child.ok                                   # not an error
+    assert child.stop_reason == "budget"
+    assert child.budget_exceeded == "output_tokens"
+    assert "three of the five documents" in child.output       # the work survives
+    assert "budget for this agent is exceeded" in child.output
+    assert "output tokens" in child.output
+    # And the parent carried on with what it was given.
+    assert result.ok and result.output
 
 
 async def test_output_contracts_are_validated_and_retried():

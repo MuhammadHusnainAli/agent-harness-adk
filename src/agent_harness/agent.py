@@ -59,6 +59,7 @@ from .types import (
     ToolUseBlock,
     new_id,
 )
+from .versioning import AgentVersion
 
 __all__ = ["Agent"]
 
@@ -152,7 +153,75 @@ class Agent:
         contract_retries: int = 2,
         stop: Iterable[str] = (),
         persist_session: bool = True,
+        version: str = "v1",
+        versions: dict[str, AgentVersion | dict[str, Any]] | None = None,
     ) -> None:
+        # --- versions ----------------------------------------------------
+        # A version says what is *different*; everything it leaves unset falls
+        # through to how the agent was constructed. Applied here, before any of
+        # it is assembled, so a version is a real configuration rather than a
+        # patch on a half-built object.
+        self._versions: dict[str, AgentVersion] = {
+            key: AgentVersion.of(spec) for key, spec in (versions or {}).items()
+        }
+        self._version = version
+        self._siblings: dict[str, Agent] = {}
+        self._base_kwargs: dict[str, Any] = {
+            "instructions": instructions, "description": description,
+            "model": model, "provider": provider, "tier": tier, "effort": effort,
+            "temperature": temperature, "max_tokens": max_tokens,
+            "thinking": thinking, "tools": list(tools), "skills": skills,
+            "subagents": list(subagents), "runtime_agents": runtime_agents,
+            "max_runtime_agents": max_runtime_agents,
+            "runtime_agent_tools": runtime_agent_tools, "memory": memory,
+            "trace": trace, "harness": harness, "hooks": hooks, "policy": policy,
+            "guardrails": guardrails, "budget": budget, "max_steps": max_steps,
+            "output_type": output_type, "workspace": workspace,
+            "allow_shell": allow_shell, "tool_choice": tool_choice,
+            "max_context_tokens": max_context_tokens, "compact_at": compact_at,
+            "compact_keep_last": compact_keep_last,
+            "compact_target": compact_target, "compactor": compactor,
+            "parallel_tools": parallel_tools,
+            "contract_retries": contract_retries, "stop": list(stop),
+            "persist_session": persist_session,
+        }
+        if self._versions:
+            if version not in self._versions:
+                raise ConfigurationError(
+                    f"{name}: version {version!r} is not defined; known: "
+                    f"{', '.join(sorted(self._versions)) or 'none'}")
+            active = self._versions[version]
+            instructions = (active.instructions if active.instructions is not None
+                            else instructions)
+            description = active.description or description
+            model = active.model or model
+            tier = active.tier or tier
+            effort = active.effort or effort
+            temperature = (active.temperature if active.temperature is not None
+                           else temperature)
+            max_tokens = active.max_tokens or max_tokens
+            max_steps = active.max_steps or max_steps
+            thinking = active.thinking if active.thinking is not None else thinking
+            compact_at = (active.compact_at if active.compact_at is not None
+                          else compact_at)
+            contract_retries = (active.contract_retries
+                                if active.contract_retries is not None
+                                else contract_retries)
+            runtime_agents = (active.runtime_agents
+                              if active.runtime_agents is not None
+                              else runtime_agents)
+            max_runtime_agents = (active.max_runtime_agents
+                                  if active.max_runtime_agents is not None
+                                  else max_runtime_agents)
+            budget = active.budget if active.budget is not None else budget
+            guardrails = (active.guardrails if active.guardrails is not None
+                          else guardrails)
+            if active.tools is not None:
+                wanted = set(active.tools)
+                tools = [t for t in tools
+                         if getattr(t, "name", getattr(t, "__name__", "")) in wanted]
+            if active.subagents is not None:
+                subagents = list(active.subagents)
         self.name = name
         self.description = description or f"{name} agent"
         self.instructions = (instructions.render() if isinstance(instructions, Prompt)
@@ -178,6 +247,8 @@ class Agent:
         self.policy = policy or self.harness.policy
         if guardrails is None or isinstance(guardrails, AgentGuardrails):
             self.guardrails: AgentGuardrails | None = guardrails
+        elif isinstance(guardrails, dict):
+            self.guardrails = AgentGuardrails(**guardrails)
         else:
             self.guardrails = AgentGuardrails(*guardrails)
 
@@ -241,6 +312,7 @@ class Agent:
                 f"{name}: runtime_agents is enabled but max_runtime_agents is 0 — "
                 "give it a budget between 1 and 100, or disable it"
             )
+        self._fallback_providers: dict[str, Any] = {}
         self._spawned = 0          # this run
         self.total_spawned = 0     # the lifetime of this agent
         self._factory: Any = None
@@ -268,6 +340,40 @@ class Agent:
     # ------------------------------------------------------------------
     # configuration
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # versions
+    # ------------------------------------------------------------------
+    @property
+    def version(self) -> str:
+        """Which version of this agent is running."""
+        return self._version
+
+    @property
+    def available_versions(self) -> list[str]:
+        return sorted(self._versions)
+
+    def use(self, version: str) -> Agent:
+        """This agent, configured as `version`. Built once, then reused.
+
+        The harness, provider and memory are shared, so switching versions is
+        cheap and two versions are directly comparable.
+        """
+        if version == self._version:
+            return self
+        if version not in self._versions:
+            raise ConfigurationError(
+                f"{self.name}: version {version!r} is not defined; known: "
+                f"{', '.join(self.available_versions) or 'none'}")
+        if version not in self._siblings:
+            sibling = Agent(self.name, version=version, versions=self._versions,
+                            **self._base_kwargs)
+            sibling._siblings = self._siblings
+            self._siblings[version] = sibling
+        return self._siblings[version]
+
+    def version_spec(self, version: str | None = None) -> AgentVersion | None:
+        return self._versions.get(version or self._version)
+
     @property
     def provider(self) -> Provider:
         if not isinstance(self._provider, Provider):
@@ -351,8 +457,14 @@ class Agent:
     # ------------------------------------------------------------------
     # running
     # ------------------------------------------------------------------
-    async def run(self, task: str | Message, **kwargs: Any) -> RunResult:
-        """Run to completion and return the result."""
+    async def run(self, task: str | Message, *, version: str | None = None,
+                  **kwargs: Any) -> RunResult:
+        """Run to completion and return the result.
+
+        `version="v1"` runs that version of this agent instead of the active one.
+        """
+        if version is not None and version != self._version:
+            return await self.use(version).run(task, **kwargs)
         result: RunResult | None = None
         async for event in self._drive(task, token_stream=False, **kwargs):
             if event.type == "run_end":
@@ -372,8 +484,11 @@ class Agent:
             "agent.run() instead"
         )
 
-    def stream(self, task: str | Message, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    def stream(self, task: str | Message, *, version: str | None = None,
+               **kwargs: Any) -> AsyncIterator[StreamEvent]:
         """Token-by-token events, ending with a `run_end` event carrying the result."""
+        if version is not None and version != self._version:
+            return self.use(version).stream(task, **kwargs)
         return self._drive(task, token_stream=True, **kwargs)
 
     async def _drive(
@@ -437,6 +552,10 @@ class Agent:
                               data={"task": task_text, "run_id": run_id})
 
             contract = self._contract_text()
+            # The last thing the model actually said. `final_text` is only set on
+            # a turn with no tool calls, but a run cut short mid-way still has
+            # work worth handing back.
+            last_text = ""
             retries_left = self.contract_retries
             guard_retries = self.guardrails.max_retries if self.guardrails else 0
             final_text = ""
@@ -490,6 +609,10 @@ class Agent:
                         raise ProviderError("no response from the model",
                                             provider=self.provider.name)
 
+                    # Capture what it said *before* charging for it: recording the
+                    # usage is what trips a budget, and work already done should
+                    # still be handed back.
+                    last_text = response.text or last_text
                     guard.record(response.usage, agent=self.name, task=task_text[:60])
                     result.usage += response.usage
                     span.set(cost_usd=result.usage.cost_usd)
@@ -552,7 +675,7 @@ class Agent:
                             raise OutputContractError(problem)
                         result.data = parsed
 
-                    violations = self._check_completion(final_text, result)
+                    violations = await self._check_completion(final_text, result)
                     # Always reassigned, so a successful retry clears what the
                     # previous attempt failed on.
                     result.violations = [v.line() for v in violations]
@@ -594,12 +717,42 @@ class Agent:
                                                            label=self.name)
                 result.output = final_text
 
-            except (BudgetExceeded, PermissionDenied, GuardrailTripped, ProviderError,
+            except BudgetExceeded as exc:
+                # A budget is a ceiling, not a failure. By default the run ends
+                # cleanly: what the agent produced is kept, and a note says why
+                # it stopped, so the caller (often a parent agent) gets an answer
+                # rather than an exception.
+                if guard.budget.on_exceed == "stop":
+                    result.output = self.content_guardrails.check(
+                        final_text or last_text or result.output,
+                        where="output", label=self.name)
+                    result.output = (result.output + self._budget_note(exc)).strip()
+                    result.stop_reason = "budget"
+                    result.budget_exceeded = exc.kind or "budget"
+                    await harness.journal.write(
+                        "budget", f"{self.name} stopped: {exc}", agent=self.name,
+                        run_id=run_id)
+                    harness.audit.record(self.name, "budget", target=exc.kind,
+                                         decision="stop", run_id=run_id,
+                                         limit=exc.limit, spent=exc.spent)
+                    yield StreamEvent(type="step_end", agent=self.name,
+                                      step=result.steps,
+                                      data={"budget_exceeded": exc.kind})
+                else:
+                    result.error = f"{type(exc).__name__}: {exc}"
+                    result.stop_reason = "error"
+                    result.output = result.output or final_text or last_text
+                    await harness.hooks.emit("error", agent=self.name,
+                                             run_id=run_id, error=exc)
+                    yield StreamEvent(type="error", agent=self.name,
+                                      text=result.error)
+
+            except (PermissionDenied, GuardrailTripped, ProviderError,
                     MaxStepsExceeded, OutputContractError, StopRequested,
                     ConfigurationError) as exc:
                 result.error = f"{type(exc).__name__}: {exc}"
                 result.stop_reason = "stopped" if isinstance(exc, StopRequested) else "error"
-                result.output = result.output or final_text
+                result.output = result.output or final_text or last_text
                 await self.hooks.emit("error", agent=self.name, run_id=run_id,
                                          error=exc)
                 await harness.journal.write("error", result.error, agent=self.name,
@@ -648,15 +801,49 @@ class Agent:
         estimated = sum(len(m.text) for m in request.messages) // 4
         await harness.rate.acquire(estimated)
 
+        chain = harness.router.chain(request.model)
+        for attempt, model in enumerate(chain):
+            request.model = model
+            provider = (self.provider if model == self.model
+                        else self._provider_for(model))
+            last = attempt == len(chain) - 1
+            try:
+                async for event in self._one_call(request, provider, step,
+                                                  token_stream):
+                    yield event
+                return
+            except (ProviderError, OSError) as exc:
+                if last or not _is_reachability_problem(exc):
+                    raise
+                await harness.journal.write(
+                    "fallback", f"{model} unreachable ({exc}); trying "
+                    f"{chain[attempt + 1]}", agent=self.name, run_id="")
+                harness.audit.record(self.name, "model_fallback", target=model,
+                                     decision="retry", to=chain[attempt + 1],
+                                     reason=str(exc)[:200])
+
+    def _provider_for(self, model: str) -> Any:
+        """The provider for a fallback model, cached per agent."""
+        if isinstance(self._provider, Provider):
+            return self._provider          # an explicit backend serves everything
+        cached = self._fallback_providers.get(model)
+        if cached is None:
+            cached = resolve_provider(None, model)
+            self._fallback_providers[model] = cached
+        return cached
+
+    async def _one_call(self, request: CompletionRequest, provider: Any, step: int,
+                        token_stream: bool) -> AsyncIterator[StreamEvent]:
+        harness = self.harness
         started = time.perf_counter()
         with harness.tracer.span(f"model:{request.model}", kind="model",
                                  step=step) as span:
             response: ModelResponse | None = None
             try:
                 if not token_stream:
-                    response = await self.provider.complete(request)
+                    response = await provider.complete(request)
                 else:
-                    async for event in self.provider.stream(request):
+                    async for event in provider.stream(request):
                         if event.type in ("text", "thinking"):
                             yield StreamEvent(type=event.type, text=event.text,
                                               agent=self.name, step=step)
@@ -670,7 +857,7 @@ class Agent:
                     if response is None:
                         raise ProviderError(
                             "the stream ended without a final response",
-                            provider=self.provider.name,
+                            provider=provider.name,
                         )
             except Exception as exc:
                 harness.health.record(
@@ -1071,18 +1258,28 @@ class Agent:
             self.memory.session.add_artifact(stored)
         return stored
 
-    def _check_completion(self, output: str, result: RunResult) -> list[Any]:
+    async def _check_completion(self, output: str, result: RunResult) -> list[Any]:
         """Has this agent done what it was required to do before answering?"""
         if self.guardrails is None or not self.guardrails.checks:
             return []
         called = [c.name for c in result.tool_calls]
         called += [c.name for child in result.children for c in child.tool_calls]
-        return self.guardrails.check(CompletionContext(
+        return await self.guardrails.check_async(CompletionContext(
             agent=self.name, output=output, steps=result.steps,
             cost_usd=result.cost_usd, tools_called=called,
             artifacts=[a.name for a in result.artifacts],
             data=result.data, result=result,
         ))
+
+    @staticmethod
+    def _budget_note(exc: BudgetExceeded) -> str:
+        """The line appended to partial work when a ceiling is reached."""
+        spent = (f"{exc.spent:,.0f}" if exc.spent >= 1 else f"{exc.spent}")
+        limit = (f"{exc.limit:,.0f}" if exc.limit >= 1 else f"{exc.limit}")
+        axis = (exc.kind or "budget").replace("_", " ")
+        return (f"\n\n[The budget for this agent is exceeded — {axis} "
+                f"{spent} of {limit}. The answer above is what it completed "
+                f"before stopping.]")
 
     def _contract_text(self) -> str:
         if self.output_type is None:
@@ -1113,6 +1310,20 @@ class Agent:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
         return f"<Agent {self.name} model={self.model} tools={len(self.tools)}>"
+
+
+#: A model we could not reach is worth retrying elsewhere. A 400 is not — the
+#: request is wrong, and the next model will reject it just the same.
+_REACHABILITY = (408, 429, 500, 502, 503, 504, 529)
+
+
+def _is_reachability_problem(exc: Exception) -> bool:
+    if isinstance(exc, OSError):
+        return True
+    status = getattr(exc, "status", None)
+    if status is None:
+        return True                     # a connection error carries no status
+    return status in _REACHABILITY
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)

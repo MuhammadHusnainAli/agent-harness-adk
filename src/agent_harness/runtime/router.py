@@ -51,12 +51,28 @@ class ModelRouter:
         rules: Iterable[RouteRule] = (),
         effort: dict[str, Effort] | None = None,
         chooser: Callable[[str], str | None] | None = None,
+        fallbacks: Iterable[str] = (),
+        max_attempts: int | None = None,
     ) -> None:
         self.tiers = {**DEFAULT_TIERS, **(tiers or {})}
         self.default = default or self.tiers["balanced"]
         self.rules = list(rules)
         self.effort = {**DEFAULT_EFFORT, **(effort or {})}
         self.chooser = chooser
+        #: Tried in order when the chosen model cannot be reached. A different
+        #: provider is the useful fallback — a second Anthropic model does not
+        #: help when Anthropic is the thing that is down.
+        self.fallbacks = list(fallbacks)
+        self.max_attempts = max_attempts
+
+    def chain(self, model: str) -> list[str]:
+        """The models to try, in order, starting with `model`."""
+        seen, out = set(), []
+        for candidate in [model, *self.fallbacks]:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                out.append(candidate)
+        return out[: self.max_attempts] if self.max_attempts else out
 
     def pick(self, *, model: str | None = None, tier: str | None = None,
              task: str = "") -> tuple[str, Effort | None]:

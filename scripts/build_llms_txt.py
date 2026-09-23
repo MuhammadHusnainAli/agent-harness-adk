@@ -119,7 +119,8 @@ def _own_methods(cls: type) -> list[tuple[str, Any]]:
 
 # Grouped the way the library is actually used, not alphabetically.
 GROUPS: list[tuple[str, list[str]]] = [
-    ("Core", ["Agent", "Harness", "Orchestrator", "Plan", "Task", "Review"]),
+    ("Core", ["Agent", "Harness", "Orchestrator", "Plan", "Task", "Review",
+              "AgentVersion", "Blueprint", "AgentEntry"]),
     ("Sub-agents", ["SubAgentSpec", "Bench", "SubAgentFactory", "SpecCompiler",
                     "CompiledSpec"]),
     ("Tools and skills", ["tool", "Tool", "ToolRegistry", "ToolContext", "Skill",
@@ -128,7 +129,13 @@ GROUPS: list[tuple[str, list[str]]] = [
                     "Violation", "Check", "RequireTools", "ForbidTools",
                     "MustInclude", "MustNotInclude", "MustMatch", "MinLength",
                     "MaxSteps", "MaxCost", "RequireCitation", "RequireJSON",
-                    "RequireStructured", "NoPlaceholders", "Custom"]),
+                    "RequireStructured", "NoPlaceholders", "Custom",
+                    "NoPII", "NoSecrets", "NoInjection", "NotToxic",
+                    "NoRepetition", "Grounded", "DetectorCheck",
+                    "PIIDetector", "SecretDetector", "InjectionDetector",
+                    "ToxicityDetector", "GroundednessDetector",
+                    "RepetitionDetector", "Finding", "LLMGuard", "LLMVerdict",
+                    "POLICIES"]),
     ("Prompts", ["Prompt", "PromptLibrary"]),
     ("Memory", ["MemoryManager", "Trace", "memory_provider", "available_backends",
                 "MemoryStore", "MemoryRecord", "InMemoryStore",

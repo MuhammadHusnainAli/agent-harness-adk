@@ -435,6 +435,113 @@ Both transports (stdio and streamable HTTP), tools, resources and prompts. A
 server that will not connect is reported in `mcp.errors`, not raised into your
 run. `allowed_tools` trims what a server may expose.
 
+## Budgets that stop instead of failing
+
+```python
+SubAgentSpec(name="researcher", description="Finds things out.",
+             budget=Budget(max_input_tokens=10_000, max_output_tokens=2_000))
+```
+
+Reaching a ceiling is not an error. The run ends cleanly, whatever the agent
+produced is kept, and a line is appended saying why it stopped:
+
+```
+I got through three of the five documents...
+
+[The budget for this agent is exceeded — output tokens 2,048 of 2,000.
+ The answer above is what it completed before stopping.]
+```
+
+The parent gets that as the sub-agent's result and carries on. `result.stop_reason`
+is `"budget"` and `result.budget_exceeded` names the axis. Pass
+`Budget(..., on_exceed="raise")` if you would rather it were an error.
+
+## When a model cannot be reached
+
+```python
+harness.router = ModelRouter(fallbacks=["claude-sonnet-5", "gpt-4.1"])
+```
+
+The loop walks the chain, resolving each model's provider as it goes. A 4xx is
+*not* retried elsewhere — the request is wrong and the next model will reject it
+the same way. Every switch lands in the journal and the audit trail.
+
+## Versions
+
+One agent, several configurations:
+
+```python
+agent = Agent(
+    "support",
+    tools=[order_status, issue_refund, lookup],
+    version="v2",
+    versions={
+        "v1": {"instructions": "Answer order questions.",
+               "tools": ["order_status"], "model": "claude-sonnet-5"},
+        "v2": {"instructions": "Answer order questions. Cite the order.",
+               "tools": ["order_status", "lookup"],
+               "guardrails": {"require_tools": ["order_status"]},
+               "model": "claude-opus-5"},
+    },
+)
+
+await agent.run(task)                  # v2
+await agent.run(task, version="v1")    # the old one, unchanged
+```
+
+A version says what is *different*; everything it leaves out falls through. The
+harness, provider and memory are shared, so switching is cheap and the two are
+comparable — run the same golden tasks against each:
+
+```python
+v1 = await suite.run(agent.use("v1"), label="v1")
+v2 = await suite.run(agent.use("v2"), label="v2")
+print(v2.compare(v1).render())
+```
+
+## Declaring it all in a file
+
+```yaml
+# agents.yaml
+defaults: {model: claude-opus-5}
+
+prompts:
+  house_style: Answer in plain sentences and cite the order.
+
+guardrails:
+  strict: {require_tools: [order_status], no_pii: true, no_placeholders: true}
+
+subagents:
+  researcher:
+    description: Finds things out, read-only.
+    instructions: "{house_style} Cite every claim."
+    tools: [lookup]
+    tier: fast
+    budget: {max_input_tokens: 10000, max_output_tokens: 2000}
+    guardrails: {require_citation: true}
+
+agents:
+  support:
+    instructions: "{house_style}"
+    tools: [order_status, lookup]
+    subagents: [researcher]
+    guardrails: strict
+    versions:
+      v1: {instructions: Answer order questions., tools: [order_status]}
+      v2: {instructions: "{house_style}"}
+```
+
+```python
+blueprint = Blueprint.from_file("agents.yaml")
+agent = blueprint.build("support", tools=[order_status, lookup])
+everything = blueprint.build_all(tools=[order_status, lookup])   # one harness
+```
+
+JSON works the same way. Tools stay in code — they *are* code — so you either
+hand them in or let the file name them as import paths
+(`myapp.tools:order_status`). Everything else is declaration, and belongs
+somewhere it can be reviewed and diffed.
+
 ## Guardrails: what an agent must do to be done
 
 The content engine (`Guardrails`) polices *text* — secrets, injection, size, on
@@ -476,6 +583,54 @@ Put it right and answer again.
 which is usually all it needs. `on_violation` decides what happens when it does
 not: `"retry"` (the default, up to `max_retries`), `"fail"` (stop the run), or
 `"warn"` (deliver it, record the problem in `result.violations`).
+
+### Deterministic detectors
+
+Exact where they can be, so you can leave them switched on:
+
+```python
+AgentGuardrails(no_pii=True, no_secrets=True, no_injection=True,
+                grounded=0.6, not_toxic=True, no_repetition=True)
+```
+
+| Detector | What makes it usable |
+|---|---|
+| `PIIDetector` | cards are Luhn-checked, IBANs mod-97-checked, and matches are precedence-ordered — a card is never also reported as a phone number |
+| `SecretDetector` | known key formats, plus Shannon entropy for keys nobody has published a pattern for |
+| `InjectionDetector` | weighted signals scored 0-1, because one suspicious phrase is weak evidence and three together are not |
+| `GroundednessDetector` | which content words in the answer appear nowhere in the sources |
+| `ToxicityDetector` | a screen, including character substitution — not a classifier |
+| `RepetitionDetector` | n-gram repetition, for a model looping on itself |
+
+They report *findings* with a severity, a confidence and the spans they matched,
+so `PIIDetector().redact(text)` removes exactly the value and leaves the sentence.
+
+### LLM judges
+
+For what an algorithm cannot decide:
+
+```python
+from agent_harness import LLMGuard, POLICIES
+
+rails = AgentGuardrails(
+    LLMGuard(cheap_agent, POLICIES["safety"]),
+    LLMGuard(cheap_agent, "never name a competitor", block_at="high"),
+    no_pii=True,            # the deterministic checks run first
+)
+```
+
+Three things this gets right:
+
+- **A structured verdict.** The judge returns JSON with a severity, not a mood,
+  and a judge that will not answer in JSON has failed rather than passed.
+- **It fails the way you choose.** `on_error="block"` (the default), `"allow"`
+  or `"raise"`. A guard that silently passes when it breaks is not a guard.
+- **Cheap checks first.** `check_async` runs the deterministic checks and only
+  pays for a judge if they are all happy — no reason to spend a model call
+  confirming what a regex just proved.
+
+Ready policies: `safety`, `pii`, `relevance`, `groundedness`, `jailbreak`,
+`tone`, `compliance`. Or pass your own sentence.
 
 The checks ship as objects, so you can compose them directly or write your own:
 

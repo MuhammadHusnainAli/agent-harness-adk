@@ -35,8 +35,31 @@ from .checks import (
     Violation,
     as_checks,
 )
+from .detectors import (
+    Detector,
+    Finding,
+    GroundednessDetector,
+    InjectionDetector,
+    PIIDetector,
+    RepetitionDetector,
+    SecretDetector,
+    ToxicityDetector,
+    iban_valid,
+    luhn_valid,
+    shannon_entropy,
+)
 from .engine import Guardrails
+from .llm import POLICIES, LLMGuard, LLMVerdict
 from .rules import INJECTION_RULES, SECRET_RULES, Action, Rule
+from .standard import (
+    DetectorCheck,
+    Grounded,
+    NoInjection,
+    NoPII,
+    NoRepetition,
+    NoSecrets,
+    NotToxic,
+)
 
 __all__ = [
     # content
@@ -66,4 +89,28 @@ __all__ = [
     "RequireStructured",
     "NoPlaceholders",
     "Custom",
+    # detectors
+    "Detector",
+    "Finding",
+    "PIIDetector",
+    "SecretDetector",
+    "InjectionDetector",
+    "ToxicityDetector",
+    "GroundednessDetector",
+    "RepetitionDetector",
+    "luhn_valid",
+    "iban_valid",
+    "shannon_entropy",
+    # detector-backed checks
+    "NoPII",
+    "NoSecrets",
+    "NoInjection",
+    "NotToxic",
+    "NoRepetition",
+    "Grounded",
+    "DetectorCheck",
+    # llm judges
+    "LLMGuard",
+    "LLMVerdict",
+    "POLICIES",
 ]

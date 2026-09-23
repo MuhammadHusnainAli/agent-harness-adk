@@ -21,6 +21,7 @@ MCP servers and the runtime rails as the job needs them.
 from __future__ import annotations
 
 from .agent import Agent
+from .blueprint import AgentEntry, Blueprint
 from .context import ContextAssembler, ContextCompactor, estimate_tokens
 from .errors import (
     BudgetExceeded,
@@ -47,22 +48,39 @@ from .evaluation import (
     llm_judge,
 )
 from .guardrails import (
+    POLICIES,
     AgentGuardrails,
     Check,
     CompletionContext,
     Custom,
+    DetectorCheck,
+    Finding,
     ForbidTools,
+    Grounded,
+    GroundednessDetector,
+    InjectionDetector,
+    LLMGuard,
+    LLMVerdict,
     MaxCost,
     MaxSteps,
     MinLength,
     MustInclude,
     MustMatch,
     MustNotInclude,
+    NoInjection,
+    NoPII,
     NoPlaceholders,
+    NoRepetition,
+    NoSecrets,
+    NotToxic,
+    PIIDetector,
+    RepetitionDetector,
     RequireCitation,
     RequireJSON,
     RequireStructured,
     RequireTools,
+    SecretDetector,
+    ToxicityDetector,
     Violation,
 )
 from .harness import Harness
@@ -154,6 +172,7 @@ from .types import (
     ToolUseBlock,
     Usage,
 )
+from .versioning import AgentVersion
 
 __version__ = "0.1.1"
 
@@ -187,6 +206,7 @@ __all__ = [
     "Review",
     # sub-agents
     "SubAgentSpec",
+    "AgentVersion",
     "Bench",
     "SubAgentFactory",
     # tools and skills
@@ -245,6 +265,8 @@ __all__ = [
     # spec compilation
     "SpecCompiler",
     "CompiledSpec",
+    "Blueprint",
+    "AgentEntry",
     # guardrails
     "AgentGuardrails",
     "CompletionContext",
@@ -263,6 +285,23 @@ __all__ = [
     "RequireStructured",
     "NoPlaceholders",
     "Custom",
+    "NoPII",
+    "NoSecrets",
+    "NoInjection",
+    "NotToxic",
+    "NoRepetition",
+    "Grounded",
+    "DetectorCheck",
+    "PIIDetector",
+    "SecretDetector",
+    "InjectionDetector",
+    "ToxicityDetector",
+    "GroundednessDetector",
+    "RepetitionDetector",
+    "Finding",
+    "LLMGuard",
+    "LLMVerdict",
+    "POLICIES",
     # runtime rails
     "Budget",
     "BudgetGuard",

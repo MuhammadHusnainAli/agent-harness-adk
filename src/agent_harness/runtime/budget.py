@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict, deque
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -15,18 +16,34 @@ __all__ = ["Budget", "BudgetGuard", "RateLimit", "RateGuard"]
 
 
 class Budget(BaseModel):
-    """Ceilings for one run. `None` means no limit on that axis."""
+    """Ceilings for one run. `None` means no limit on that axis.
+
+        Budget(max_input_tokens=10_000, max_output_tokens=2_000)
+
+    `on_exceed` decides what hitting one means. The default, `"stop"`, ends the
+    run cleanly: whatever the agent produced is kept, a note saying the budget
+    ran out is appended, and the caller gets a result rather than an exception.
+    `"raise"` makes it an error instead.
+    """
 
     max_usd: float | None = None
     max_tokens: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
     max_steps: int | None = None
     max_seconds: float | None = None
     max_tool_calls: int | None = None
     max_subagents: int | None = None
+    on_exceed: Literal["stop", "raise"] = "stop"
 
     @classmethod
     def unlimited(cls) -> Budget:
         return cls()
+
+    @property
+    def is_set(self) -> bool:
+        return any(getattr(self, f) is not None for f in type(self).model_fields
+                   if f != "on_exceed")
 
 
 class BudgetGuard:
@@ -96,6 +113,20 @@ class BudgetGuard:
                 f"token cap reached: {self.usage.total_tokens} of {b.max_tokens}",
                 kind="tokens", limit=b.max_tokens, spent=self.usage.total_tokens,
             )
+        if (b.max_input_tokens is not None
+                and self.usage.input_tokens > b.max_input_tokens):
+            raise BudgetExceeded(
+                f"input-token cap reached: {self.usage.input_tokens} of "
+                f"{b.max_input_tokens}", kind="input_tokens",
+                limit=b.max_input_tokens, spent=self.usage.input_tokens,
+            )
+        if (b.max_output_tokens is not None
+                and self.usage.output_tokens > b.max_output_tokens):
+            raise BudgetExceeded(
+                f"output-token cap reached: {self.usage.output_tokens} of "
+                f"{b.max_output_tokens}", kind="output_tokens",
+                limit=b.max_output_tokens, spent=self.usage.output_tokens,
+            )
         if b.max_seconds is not None and self.elapsed > b.max_seconds:
             raise BudgetExceeded(f"deadline passed after {self.elapsed:.1f}s",
                                  kind="seconds", limit=b.max_seconds, spent=self.elapsed)
@@ -109,6 +140,35 @@ class BudgetGuard:
         if self.budget.max_usd is None:
             return None
         return max(self.budget.max_usd - self.usage.cost_usd, 0.0)
+
+    def remaining(self) -> dict[str, float]:
+        """What is left on each axis that has a ceiling."""
+        b, u = self.budget, self.usage
+        left: dict[str, float] = {}
+        if b.max_usd is not None:
+            left["usd"] = max(b.max_usd - u.cost_usd, 0.0)
+        if b.max_tokens is not None:
+            left["tokens"] = max(b.max_tokens - u.total_tokens, 0)
+        if b.max_input_tokens is not None:
+            left["input_tokens"] = max(b.max_input_tokens - u.input_tokens, 0)
+        if b.max_output_tokens is not None:
+            left["output_tokens"] = max(b.max_output_tokens - u.output_tokens, 0)
+        if b.max_steps is not None:
+            left["steps"] = max(b.max_steps - self.steps, 0)
+        if b.max_seconds is not None:
+            left["seconds"] = max(b.max_seconds - self.elapsed, 0.0)
+        return left
+
+    def would_exceed(self, estimated_input: int = 0) -> str:
+        """Which ceiling the next call would cross, before it is made."""
+        b = self.budget
+        if (b.max_input_tokens is not None
+                and self.usage.input_tokens + estimated_input > b.max_input_tokens):
+            return "input_tokens"
+        if (b.max_tokens is not None
+                and self.usage.total_tokens + estimated_input > b.max_tokens):
+            return "tokens"
+        return ""
 
     def child(self, budget: Budget | None = None) -> BudgetGuard:
         """A sub-agent's guard: its own caps, but spend rolls up to the parent."""
