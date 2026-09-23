@@ -257,6 +257,7 @@ class RunResult(BaseModel):
     run_id: str = Field(default_factory=lambda: new_id("run"))
     trace_id: str = ""
     error: str | None = None
+    violations: list[str] = Field(default_factory=list)
     children: list[RunResult] = Field(default_factory=list)
 
     @property

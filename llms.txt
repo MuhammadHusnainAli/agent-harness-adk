@@ -1,0 +1,51 @@
+# agent-harness-adk
+
+> A fast, lightweight harness for building production AI agents: agents, sub-agents, skills, prompts, tools, MCP, memory and the runtime rails underneath them.
+
+Installed as `agent-harness-adk`, imported as `agent_harness`. Python 3.10-3.14. Three runtime dependencies (pydantic, httpx, pyyaml), no vendor SDKs: the Anthropic, OpenAI and Gemini adapters speak HTTP directly, so all three share one retry, cost-accounting and tracing path.
+
+```python
+from agent_harness import Agent, tool
+
+@tool
+def order_status(order_id: str) -> str:
+    """Look up a customer order.
+
+    Args:
+        order_id: the order number.
+    """
+    return db.lookup(order_id)
+
+agent = Agent("support", "Answer order questions.", tools=[order_status])
+print(agent.run_sync("Where is order 4182?").output)
+```
+
+What it covers: the agent loop (think, act, observe), sub-agents from a reusable bench or written at run time by a factory, skills with progressive disclosure, versioned prompts, four memory scopes, MCP over stdio and HTTP, and the runtime rails underneath all of it - permissions, budgets, rate limits, hooks, guardrails, tracing, an immutable audit trail, service health, checkpoints, deterministic replay, isolated workspaces and quality evaluation.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/README.md): The full API tour with runnable snippets: agents, sub-agents, skills, prompts, tools, MCP, memory and the runtime rails.
+- [Changelog](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/CHANGELOG.md): What changed in each release.
+- [Contributing](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/CONTRIBUTING.md): Development setup, the testing pattern, and the constraints this project holds to (three dependencies, ~100 ms import, Python 3.10 floor).
+- [Security policy](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/SECURITY.md): How to report a vulnerability, what counts as one for an agent library, and how to run agents safely.
+- [Support](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/SUPPORT.md): Where questions, bugs and feature requests go.
+- [Releasing](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/RELEASING.md): How a release is cut and published to PyPI.
+- [Code of conduct](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/CODE_OF_CONDUCT.md): Contributor Covenant 2.1.
+
+## Examples
+
+Every example runs without an API key - they fall back to a scripted `FakeProvider`.
+
+- [01_quickstart](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/01_quickstart.py): An agent with one tool — the smallest useful thing.
+- [02_subagents](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/02_subagents.py): A manager delegating to sub-agents in parallel, with per-sub-agent cost.
+- [03_skills_and_memory](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/03_skills_and_memory.py): Skills loaded from disk, and memory that outlives the session.
+- [04_rails](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/04_rails.py): Permissions, budget, hooks, guardrails, tracing and the run journal.
+- [05_orchestrator](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/05_orchestrator.py): The whole pipeline: plan, staff, run in parallel, consolidate, review.
+- [06_assurance](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/06_assurance.py): Stop control, audit trail, health, replay and quality evaluation.
+
+## Optional
+
+- [Full documentation in one file](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/llms-full.txt): this index, every document above, the complete API reference and every example, concatenated.
+- [PyPI](https://pypi.org/project/agent-harness-adk/): released versions.
+- [Source](https://github.com/MuhammadHusnainAli/agent-harness-adk): the repository.
+- [Issues](https://github.com/MuhammadHusnainAli/agent-harness-adk/issues): bugs and feature requests.

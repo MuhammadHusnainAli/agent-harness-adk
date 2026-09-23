@@ -8,18 +8,19 @@ only then accepts the work against the definition of done it wrote up front.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Iterable, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .agent import Agent
+from .agent import Agent, _agent_count
 from .harness import Harness
 from .prompts import Prompt
 from .providers.base import model_info
 from .runtime.budget import Budget
-from .subagent import Bench, SubAgentFactory, SubAgentSpec, build_agent
+from .subagents import Bench, SubAgentFactory, SubAgentSpec, build_agent
 from .tools import Tool
 from .types import Artifact, RunResult, Usage, new_id
 
@@ -39,9 +40,15 @@ class Task(BaseModel):
     reused: bool = True
     status: TaskStatus = "pending"
     output: str = ""
+    partial: str = ""          # kept when a task fails or runs out of time
     error: str | None = None
     cost_usd: float = 0.0
     attempts: int = 0
+
+    @property
+    def usable_output(self) -> str:
+        """What consolidation can work with — the result, or what got done."""
+        return self.output or self.partial
 
 
 class Plan(BaseModel):
@@ -196,6 +203,10 @@ class Orchestrator:
         review: bool = True,
         use_factory: bool = True,
         task_retries: int = 1,
+        task_timeout: float | None = None,
+        runtime_agents: bool | str = True,
+        max_runtime_agents: int = 20,
+        compact_at: int | float | None = None,
         instructions: str = "",
     ) -> None:
         self.harness = harness or Harness()
@@ -210,14 +221,21 @@ class Orchestrator:
         self.max_rework = max_rework
         self.review_enabled = review
         self.task_retries = task_retries
+        self.task_timeout = task_timeout
 
+        # The manager owns the staffing decision through `staff()`, so it does not
+        # need the spawn tool as well — `use_factory` is that switch. The knobs are
+        # here so an orchestrator built by hand can be tuned like any other agent.
         self.manager = Agent(
             name, instructions or _MANAGER_INSTRUCTIONS, description=(
                 "Owns the goal, the plan, the budget and the answer for one job."
             ),
             model=model, provider=provider, tier=tier, harness=self.harness,
-            tools=tools, memory=True, max_steps=4,
+            tools=tools, memory=True, max_steps=4, compact_at=compact_at,
+            runtime_agents=runtime_agents and use_factory,
+            max_runtime_agents=max_runtime_agents,
         )
+        self.max_runtime_agents = _agent_count(max_runtime_agents)
         self.planner = Agent(
             f"{name}.planner", "You plan work. You do not do the work.",
             model=model, provider=provider, tier=tier, harness=self.harness,
@@ -325,22 +343,46 @@ class Orchestrator:
         brief = self._brief(task, request, context)
 
         for attempt in range(1, self.task_retries + 2):
+            if not self.harness.control.may_start():
+                task.status = "skipped"
+                task.error = "the run was stopped"
+                return task
+
             task.attempts = attempt
             task.status = "running"
-            result: RunResult = await worker.run(
-                brief, messages=[], guard=self.harness.guard.child(),
-            )
+            try:
+                coro = worker.run(brief, messages=[],
+                                  guard=self.harness.guard.child())
+                result: RunResult = (
+                    await asyncio.wait_for(coro, self.task_timeout)
+                    if self.task_timeout else await coro
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                task.error = f"missed its {self.task_timeout}s deadline"
+                await self.harness.journal.write("timeout", task.error,
+                                                 agent=worker.name)
+                if attempt > self.task_retries:
+                    break
+                continue
+
             task.cost_usd = round(task.cost_usd + result.cost_usd, 6)
+            # Partial delivery is kept: a task that failed halfway still leaves
+            # something consolidation can use, and something you can debug from.
+            if result.output:
+                task.partial = result.output
+            if result.artifacts:
+                self.harness.deliverables.extend(result.artifacts, run_id=task.id)
+            if self.manager.memory:
+                await self.manager.memory.orchestrator.spend(
+                    worker.name, result.cost_usd, result.usage.total_tokens
+                )
             if not result.error:
                 task.output = result.output
                 task.status = "done"
                 self._results[task.id] = result
-                if self.manager.memory:
-                    await self.manager.memory.orchestrator.spend(
-                        worker.name, result.cost_usd, result.usage.total_tokens
-                    )
                 return task
             task.error = result.error
+            self._results.setdefault(task.id, result)
             if attempt > self.task_retries:
                 break
         task.status = "failed"
@@ -351,8 +393,10 @@ class Orchestrator:
         parts: list[str] = []
         for dep_id in task.depends_on:
             dep = plan.by_id(dep_id)
-            if dep and dep.output:
-                parts.append(f"### Result of {dep_id} ({dep.statement})\n{dep.output}")
+            if dep and dep.usable_output:
+                note = "" if dep.output else " — partial, this task did not finish"
+                parts.append(f"### Result of {dep_id} ({dep.statement}){note}\n"
+                             f"{dep.usable_output}")
         return "\n\n".join(parts)
 
     @staticmethod
@@ -371,13 +415,30 @@ class Orchestrator:
         """Run the task graph, many at once where the dependencies allow it."""
         self._results: dict[str, RunResult] = getattr(self, "_results", {})
         for wave in plan.waves():
+            if not self.harness.control.may_start():
+                for task in plan.tasks:
+                    if task.status == "pending":
+                        task.status = "skipped"
+                        task.error = "the run was stopped"
+                break
             runnable = [t for t in wave if t.status == "pending"]
             if not runnable:
                 continue
             with self.harness.tracer.span(f"wave:{len(runnable)}", kind="step"):
-                await self.harness.scheduler.map(
+                outcomes = await self.harness.scheduler.map(
                     lambda t: self._run_task(t, plan, request), runnable
                 )
+            # An unexpected exception must not leave a task stuck in "running"
+            # with the job reporting itself finished.
+            for task, outcome in zip(runnable, outcomes, strict=False):
+                if isinstance(outcome, BaseException):
+                    task.status = "failed"
+                    task.error = f"{type(outcome).__name__}: {outcome}"
+                    await self.harness.journal.write("error", task.error,
+                                                     agent=task.agent or "unstaffed")
+                elif task.status == "running":  # pragma: no cover - belt and braces
+                    task.status = "failed"
+                    task.error = task.error or "the task ended without a result"
             for task in plan.tasks:
                 if task.status == "pending" and any(
                     (plan.by_id(d) or Task(id=d, statement="")).status == "failed"
@@ -391,15 +452,18 @@ class Orchestrator:
     # 4 — consolidate, review, accept or rework
     # ------------------------------------------------------------------
     async def consolidate(self, plan: Plan, request: str) -> str:
-        done = [t for t in plan.tasks if t.status == "done"]
-        if not done:
+        usable = [t for t in plan.tasks if t.usable_output]
+        if not usable:
             return ""
-        if len(done) == 1 and len(plan.tasks) == 1:
-            return done[0].output
+        # A single finished task is the answer. A single *partial* one is not —
+        # it goes through consolidation so it is framed as what it actually is.
+        if len(usable) == 1 and len(plan.tasks) == 1 and usable[0].status == "done":
+            return usable[0].usable_output
         body = "\n\n".join(
-            f"### {t.id} — {t.agent} ({'reused' if t.reused else 'purpose-built'})\n"
-            f"Task: {t.statement}\n{t.output}"
-            for t in done
+            f"### {t.id} — {t.agent} ({'reused' if t.reused else 'purpose-built'})"
+            + ("" if t.status == "done" else " [PARTIAL — this task did not finish]")
+            + f"\nTask: {t.statement}\n{t.usable_output}"
+            for t in usable
         )
         with self.harness.tracer.span("orchestrator:consolidate", kind="step"):
             result = await self.manager.run(
@@ -438,14 +502,17 @@ class Orchestrator:
         self._results = {}
         result = RunResult(agent=self.manager.name, run_id=run_id)
 
+        # Bound before the try: a failure while planning must still leave the
+        # artefact and reporting path below with something to work with.
+        deliverable = ""
+        review = Review()
+
         with self.harness.tracer.span(f"job:{self.manager.name}", kind="run") as span:
             result.trace_id = span.trace_id
             await self.harness.journal.assignment(self.manager.name, request[:500],
                                                   run_id=run_id)
             try:
                 plan = plan or await self.plan(request)
-                deliverable = ""
-                review = Review()
 
                 for round_no in range(self.max_rework + 1):
                     await self.execute(plan, request)
@@ -479,6 +546,14 @@ class Orchestrator:
             content=(plan.model_dump_json(indent=2) if plan else "{}"),
             produced_by=self.manager.name,
         ))
+        if deliverable:
+            result.artifacts.append(Artifact(
+                name="deliverable.md", content=deliverable,
+                media_type="text/markdown", produced_by=self.manager.name,
+            ))
+        # The output of the run belongs in the deliverable store, not only in the
+        # result object the caller happens to be holding.
+        self.harness.deliverables.extend(result.artifacts, run_id=run_id)
         await self.harness.journal.handback(
             self.manager.name, (result.output or result.error or "")[:500],
             run_id=run_id, cost_usd=result.cost_usd,
@@ -487,7 +562,6 @@ class Orchestrator:
         return result
 
     def run_sync(self, request: str, **kw: Any) -> RunResult:
-        import asyncio
         return asyncio.run(self.run(request, **kw))
 
     def report(self) -> dict[str, Any]:

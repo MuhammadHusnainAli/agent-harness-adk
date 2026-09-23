@@ -4,6 +4,107 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Completes the architecture in `preview-01.png` — every box in the diagram now has
+a working implementation, and `tests/test_harness_completeness.py` fails if one
+goes missing.
+
+### Added
+
+**Agent**
+- `runtime_agents` (`"enable"` / `"disable"` / bool) and `max_runtime_agents`
+  (0-100) — an agent can write and run its own specialists mid-run through the
+  factory, via a `spawn_agent` tool. Call it several times in one turn and they
+  run in parallel. The budget is per run, does not cascade to spawned agents,
+  is audited, counts against `Budget(max_subagents=...)`, and is refused once
+  the run is stopped. `runtime_agent_tools` caps what any of them may be given.
+- `compact_at` — where context compaction kicks in, as an absolute token count
+  (`10_000`) or a fraction of the model's window (`0.5`). With
+  `compact_keep_last`, `compact_target`, and `compactor=` to replace the
+  strategy outright.
+- `Orchestrator` takes `runtime_agents`, `max_runtime_agents` and `compact_at`
+  and passes them to its manager.
+
+**Guardrails you can put on one agent** — new `agent_harness.guardrails` package
+- `AgentGuardrails` — what an agent may touch and what must be true before its
+  answer is accepted. A forbidden tool is refused before it runs; everything
+  else is checked at completion, and an unmet requirement sends the agent back
+  round with a plain-English note about what is missing (`on_violation` is
+  `"retry"`, `"fail"` or `"warn"`).
+- Checks: `RequireTools`, `ForbidTools`, `MustInclude`, `MustNotInclude`,
+  `MustMatch`, `MinLength`, `RequireCitation`, `RequireJSON`,
+  `RequireStructured`, `NoPlaceholders`, `MaxSteps`, `MaxCost`, `Custom`.
+- `SubAgentSpec.guardrails` carries them in serialisable form, so a sub-agent's
+  requirements travel with its blueprint.
+- `AgentGuardrails(content=Guardrails(...))` gives one agent stricter text rules
+  than the harness default; `RunResult.violations` records what was unmet.
+
+**Packages**
+- `agent_harness.subagents` (spec, bench, factory, builder) and
+  `agent_harness.guardrails` (rules, engine, checks, per-agent) are now packages
+  rather than single modules. `agent_harness.subagent` and
+  `agent_harness.runtime.guardrails` still re-export everything, so existing
+  imports keep working.
+
+**Assurance & control**
+- `StopController` — abort a run and drain the sub-agents. The loop checks
+  between steps and before every tool, so a stop lands at a safe boundary and
+  finished work is kept. `harness.stop(reason)` is audited.
+- `AuditTrail` — immutable, hash-chained who-did-what. Every permission
+  decision, run start and run end is recorded; `verify()` names the first
+  tampered or deleted entry. Secrets are redacted before anything is written.
+- `ServiceHealth` — latency (p50/p95), failure rate and in-flight count per
+  model, tool and MCP server, plus scheduler saturation.
+- `Replayer`, `RecordingProvider`, `ReplayProvider` — record a run once, then
+  reproduce it exactly with no network and no spend; or travel back to any step
+  and continue from there with a changed prompt.
+- `Evaluator`, `GoldenTask`, `Expect`, `EvalReport`, `Comparison`, `llm_judge` —
+  golden tasks, weighted scoring and regression comparison against a saved
+  baseline. Expectations cover text, tools called, structured output, step count
+  and cost.
+
+**Runtime**
+- `RateGuard` / `RateLimit` — requests- and tokens-per-minute pacing that waits
+  rather than failing.
+- `DeliverableStore` — versioned, digested artefacts with a manifest; wired into
+  `Agent.produce()`, sub-agent hand-backs and the orchestrator's output.
+- `SpecCompiler` / `CompiledSpec` — a sub-agent blueprint resolved into the exact
+  provider payload, with a cost estimate and an `explain()` you can read before
+  spending anything.
+
+**Tooling**
+- `parse_document` — text, Markdown, CSV, TSV, JSON, JSONL, HTML and XML with no
+  dependencies; PDF, DOCX and OCR through an optional install each, each naming
+  the exact `pip install` when absent.
+- `bar_chart`, `line_chart`, `markdown_table`, `render_report` — dependency-free
+  inline SVG that works in light and dark, with a colour-vision-validated
+  categorical palette, direct value labels and a legend.
+- `make_python_tool` — sandboxed compute inside the workspace; asks for approval
+  every time.
+
+**Orchestrator**
+- `task_timeout` — a deadline per sub-agent, with retry.
+- Partial delivery is kept: a task that produced something before failing still
+  contributes to consolidation, marked as partial, and dependent tasks are told
+  their input is incomplete.
+
+### Fixed
+
+- A worker crashing with an unexpected exception left its task stuck in
+  `running` while the job reported itself finished; it is now marked failed with
+  the error.
+- A failure during planning raised `NameError` from the artefact path instead of
+  being reported as a failed run.
+- A single *partial* task was presented as the finished answer; it now goes
+  through consolidation so it is framed as what it is.
+- The orchestrator's own artefacts (`plan.json`, `deliverable.md`) never reached
+  the deliverable store.
+- Bar charts: the value label on a negative bar collided with the category label
+  when the bar reached the plot floor.
+- The `delegate` tool's schema listed only the sub-agents present when it was
+  first built, hiding every one attached afterwards.
+
 ## [0.1.0] — 2026-09-23
 
 The first release. Published as `agent-harness-adk`, imported as `agent_harness`.
@@ -70,4 +171,5 @@ The first release. Published as `agent-harness-adk`, imported as `agent_harness`
 - Typed (`py.typed`), three runtime dependencies, ~100 ms import.
 - 150 tests, green on Python 3.10 through 3.14.
 
+[Unreleased]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/MuhammadHusnainAli/agent-harness-adk/releases/tag/v0.1.0

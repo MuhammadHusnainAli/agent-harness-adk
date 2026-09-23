@@ -1,0 +1,64 @@
+name: Feature request
+description: Something the harness should be able to do and cannot
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This library stays small on purpose — three runtime dependencies and a
+        ~100 ms import. The most useful requests explain the problem, not just
+        the feature, so we can look for the lightest thing that solves it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+      placeholder: |
+        I want sub-agent results ranked before consolidation, but the
+        orchestrator merges them in completion order.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do about it now
+      description: >
+        The workaround, if you have one — a hook, a custom tool, a subclass. It
+        often shows where the real seam should be.
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: Sketch the API if you have one in mind.
+      render: python
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Agent / loop
+        - Sub-agents / orchestrator
+        - Tools
+        - Skills / prompts
+        - Memory
+        - MCP
+        - Providers
+        - Rails (permissions, budget, hooks, guardrails, tracing)
+        - Workspaces / sessions / checkpoints
+        - CLI
+        - Docs
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: dependencies
+    attributes:
+      label: Dependencies
+      options:
+        - label: This would need a new runtime dependency
+        - label: I would be willing to open a pull request for this

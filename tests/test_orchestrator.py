@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import json
 
-from agent_harness import Budget, FakeProvider, Harness, Orchestrator, SubAgentSpec
+from agent_harness import (
+    Budget,
+    FakeProvider,
+    Harness,
+    Orchestrator,
+    SubAgentSpec,
+)
 from agent_harness.orchestrator import Plan, Task
 
 PLAN = {
@@ -154,3 +160,146 @@ async def test_the_report_shows_spend_and_concurrency():
     report = boss.report()
     assert report["budget"]["calls"] > 0
     assert report["scheduler"]["completed"] >= 3   # every task went through the pool
+
+
+async def test_a_failure_while_planning_is_reported_not_raised():
+    """The manager reports; it never crashes the caller — even on the first step."""
+    class Exploding(FakeProvider):
+        async def complete(self, req):
+            raise RuntimeError("the planner exploded")
+
+    provider = Exploding()
+    harness = Harness.testing(provider)
+    boss = Orchestrator("boss", harness=harness, provider=provider,
+                        model="claude-sonnet-5")
+
+    result = await boss.run("do something")
+    assert not result.ok
+    assert "exploded" in result.error
+    assert result.output == ""
+    # The plan artefact is still written, so there is something to debug from.
+    assert any(a.name == "plan.json" for a in result.artifacts)
+
+
+async def test_the_deliverable_is_stored_as_an_artefact():
+    boss = build()
+    result = await boss.run("write the quarterly summary")
+    names = {a.name for a in result.artifacts}
+    assert {"plan.json", "deliverable.md"} <= names
+    stored = boss.harness.deliverables
+    assert stored.get("deliverable.md").content == "THE QUARTERLY SUMMARY"
+
+
+async def test_a_task_that_misses_its_deadline_is_retried_then_given_up_on():
+    import asyncio
+    import json as _json
+
+    class Slow(FakeProvider):
+        async def complete(self, req):
+            text = req.messages[-1].text
+            if "costed plan" in text:
+                return await super().complete(req)
+            await asyncio.sleep(2)
+            return await super().complete(req)
+
+    one_task = {"goal": "g", "definition_of_done": [],
+                "tasks": [{"id": "t1", "statement": "Research it", "depends_on": []}]}
+    provider = Slow([lambda req: _json.dumps(one_task)
+                     if "costed plan" in req.messages[-1].text else "too late"],
+                    loop=True)
+    harness = Harness.testing(provider)
+    boss = Orchestrator("boss", harness=harness, provider=provider,
+                        model="claude-sonnet-5", task_timeout=0.1, task_retries=1,
+                        review=False)
+
+    result = await boss.run("do the slow thing")
+    plan = Plan(**result.data["plan"])
+    task = plan.by_id("t1")
+    assert task.status == "failed"
+    assert "deadline" in task.error
+    assert task.attempts == 2          # tried once, retried once, then gave up
+
+
+def test_a_task_falls_back_to_its_partial_output():
+    task = Task(id="t1", statement="s")
+    assert task.usable_output == ""
+    task.partial = "half an answer"
+    assert task.usable_output == "half an answer"
+    task.output = "the whole answer"
+    assert task.usable_output == "the whole answer"
+
+
+def test_a_dependent_task_is_told_when_its_input_is_partial():
+    plan = Plan(goal="g", tasks=[
+        Task(id="t1", statement="Research it", status="failed",
+             partial="found two of the three figures"),
+        Task(id="t2", statement="Write it up", depends_on=["t1"]),
+    ])
+    context = build()._context_for(plan.by_id("t2"), plan)
+    assert "found two of the three figures" in context
+    assert "partial, this task did not finish" in context
+
+
+async def test_partial_work_from_a_failed_task_is_kept_and_consolidated():
+    """A task that produced something before failing still contributes."""
+    import json as _json
+
+    one = {"goal": "g", "definition_of_done": [],
+           "tasks": [{"id": "t1", "statement": "Extract the totals",
+                      "depends_on": []}]}
+
+    def respond(request):
+        text = request.messages[-1].text
+        if "costed plan" in text:
+            return _json.dumps(one)
+        if "Consolidate these sub-agent results" in text:
+            assert "PARTIAL" in text          # the manager was told it is partial
+            assert "I found 2 of 3 totals" in text
+            return "consolidated from partial work"
+        return "I found 2 of 3 totals but could not finish."
+
+    provider = FakeProvider([respond], loop=True)
+    harness = Harness.testing(provider)
+    boss = Orchestrator("boss", harness=harness, provider=provider,
+                        model="claude-sonnet-5", review=False, task_retries=0)
+    # A worker with an output contract it cannot satisfy: it produces prose,
+    # fails the contract, and the prose is what survives.
+    boss.bench.register(SubAgentSpec(
+        name="extractor", description="Extracts totals from documents.",
+        tags=["extract", "totals"],
+        output_schema={"type": "object", "properties": {"total": {"type": "number"}},
+                       "required": ["total"]},
+        max_steps=3,
+    ))
+
+    result = await boss.run("get the totals")
+    task = Plan(**result.data["plan"]).by_id("t1")
+
+    assert task.status == "failed"
+    assert "OutputContract" in task.error
+    assert "2 of 3 totals" in task.partial      # partial delivery kept
+    assert result.output == "consolidated from partial work"
+
+
+async def test_an_unexpected_exception_marks_the_task_failed_not_running():
+    """A crash inside a worker must surface as a failed task, never as silence."""
+    import json as _json
+
+    one = {"goal": "g", "definition_of_done": [],
+           "tasks": [{"id": "t1", "statement": "Research it", "depends_on": []}]}
+
+    class Exploding(FakeProvider):
+        async def complete(self, req):
+            if "costed plan" in req.messages[-1].text:
+                return await super().complete(req)
+            raise RuntimeError("something nobody catches")
+
+    provider = Exploding([lambda req: _json.dumps(one)], loop=True)
+    harness = Harness.testing(provider)
+    boss = Orchestrator("boss", harness=harness, provider=provider,
+                        model="claude-sonnet-5", review=False, task_retries=0)
+
+    result = await boss.run("do it")
+    task = Plan(**result.data["plan"]).by_id("t1")
+    assert task.status == "failed"
+    assert "RuntimeError" in task.error

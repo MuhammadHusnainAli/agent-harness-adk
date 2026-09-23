@@ -1,13 +1,18 @@
 """The harness core: the shared services every agent depends on."""
 
-from .budget import Budget, BudgetGuard
+from ..guardrails import INJECTION_RULES, SECRET_RULES, Guardrails
+from ..guardrails import Rule as GuardrailRule
+from .audit import AuditEntry, AuditTrail
+from .budget import Budget, BudgetGuard, RateGuard, RateLimit
 from .cache import ResultCache
 from .checkpoints import Checkpoint, Checkpointer
-from .guardrails import INJECTION_RULES, SECRET_RULES, Guardrails
-from .guardrails import Rule as GuardrailRule
+from .control import StopController, StopState
+from .deliverables import DeliverableStore
+from .health import ComponentHealth, ServiceHealth
 from .hooks import HookContext, HookEngine
 from .journal import JournalEntry, RunJournal
 from .permissions import PolicyGate, Rule, always_approve, console_approver
+from .replay import RecordingProvider, Replayer, ReplayProvider
 from .router import ModelRouter, RouteRule
 from .scheduler import ConcurrencyScheduler
 from .session import FileSessionStore, InMemorySessionStore, Session, SessionStore
@@ -17,6 +22,18 @@ from .workspace import DockerWorkspace, Workspace, WorkspaceBroker
 __all__ = [
     "Budget",
     "BudgetGuard",
+    "RateLimit",
+    "RateGuard",
+    "AuditTrail",
+    "AuditEntry",
+    "StopController",
+    "StopState",
+    "DeliverableStore",
+    "ServiceHealth",
+    "ComponentHealth",
+    "Replayer",
+    "RecordingProvider",
+    "ReplayProvider",
     "ResultCache",
     "Checkpoint",
     "Checkpointer",

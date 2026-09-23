@@ -11,3 +11,8 @@ build/
 htmlcov/
 .env
 preview-01.png
+AGENTS.md
+CLAUDE.md
+requirements.lock.txt
+requirements.dev.txt
+release-notes.md

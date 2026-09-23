@@ -37,6 +37,34 @@ from .errors import (
     ToolError,
     ToolNotFound,
 )
+from .evaluation import (
+    Comparison,
+    EvalReport,
+    Evaluator,
+    Expect,
+    GoldenTask,
+    TaskOutcome,
+    llm_judge,
+)
+from .guardrails import (
+    AgentGuardrails,
+    Check,
+    CompletionContext,
+    Custom,
+    ForbidTools,
+    MaxCost,
+    MaxSteps,
+    MinLength,
+    MustInclude,
+    MustMatch,
+    MustNotInclude,
+    NoPlaceholders,
+    RequireCitation,
+    RequireJSON,
+    RequireStructured,
+    RequireTools,
+    Violation,
+)
 from .harness import Harness
 from .memory import (
     Embedder,
@@ -71,11 +99,15 @@ from .providers import (
     tool_call,
 )
 from .runtime import (
+    AuditEntry,
+    AuditTrail,
     Budget,
     BudgetGuard,
     Checkpoint,
     Checkpointer,
+    ComponentHealth,
     ConcurrencyScheduler,
+    DeliverableStore,
     FileSessionStore,
     Guardrails,
     HookContext,
@@ -83,11 +115,19 @@ from .runtime import (
     InMemorySessionStore,
     ModelRouter,
     PolicyGate,
+    RateGuard,
+    RateLimit,
+    RecordingProvider,
+    Replayer,
+    ReplayProvider,
     ResultCache,
     RunJournal,
+    ServiceHealth,
     Session,
     SessionStore,
     Span,
+    StopController,
+    StopState,
     Tracer,
     Workspace,
     WorkspaceBroker,
@@ -97,7 +137,8 @@ from .runtime import (
 from .runtime.permissions import Rule as PermissionRule
 from .runtime.router import RouteRule
 from .skills import Skill, SkillRegistry
-from .subagent import Bench, SubAgentFactory, SubAgentSpec
+from .spec import CompiledSpec, SpecCompiler
+from .subagents import Bench, SubAgentFactory, SubAgentSpec
 from .tools import Tool, ToolContext, ToolRegistry, tool
 from .types import (
     Artifact,
@@ -187,9 +228,50 @@ __all__ = [
     "MCPServer",
     "MCPClient",
     "MCPManager",
+    # evaluation
+    "Evaluator",
+    "GoldenTask",
+    "Expect",
+    "EvalReport",
+    "TaskOutcome",
+    "Comparison",
+    "llm_judge",
+    # spec compilation
+    "SpecCompiler",
+    "CompiledSpec",
+    # guardrails
+    "AgentGuardrails",
+    "CompletionContext",
+    "Violation",
+    "Check",
+    "RequireTools",
+    "ForbidTools",
+    "MustInclude",
+    "MustNotInclude",
+    "MustMatch",
+    "MinLength",
+    "MaxSteps",
+    "MaxCost",
+    "RequireCitation",
+    "RequireJSON",
+    "RequireStructured",
+    "NoPlaceholders",
+    "Custom",
     # runtime rails
     "Budget",
     "BudgetGuard",
+    "RateLimit",
+    "RateGuard",
+    "StopController",
+    "StopState",
+    "AuditTrail",
+    "AuditEntry",
+    "ServiceHealth",
+    "ComponentHealth",
+    "DeliverableStore",
+    "Replayer",
+    "RecordingProvider",
+    "ReplayProvider",
     "PolicyGate",
     "PermissionRule",
     "HookEngine",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from typing import Any
 
@@ -31,6 +32,8 @@ from .errors import (
     StopRequested,
     ToolNotFound,
 )
+from .guardrails import AgentGuardrails
+from .guardrails.checks import CompletionContext
 from .harness import Harness
 from .memory.manager import MemoryManager
 from .prompts import Prompt
@@ -57,6 +60,39 @@ from .types import (
 )
 
 __all__ = ["Agent"]
+
+MAX_RUNTIME_AGENTS = 100
+
+
+def _enabled(value: bool | str) -> bool:
+    """Accept `True`, `"enable"`, `"on"`, `"yes"` — and their opposites."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"enable", "enabled", "on", "yes", "true", "1"}:
+        return True
+    if text in {"disable", "disabled", "off", "no", "false", "0", ""}:
+        return False
+    raise ConfigurationError(
+        f"runtime_agents must be enable/disable (or a bool) — got {value!r}"
+    )
+
+
+def _agent_count(value: int) -> int:
+    """How many run-time agents may be spun up: 0 to 100."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"max_runtime_agents must be a whole number — got {value!r}"
+        ) from None
+    if not 0 <= count <= MAX_RUNTIME_AGENTS:
+        raise ConfigurationError(
+            f"max_runtime_agents must be between 0 and {MAX_RUNTIME_AGENTS} — "
+            f"got {count}"
+        )
+    return count
+
 
 IDENTITY = Prompt(
     "agent.identity",
@@ -91,10 +127,14 @@ class Agent:
         tools: Iterable[Tool | Callable[..., Any]] = (),
         skills: SkillRegistry | Iterable[Skill | str] | str | None = None,
         subagents: Sequence[Any] = (),
+        runtime_agents: bool | str = False,
+        max_runtime_agents: int = 5,
+        runtime_agent_tools: Iterable[str] | None = None,
         memory: MemoryManager | bool = True,
         harness: Harness | None = None,
         hooks: HookEngine | None = None,
         policy: PolicyGate | None = None,
+        guardrails: AgentGuardrails | Iterable[Any] | None = None,
         budget: Budget | None = None,
         max_steps: int = 20,
         output_type: type[BaseModel] | None = None,
@@ -102,6 +142,10 @@ class Agent:
         allow_shell: bool = False,
         tool_choice: str | dict[str, Any] | None = None,
         max_context_tokens: int | None = None,
+        compact_at: int | float | None = None,
+        compact_keep_last: int = 8,
+        compact_target: float = 0.6,
+        compactor: ContextCompactor | None = None,
         parallel_tools: bool = True,
         contract_retries: int = 2,
         stop: Iterable[str] = (),
@@ -130,6 +174,10 @@ class Agent:
         self.budget = budget
         self.hooks = hooks.merge(self.harness.hooks) if hooks else self.harness.hooks
         self.policy = policy or self.harness.policy
+        if guardrails is None or isinstance(guardrails, AgentGuardrails):
+            self.guardrails: AgentGuardrails | None = guardrails
+        else:
+            self.guardrails = AgentGuardrails(*guardrails)
 
         # --- skills -----------------------------------------------------
         if isinstance(skills, SkillRegistry):
@@ -175,6 +223,24 @@ class Agent:
         for entry in subagents:
             self.add_subagent(entry)
 
+        # --- run-time agents ----------------------------------------------
+        self.runtime_agents = _enabled(runtime_agents)
+        self.max_runtime_agents = _agent_count(max_runtime_agents)
+        self.runtime_agent_tools = (list(runtime_agent_tools)
+                                    if runtime_agent_tools is not None else None)
+        if self.runtime_agents and self.max_runtime_agents == 0:
+            raise ConfigurationError(
+                f"{name}: runtime_agents is enabled but max_runtime_agents is 0 — "
+                "give it a budget between 1 and 100, or disable it"
+            )
+        self._spawned = 0          # this run
+        self.total_spawned = 0     # the lifetime of this agent
+        self._factory: Any = None
+        if self.runtime_agents:
+            self.tools.add(self._spawn_tool())
+            if "delegate" not in self.tools:
+                self.tools.add(self._delegate_tool())
+
         self.assembler = ContextAssembler(
             identity=IDENTITY.render(
                 name=name, purpose=f" {description}" if description else ""
@@ -183,8 +249,13 @@ class Agent:
             skills=self.skills,
             memory=self.memory,
         )
-        window = max_context_tokens or self._default_window()
-        self.compactor = ContextCompactor(max_tokens=window, summarize=self._summarize)
+        self.compact_at = self._compaction_threshold(compact_at, max_context_tokens)
+        self.compactor = compactor or ContextCompactor(
+            max_tokens=self.compact_at,
+            keep_last=compact_keep_last,
+            target_ratio=compact_target,
+            summarize=self._summarize,
+        )
 
     # ------------------------------------------------------------------
     # configuration
@@ -196,12 +267,39 @@ class Agent:
                                               self.model)
         return self._provider
 
+    @property
+    def content_guardrails(self) -> Any:
+        """The text rules for this agent: its own if it has them, else the harness's."""
+        if self.guardrails is not None and self.guardrails.content is not None:
+            return self.guardrails.content
+        return self.harness.guardrails
+
     def _default_window(self) -> int:
         from .providers.base import model_info
 
         info = model_info(self.model)
         # Leave a third of the window for the answer and the next tool result.
         return int((info.context_window if info else 200_000) * 0.66)
+
+    def _compaction_threshold(self, compact_at: int | float | None,
+                              max_context_tokens: int | None) -> int:
+        """How many tokens of conversation before the compactor runs.
+
+        `compact_at=10_000` is an absolute token count; `compact_at=0.5` is a
+        fraction of the model's context window. With neither, two thirds of the
+        window, leaving room for the answer and the next tool result.
+        """
+        if compact_at is None:
+            return int(max_context_tokens or self._default_window())
+        if isinstance(compact_at, float) and 0 < compact_at <= 1:
+            return max(1, int(self._default_window() / 0.66 * compact_at))
+        threshold = int(compact_at)
+        if threshold < 1:
+            raise ConfigurationError(
+                f"{self.name}: compact_at must be a positive token count, or a "
+                f"fraction of the context window between 0 and 1 — got {compact_at!r}"
+            )
+        return threshold
 
     def add_tool(self, item: Tool | Callable[..., Any]) -> Tool:
         return self.tools.add(item)
@@ -215,14 +313,15 @@ class Agent:
 
     def add_subagent(self, entry: Any) -> Agent:
         """Attach a sub-agent, given an Agent or a SubAgentSpec."""
-        from .subagent import SubAgentSpec, build_agent
+        from .subagents import SubAgentSpec, build_agent
 
         child = entry if isinstance(entry, Agent) else build_agent(
             entry if isinstance(entry, SubAgentSpec) else SubAgentSpec(**entry), parent=self
         )
         self._subagents[child.name] = child
-        if "delegate" not in self.tools:
-            self.tools.add(self._delegate_tool())
+        # Rebuilt, not just added: the tool's schema carries the roster, and a
+        # stale enum would hide every sub-agent attached after the first.
+        self.tools.add(self._delegate_tool())
         return child
 
     @property
@@ -303,7 +402,8 @@ class Agent:
             history = list(messages) if messages is not None else list(session_obj.messages)
 
             try:
-                task_text = harness.guardrails.check(task_text, where="input", label="task")
+                task_text = self.content_guardrails.check(task_text, where="input",
+                                                          label="task")
             except GuardrailTripped as exc:
                 result.error = f"{type(exc).__name__}: {exc}"
                 result.stop_reason = "error"
@@ -316,6 +416,11 @@ class Agent:
             if memory is not None:
                 memory.session.add_message(task_message)
 
+            if messages is None or guard is harness.guard:
+                self._spawned = 0        # a fresh run gets a fresh agent budget
+            harness.control.enter(self.name, run_id)
+            harness.audit.record(self.name, "run_start", target=task_text[:120],
+                                 run_id=run_id, model=model)
             await self.hooks.emit("run_start", agent=self.name, run_id=run_id,
                                      task=task_text)
             await harness.journal.assignment(self.name, task_text[:500], run_id=run_id,
@@ -325,10 +430,12 @@ class Agent:
 
             contract = self._contract_text()
             retries_left = self.contract_retries
+            guard_retries = self.guardrails.max_retries if self.guardrails else 0
             final_text = ""
 
             try:
                 for step in range(1, steps_allowed + 1):
+                    harness.control.check(f"{self.name} step {step}")
                     guard.step()
                     result.steps = step
                     yield StreamEvent(type="step_start", agent=self.name, step=step)
@@ -436,6 +543,37 @@ class Agent:
                         if problem:
                             raise OutputContractError(problem)
                         result.data = parsed
+
+                    violations = self._check_completion(final_text, result)
+                    # Always reassigned, so a successful retry clears what the
+                    # previous attempt failed on.
+                    result.violations = [v.line() for v in violations]
+                    if violations:
+                        rails = self.guardrails
+                        if rails is None:  # pragma: no cover - defensive
+                            raise GuardrailTripped("; ".join(result.violations))
+                        await harness.journal.write(
+                            "guardrail", "; ".join(result.violations),
+                            agent=self.name, run_id=run_id,
+                        )
+                        harness.audit.record(
+                            self.name, "guardrail", target="completion",
+                            decision=rails.on_violation, run_id=run_id,
+                            unmet=[v.check for v in violations],
+                        )
+                        if rails.on_violation == "retry" and guard_retries > 0:
+                            guard_retries -= 1
+                            history.append(Message.user(rails.feedback(violations)))
+                            yield StreamEvent(type="step_end", agent=self.name,
+                                              step=step)
+                            continue
+                        if rails.on_violation != "warn":
+                            raise GuardrailTripped(
+                                "the answer did not meet this agent's guardrails: "
+                                + "; ".join(result.violations),
+                                rule=violations[0].check, where="completion",
+                            )
+
                     result.stop_reason = response.stop_reason
                     yield StreamEvent(type="step_end", agent=self.name, step=step)
                     break
@@ -444,8 +582,8 @@ class Agent:
                         f"{self.name} did not finish within {steps_allowed} steps"
                     )
 
-                final_text = harness.guardrails.check(final_text, where="output",
-                                                      label=self.name)
+                final_text = self.content_guardrails.check(final_text, where="output",
+                                                           label=self.name)
                 result.output = final_text
 
             except (BudgetExceeded, PermissionDenied, GuardrailTripped, ProviderError,
@@ -460,12 +598,21 @@ class Agent:
                                             run_id=run_id)
                 yield StreamEvent(type="error", agent=self.name, text=result.error)
 
+            harness.control.leave(run_id)
+            harness.audit.record(
+                self.name, "run_end", target=task_text[:120], run_id=run_id,
+                decision="error" if result.error else "ok",
+                steps=result.steps, cost_usd=result.cost_usd,
+                stop_reason=result.stop_reason,
+            )
             result.messages = history
             session_obj.messages = history
             session_obj.usage += result.usage
             if memory is not None:
                 result.artifacts.extend(memory.session.artifacts)
                 session_obj.artifacts = list(memory.session.artifacts)
+            if result.artifacts:
+                harness.deliverables.extend(result.artifacts, run_id=run_id)
             if self.persist_session:
                 await harness.sessions.save(session_obj)
 
@@ -483,26 +630,50 @@ class Agent:
     # ------------------------------------------------------------------
     async def _model_events(self, request: CompletionRequest, step: int,
                             token_stream: bool) -> AsyncIterator[StreamEvent]:
-        """One model call. Streams tokens when asked, and ends with the response."""
-        with self.harness.tracer.span(f"model:{request.model}", kind="model",
-                                      step=step) as span:
-            if not token_stream:
-                response = await self.provider.complete(request)
-            else:
-                response = None
-                async for event in self.provider.stream(request):
-                    if event.type in ("text", "thinking"):
-                        yield StreamEvent(type=event.type, text=event.text,
-                                          agent=self.name, step=step)
-                    elif event.type == "tool_call":
-                        yield StreamEvent(type="tool_call", agent=self.name, step=step,
-                                          text=event.data.get("name", ""),
-                                          data=event.data)
-                    elif event.type == "step_end" and "response" in event.data:
-                        response = ModelResponse(**event.data["response"])
-                if response is None:
-                    raise ProviderError("the stream ended without a final response",
-                                        provider=self.provider.name)
+        """One model call. Streams tokens when asked, and ends with the response.
+
+        Throughput is paced before the call and health recorded after it, so a
+        provider that goes slow or starts failing shows up in `harness.report()`
+        rather than only in the wall clock.
+        """
+        harness = self.harness
+        estimated = sum(len(m.text) for m in request.messages) // 4
+        await harness.rate.acquire(estimated)
+
+        started = time.perf_counter()
+        with harness.tracer.span(f"model:{request.model}", kind="model",
+                                 step=step) as span:
+            response: ModelResponse | None = None
+            try:
+                if not token_stream:
+                    response = await self.provider.complete(request)
+                else:
+                    async for event in self.provider.stream(request):
+                        if event.type in ("text", "thinking"):
+                            yield StreamEvent(type=event.type, text=event.text,
+                                              agent=self.name, step=step)
+                        elif event.type == "tool_call":
+                            yield StreamEvent(type="tool_call", agent=self.name,
+                                              step=step,
+                                              text=event.data.get("name", ""),
+                                              data=event.data)
+                        elif event.type == "step_end" and "response" in event.data:
+                            response = ModelResponse(**event.data["response"])
+                    if response is None:
+                        raise ProviderError(
+                            "the stream ended without a final response",
+                            provider=self.provider.name,
+                        )
+            except Exception as exc:
+                harness.health.record(
+                    request.model, (time.perf_counter() - started) * 1000,
+                    kind="model", ok=False, error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+
+            harness.health.record(request.model,
+                                  (time.perf_counter() - started) * 1000, kind="model")
+            harness.rate.record(response.usage)
             span.set(tokens=response.usage.total_tokens,
                      cost_usd=response.usage.cost_usd,
                      stop_reason=response.stop_reason)
@@ -557,6 +728,16 @@ class Agent:
                 return ToolOutcome(call_id=call.id, name=call.name, content=str(exc),
                                    is_error=True)
 
+            if self.guardrails is not None:
+                permitted, reason = self.guardrails.tool_allowed(call.name)
+                if not permitted:
+                    span.status = "error"
+                    harness.audit.record(self.name, "tool_call", target=call.name,
+                                         decision="deny", run_id=run_id, reason=reason)
+                    return ToolOutcome(call_id=call.id, name=call.name,
+                                       content=f"Not permitted: {reason}",
+                                       is_error=True)
+
             args = dict(call.input)
             hook = await self.hooks.emit("pre_tool", agent=self.name, run_id=run_id,
                                             step=step, tool=call.name, args=args)
@@ -571,10 +752,14 @@ class Agent:
                                         tool_permission=entry.permission)
             except PermissionDenied as exc:
                 span.status = "error"
+                harness.audit.record(self.name, "tool_call", target=call.name,
+                                     decision="deny", run_id=run_id, reason=str(exc))
                 await harness.journal.write("denied", str(exc), agent=self.name,
                                             run_id=run_id, tool=call.name)
                 return ToolOutcome(call_id=call.id, name=call.name,
                                    content=f"Not permitted: {exc}", is_error=True)
+            harness.audit.record(self.name, "tool_call", target=call.name,
+                                 decision="allow", run_id=run_id, args=args)
 
             key = harness.cache.key("tool", call.name, args) if entry.cacheable else ""
             if key:
@@ -584,12 +769,17 @@ class Agent:
                     return ToolOutcome(call_id=call.id, name=call.name, content=hit,
                                        cached=True)
 
+            harness.control.check(f"{self.name} tool {call.name}")
             guard.tool_call()
+            started = time.perf_counter()
             outcome = await entry.run(call.id, args, ctx)
+            harness.health.record(call.name, (time.perf_counter() - started) * 1000,
+                                  kind="tool", ok=not outcome.is_error,
+                                  error=outcome.content if outcome.is_error else "")
 
             if not outcome.is_error:
                 try:
-                    outcome.content = harness.guardrails.check(
+                    outcome.content = self.content_guardrails.check(
                         outcome.content, where="input", label=call.name
                     )
                 except GuardrailTripped as exc:
@@ -651,17 +841,147 @@ class Agent:
             tags=["builtin", "delegation"],
         )
 
+    @property
+    def factory(self) -> Any:
+        """The sub-agent factory this agent writes new specialists with."""
+        if self._factory is None:
+            from .subagents import SubAgentFactory
+
+            builder = Agent(
+                f"{self.name}.factory",
+                "You write specifications for sub-agents.",
+                model=self.harness.router.pick(tier="balanced")[0],
+                provider=self._provider if isinstance(self._provider, Provider) else None,
+                harness=self.harness, memory=False, max_steps=2,
+                persist_session=False, runtime_agents=False,
+            )
+            self._factory = SubAgentFactory(builder)
+        return self._factory
+
+    @property
+    def runtime_agents_remaining(self) -> int:
+        """How many more specialists this agent may spin up in this run."""
+        if not self.runtime_agents:
+            return 0
+        return max(0, self.max_runtime_agents - self._spawned)
+
+    def _spawn_tool(self) -> Tool:
+        agent = self
+
+        async def spawn_agent(task: str, purpose: str = "",
+                              tools: list[str] | None = None,
+                              ctx: ToolContext | None = None) -> str:
+            return await agent._spawn(task, purpose=purpose, tools=tools, ctx=ctx)
+
+        spawn_agent.__name__ = "spawn_agent"
+        return Tool(
+            spawn_agent,
+            name="spawn_agent",
+            description=(
+                "Build a specialist for one task that no existing sub-agent covers, "
+                f"and run it. You may spin up {agent.max_runtime_agents} of these "
+                "in this run; spend them on work that genuinely needs its own "
+                "worker, and call this several times in one turn when the tasks "
+                "are independent — they run at the same time. The specialist "
+                "starts with no memory of this conversation, so put everything it "
+                "needs in `task`."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string",
+                             "description": "The complete task, stated on its own."},
+                    "purpose": {"type": "string",
+                                "description": "One line: what this specialist is "
+                                               "accountable for."},
+                    "tools": {"type": "array", "items": {"type": "string"},
+                              "description": "The smallest set of tool names it "
+                                             "needs. Omit to let the factory "
+                                             "choose."},
+                },
+                "required": ["task"],
+            },
+            tags=["builtin", "delegation", "runtime"],
+        )
+
+    async def _spawn(self, task: str, *, purpose: str = "",
+                     tools: list[str] | None = None,
+                     ctx: ToolContext | None = None) -> str:
+        """Write a new specialist for `task`, run it, and hand back its result."""
+        if not self.runtime_agents:
+            return "run-time agents are disabled for this agent."
+        if self._spawned >= self.max_runtime_agents:
+            return (f"No run-time agents left: {self.max_runtime_agents} of "
+                    f"{self.max_runtime_agents} already spun up in this run. "
+                    "Finish the work with the tools and sub-agents you have.")
+        if not self.harness.control.may_start():
+            return (f"Not started — the run was stopped: "
+                    f"{self.harness.control.state.reason or 'no reason given'}")
+
+        self._spawned += 1
+        self.total_spawned += 1
+
+        allowed = self.runtime_agent_tools
+        if allowed is None:
+            allowed = [t.name for t in self.tools
+                       if "delegation" not in t.tags and "memory" not in t.tags]
+        if tools:
+            wanted = set(tools)
+            allowed = [name for name in allowed if name in wanted] or allowed
+
+        with self.harness.tracer.span("factory:spec", kind="subagent") as span:
+            spec = await self.factory.create(task, tools=allowed)
+            if purpose:
+                spec.description = purpose
+            span.set(spec=spec.name, tools=spec.tools)
+
+        self.harness.audit.record(self.name, "spawn_agent", target=spec.name,
+                                  decision="allow", task=task[:200],
+                                  remaining=self.runtime_agents_remaining)
+        await self.harness.journal.write(
+            "decision", f"spun up {spec.name} for: {task[:120]}", agent=self.name,
+        )
+        if self.memory is not None:
+            await self.memory.orchestrator.staffing(task[:80], spec.name,
+                                                    reused=False)
+
+        from .subagents import build_agent
+
+        child = build_agent(spec, parent=self)
+        self._subagents[child.name] = child
+        self.tools.add(self._delegate_tool())   # it can be re-used by name now
+        return await self._run_child(child, task, "", ctx)
+
     def _subagent_catalogue(self) -> str:
         return "; ".join(f"{n}: {a.description}" for n, a in self._subagents.items())
 
     async def _delegate(self, agent_name: str, task: str, context: str = "",
                         ctx: ToolContext | None = None) -> str:
-        """Run a sub-agent on one task and hand back only its result."""
+        """Run an existing sub-agent on one task and hand back only its result."""
         child = self._subagents.get(agent_name)
         if child is None:
             known = ", ".join(sorted(self._subagents)) or "none"
-            return f"No sub-agent named {agent_name!r}. Available: {known}"
+            suffix = ""
+            if self.runtime_agents and self.runtime_agents_remaining:
+                suffix = (" Use `spawn_agent` to build one for this task "
+                          f"({self.runtime_agents_remaining} left).")
+            return f"No sub-agent named {agent_name!r}. Available: {known}.{suffix}"
 
+        if not self.harness.control.may_start():
+            return (f"[{agent_name} not started] the run was stopped: "
+                    f"{self.harness.control.state.reason or 'no reason given'}")
+
+        if self.memory is not None:
+            await self.memory.orchestrator.staffing(task[:80], child.name, reused=True)
+        return await self._run_child(child, task, context, ctx)
+
+    async def _run_child(self, child: Agent, task: str, context: str = "",
+                         ctx: ToolContext | None = None) -> str:
+        """Run one sub-agent under this agent's budget and hand back its result.
+
+        Shared by `delegate` (reuse) and `spawn_agent` (build one), so both go
+        through the same budget, tracing, memory and hand-back path.
+        """
         parent_result: RunResult | None = (ctx.state.get("result") if ctx else None)
         guard: BudgetGuard = (ctx.state.get("guard") if ctx else None) or self.harness.guard
         guard.subagent()
@@ -671,7 +991,7 @@ class Agent:
         brief = f"{task}\n\n## Context you were given\n{context}" if context else task
 
         await self.hooks.emit("subagent_start", agent=child.name,
-                                      run_id=ctx.run_id if ctx else "", task=task)
+                              run_id=ctx.run_id if ctx else "", task=task)
 
         with self.harness.tracer.span(f"subagent:{child.name}", kind="subagent") as span:
             child_result = await child.run(
@@ -687,11 +1007,9 @@ class Agent:
             parent_result.children.append(child_result)
             parent_result.artifacts.extend(child_result.artifacts)
         if self.memory is not None:
-            await self.memory.orchestrator.staffing(task[:80], child.name, reused=True)
             await self.memory.orchestrator.spend(child.name, child_result.cost_usd,
                                                  child_result.usage.total_tokens)
-        await self.hooks.emit("subagent_end", agent=child.name,
-                                      result=child_result)
+        await self.hooks.emit("subagent_end", agent=child.name, result=child_result)
 
         if child_result.error:
             return f"[{child.name} failed] {child_result.error}"
@@ -738,11 +1056,25 @@ class Agent:
         return Session(agent=self.name)
 
     def produce(self, name: str, content: str, **kw: Any) -> Artifact:
-        """Record an artefact this agent produced."""
+        """Record an artefact this agent produced, and store it."""
         artifact = Artifact(name=name, content=content, produced_by=self.name, **kw)
+        stored = self.harness.deliverables.put(artifact)
         if self.memory is not None:
-            self.memory.session.add_artifact(artifact)
-        return artifact
+            self.memory.session.add_artifact(stored)
+        return stored
+
+    def _check_completion(self, output: str, result: RunResult) -> list[Any]:
+        """Has this agent done what it was required to do before answering?"""
+        if self.guardrails is None or not self.guardrails.checks:
+            return []
+        called = [c.name for c in result.tool_calls]
+        called += [c.name for child in result.children for c in child.tool_calls]
+        return self.guardrails.check(CompletionContext(
+            agent=self.name, output=output, steps=result.steps,
+            cost_usd=result.cost_usd, tools_called=called,
+            artifacts=[a.name for a in result.artifacts],
+            data=result.data, result=result,
+        ))
 
     def _contract_text(self) -> str:
         if self.output_type is None:

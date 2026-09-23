@@ -27,13 +27,14 @@ PyPI yet, register it as a *pending* publisher:
    | PyPI Project Name | `agent-harness-adk` |
    | Owner | `MuhammadHusnainAli` |
    | Repository name | `agent-harness-adk` |
-   | Workflow name | `release.yml` |
+   | Workflow name | `pipeline.yml` |
    | Environment name | `pypi` |
 
 3. Save. The project is created on PyPI the first time the workflow publishes.
 
-The environment name must be `pypi` — it is what `release.yml` declares. If you
-change one, change both.
+The environment name must be `pypi` and the workflow name must be
+`pipeline.yml` — those are what the workflow declares. If you change either,
+change it in both places.
 
 ### 2. Create the GitHub environment
 

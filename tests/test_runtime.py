@@ -347,3 +347,88 @@ async def test_nested_fan_out_does_not_starve_the_pool():
 
     results = await asyncio.wait_for(scheduler.map(branch, [1, 2]), timeout=3)
     assert sorted(sum(results, [])) == [1, 2, 101, 102]
+
+
+# --- rate guard ------------------------------------------------------------------
+
+async def test_no_limits_means_no_waiting():
+    from agent_harness import RateGuard, RateLimit
+
+    guard = RateGuard(RateLimit())
+    assert await guard.acquire(1000) == 0.0
+    assert guard.waits == 0
+
+
+async def test_requests_per_minute_paces_the_caller():
+    from agent_harness import RateGuard, RateLimit
+
+    guard = RateGuard(RateLimit(requests_per_minute=3), window=0.2)
+    for _ in range(3):
+        assert await guard.acquire() == 0.0      # the first three go straight through
+    assert guard.stats()["requests_in_window"] == 3
+
+    waited = await guard.acquire()               # the fourth has to wait for room
+    assert waited > 0
+    assert guard.waits == 1
+
+
+async def test_tokens_per_minute_is_enforced_on_top_of_requests():
+    from agent_harness import RateGuard, RateLimit
+    from agent_harness.types import Usage
+
+    guard = RateGuard(RateLimit(tokens_per_minute=1000), window=0.2)
+    await guard.acquire(900)
+    assert guard.stats()["tokens_in_window"] == 900
+
+    waited = await guard.acquire(500)            # 900 + 500 is over the ceiling
+    assert waited > 0
+
+    guard.record(Usage(input_tokens=10, output_tokens=5))
+    assert guard.stats()["tokens_in_window"] >= 15
+
+
+async def test_the_window_slides_so_throughput_resumes():
+    from agent_harness import RateGuard, RateLimit
+
+    guard = RateGuard(RateLimit(requests_per_minute=2), window=0.05)
+    await guard.acquire()
+    await guard.acquire()
+    await guard.acquire()                        # waits for the window to roll over
+    assert guard.stats()["requests_in_window"] <= 2
+
+
+async def test_max_concurrent_is_held_by_the_context_manager():
+    import asyncio
+
+    from agent_harness import RateGuard, RateLimit
+
+    guard = RateGuard(RateLimit(max_concurrent=1))
+    order: list[str] = []
+
+    async def worker(label: str) -> None:
+        async with guard:
+            order.append(f"{label}-in")
+            await asyncio.sleep(0.01)
+            order.append(f"{label}-out")
+
+    await asyncio.gather(worker("a"), worker("b"))
+    assert order in (["a-in", "a-out", "b-in", "b-out"],
+                     ["b-in", "b-out", "a-in", "a-out"])
+
+
+async def test_an_agent_run_is_paced_by_the_harness_rate_limit():
+    from agent_harness import Agent, FakeProvider, Harness, RateLimit
+
+    provider = FakeProvider(["one", "two"], loop=True)
+    harness = Harness.testing(provider)
+    harness.rate_limit = RateLimit(requests_per_minute=1)
+    harness._rate = None                          # rebuild with the new limit
+    harness.rate.window = 0.15
+
+    agent = Agent("paced", provider=provider, model="claude-sonnet-5",
+                  harness=harness, memory=False)
+    await agent.run("first")
+    await agent.run("second")                     # must wait for the window
+
+    assert harness.rate.waits >= 1
+    assert harness.report()["rate"]["waits"] >= 1

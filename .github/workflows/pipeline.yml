@@ -1,0 +1,229 @@
+# One pipeline, one file. Every stage gates the next, so nothing reaches PyPI
+# that has not been linted, tested on all five Python versions, code-scanned and
+# audited for known vulnerabilities — in that order.
+#
+#   lint → test (3.10–3.14) → CodeQL → dependency audit → build → publish → release
+#
+# Publishing only happens on a `v*` tag; every other trigger stops after build.
+
+name: Pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "20 22 * * 4"   # weekly re-scan: dependencies rot even when code does not
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  # Never cancel a release that is mid-flight.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  UV_FROZEN: "1"          # fail if uv.lock is stale rather than silently relocking
+  FORCE_COLOR: "1"
+
+jobs:
+  # ---------------------------------------------------------------- 1. lint --
+  lint:
+    name: 1 · lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0   # no floating major tag is published
+        with:
+          enable-cache: true
+
+      - name: the tag matches the version in pyproject
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          echo "tag=$tag pyproject=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      - run: uv sync --extra dev
+      - run: uv run ruff check src tests examples scripts
+
+      - name: llms.txt and llms-full.txt are current
+        run: uv run python scripts/build_llms_txt.py --check
+
+  # ---------------------------------------------------------------- 2. test --
+  test:
+    name: 2 · test py${{ matrix.python-version }}
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra dev
+      - run: uv run pytest -q
+      - name: every example runs without an API key
+        run: |
+          for example in examples/0*.py; do
+            echo "--- $example"
+            (cd examples && uv run python "$(basename "$example")" > /dev/null)
+          done
+
+  # ------------------------------------------------------- 3. code scanning --
+  codeql:
+    name: 3 · CodeQL (${{ matrix.language }})
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # required to upload the results
+      packages: read           # required to fetch internal or private CodeQL packs
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: python
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+          # Results can only be attached to a branch or a PR. On a tag the commit
+          # has already been scanned on main, so analyse but do not upload.
+          upload: ${{ github.ref_type == 'tag' && 'never' || 'always' }}
+
+  # ------------------------------------------------ 4. vulnerability scanning --
+  audit:
+    name: 4 · dependency audit
+    needs: codeql
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: resolve the runtime dependency tree
+        run: uv export --no-dev --no-emit-project --format requirements-txt -o requirements.lock.txt
+
+      - name: audit it against the advisory databases
+        run: uvx pip-audit -r requirements.lock.txt --strict --desc
+
+      - name: audit the development tools too
+        continue-on-error: true    # dev-only findings inform, they do not block a release
+        run: |
+          uv export --no-emit-project --format requirements-txt -o requirements.dev.txt
+          uvx pip-audit -r requirements.dev.txt --desc
+
+  # --------------------------------------------------------------- 5. build --
+  build:
+    name: 5 · build
+    needs: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+
+      - name: the built wheel imports and runs on its own
+        run: |
+          uv run --isolated --no-project --with ./dist/*.whl python - <<'PY'
+          import asyncio
+          from agent_harness import Agent, FakeProvider, Harness, __version__
+
+          async def main():
+              provider = FakeProvider(["it works"])
+              agent = Agent("smoke", provider=provider, model="claude-sonnet-5",
+                            harness=Harness.testing(provider), memory=False)
+              result = await agent.run("hello")
+              assert result.output == "it works", result
+              print("wheel smoke test passed on", __version__)
+
+          asyncio.run(main())
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------- 6. publish --
+  publish:
+    name: 6 · publish to PyPI
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agent-harness-adk
+    permissions:
+      id-token: write          # Trusted Publishing — no API token is stored
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ------------------------------------------------------------- 7. release --
+  release:
+    name: 7 · GitHub release
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: cut the release with this version's changelog section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" {found=1; next}
+            found && /^## \[/ {exit}
+            found {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $GITHUB_REF_NAME" > release-notes.md
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md

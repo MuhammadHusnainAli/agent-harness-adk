@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or "how do I ...?"
+    url: https://github.com/MuhammadHusnainAli/agent-harness-adk/discussions/new?category=q-a
+    about: Usage questions belong in Discussions, where others can find the answer.
+  - name: Security vulnerability
+    url: https://github.com/MuhammadHusnainAli/agent-harness-adk/security/advisories/new
+    about: Report privately. Never open a public issue for a security problem.
+  - name: Documentation and examples
+    url: https://github.com/MuhammadHusnainAli/agent-harness-adk#readme
+    about: The README covers every part of the API, and examples/ runs without an API key.

@@ -1,0 +1,95 @@
+name: Bug report
+description: Something in the harness behaves differently from what it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A reproduction that uses `FakeProvider` gets fixed
+        much faster than one that needs an API key — and it proves the problem
+        is in the harness rather than in a model's answer.
+
+        **Security problem? Stop.** Do not file it here — see
+        [SECURITY.md](https://github.com/MuhammadHusnainAli/agent-harness-adk/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+      placeholder: |
+        I expected the sub-agent to inherit the parent's tools, but its tool
+        registry was empty.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest program that shows it. Please use `FakeProvider` if you can
+        — no API key required.
+      render: python
+      placeholder: |
+        from agent_harness import Agent, FakeProvider, Harness, tool
+
+        provider = FakeProvider(["the response that triggers it"])
+        agent = Agent("repro", provider=provider, harness=Harness.testing(provider))
+        result = agent.run_sync("...")
+        print(result.output)
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or output
+      description: The full traceback, not just the last line.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: agent-harness-adk version
+      description: "`pip show agent-harness-adk | head -2`"
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: "`python --version`"
+      placeholder: "3.12.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - FakeProvider (no network)
+        - Anthropic
+        - OpenAI
+        - Gemini
+        - An OpenAI-compatible endpoint (Ollama, vLLM, Groq, Azure, ...)
+        - A custom provider
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04 / macOS 15 / Windows 11"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: >
+        `harness.report()` and `harness.journal.render()` are compact and often
+        say exactly what went wrong.

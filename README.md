@@ -109,10 +109,19 @@ async def issue_refund(order_id: str, amount: float, ctx: ToolContext) -> str:
 - `permission` can tighten the policy for one tool. It can never loosen it.
 - Tools run in parallel when the model asks for several at once.
 
-Built-ins: `agent_harness.toolkits` has `now`, `calculate`, `make_corpus_search`,
-`make_fetch_tool` (domain allowlist, private-address refusal, HTML stripping) and
-`make_http_tool`. A workspace brings `fs_read`, `fs_write`, `fs_list`,
-`fs_delete` and — only when you ask for it — `shell`.
+Built-ins in `agent_harness.toolkits`:
+
+| Tool | Notes |
+|---|---|
+| `now`, `calculate` | exact arithmetic, no `eval` |
+| `make_corpus_search` | keyword search over documents you hand it |
+| `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
+| `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
+| `make_python_tool` | run code in the workspace — asks for approval every time |
+
+A workspace brings `fs_read`, `fs_write`, `fs_list`, `fs_delete` and — only when
+you ask for it — `shell`.
 
 ## Skills
 
@@ -181,6 +190,37 @@ memory = MemoryManager(FileStore(".harness/memory"),
                        embedder=ProviderEmbedder(OpenAIProvider()))
 ```
 
+## Context: when it compresses
+
+Every step, the conversation is measured and compacted if it is over the
+threshold. You choose where that is:
+
+```python
+Agent("a", compact_at=10_000)        # an absolute token count
+Agent("b", compact_at=50_000)
+Agent("c", compact_at=0.5)           # or a fraction of the model's context window
+Agent("d")                           # default: two thirds of the window
+```
+
+Compaction happens in two stages, so the cheap thing is tried first:
+
+1. **Evict** — oversized tool results are hollowed out, keeping their first 400
+   characters. Cheapest tokens to lose, and it cannot break a `tool_use`/`tool_result`
+   pair because nothing is removed.
+2. **Summarise** — if it is still over, the head of the conversation is summarised
+   by a cheap model call and the tail kept verbatim. The cut moves forward until
+   no tool result is left without its call.
+
+```python
+Agent("a",
+      compact_at=10_000,        # start compacting here
+      compact_target=0.6,       # compress down to 60% of that
+      compact_keep_last=8)      # never touch the last 8 messages
+```
+
+Pass `compactor=ContextCompactor(...)` to replace the strategy wholesale, and
+`memory.session.pin("the deadline is Friday")` for facts that must survive it.
+
 ## Sub-agents: the bench and the factory
 
 Before staffing a task, the orchestrator asks one question: **is there already a
@@ -211,6 +251,44 @@ transcript, no parent memory — and hand back a result, not a conversation.
 Delegation does not cascade by default, and a spec's `tools` list is a hard
 allowlist. Ask for several delegations in one turn and they run in parallel
 under the concurrency cap.
+
+### Agents it writes for itself, at run time
+
+An ordinary agent can build its own specialists mid-run, within a budget you set:
+
+```python
+agent = Agent(
+    "core",
+    "Break the work up and give each part its own specialist.",
+    tools=[lookup, publish],
+    runtime_agents="enable",     # or "disable", or a plain bool
+    max_runtime_agents=5,        # 0-100; the ceiling for one run
+)
+```
+
+That adds a `spawn_agent` tool. When the agent decides it needs five workers, it
+calls it five times in one turn and they run in parallel — each one written for
+its task by the factory (name, instructions, tool allowlist, model tier, step
+ceiling), then run, with only its result handed back.
+
+```python
+result = await agent.run("Reconcile these five ledgers.")
+print(agent.total_spawned, [c.agent for c in result.children])
+# 5 ['ledger_2024', 'ledger_2025', ...]
+```
+
+The rules around it:
+
+- **The budget is per run** and refreshes on the next one. `agent.runtime_agents_remaining`
+  is what is left; past the ceiling the tool says so and the agent finishes with
+  what it has rather than failing.
+- **It does not cascade.** A spawned specialist cannot spawn its own.
+- **Least privilege.** A specialist gets the tools its spec asked for, narrowed to
+  what the parent holds; `runtime_agent_tools=[...]` caps that further.
+- **Every spin-up is audited**, counted against `Budget(max_subagents=...)`, and
+  refused once the run is stopped.
+- **Spawned specialists stay addressable** by name through `delegate` for the rest
+  of the run, so the second task for the same worker costs nothing extra to set up.
 
 Nothing on the bench fits? The factory writes a new specialist during the run —
 name, instructions, tool allowlist, model tier, step ceiling and workspace
@@ -265,6 +343,77 @@ Both transports (stdio and streamable HTTP), tools, resources and prompts. A
 server that will not connect is reported in `mcp.errors`, not raised into your
 run. `allowed_tools` trims what a server may expose.
 
+## Guardrails: what an agent must do to be done
+
+The content engine (`Guardrails`) polices *text* — secrets, injection, size, on
+every path in and out. `AgentGuardrails` polices *behaviour*: which tools an
+agent may touch, and what has to be true of its answer before that answer is
+accepted.
+
+```python
+from agent_harness import Agent, AgentGuardrails
+
+support = Agent(
+    "support",
+    "Answer order questions.",
+    tools=[order_status, issue_refund],
+    guardrails=AgentGuardrails(
+        require_tools=["order_status"],   # look it up, never guess
+        forbid_tools=["issue_refund"],    # not this agent's job
+        must_include=["order"],
+        require_citation=True,
+        no_placeholders=True,             # no "TODO", no "[insert name]"
+        max_cost_usd=0.25,
+        on_violation="retry",             # tell it what is missing, let it fix it
+    ),
+)
+```
+
+A forbidden tool is refused **before it runs**. Everything else is checked when
+the agent tries to finish: if something is unmet the agent is told, in words,
+and gets another turn —
+
+```
+That answer does not meet this task's requirements yet:
+- you answered without calling order_status — call order_status and answer from what it returns
+- your answer cites nothing — give the source for each claim, or say you could not find one
+
+Put it right and answer again.
+```
+
+which is usually all it needs. `on_violation` decides what happens when it does
+not: `"retry"` (the default, up to `max_retries`), `"fail"` (stop the run), or
+`"warn"` (deliver it, record the problem in `result.violations`).
+
+The checks ship as objects, so you can compose them directly or write your own:
+
+| Check | Fails when |
+|---|---|
+| `RequireTools(*names)` | it answered without calling them |
+| `ForbidTools(*names)` | it called one anyway (post-hoc audit) |
+| `MustInclude` / `MustNotInclude` | the answer misses, or contains, a phrase |
+| `MustMatch(pattern)` | the answer is not in the shape asked for |
+| `MinLength(chars)` | a one-word answer to a question that needed working through |
+| `RequireCitation()` | nothing in the answer points at a source |
+| `RequireJSON()` / `RequireStructured()` | the output contract was not met |
+| `NoPlaceholders()` | it handed back `TODO`, `[insert x]`, `lorem ipsum` |
+| `MaxSteps(n)` / `MaxCost(usd)` | it got there, but not within budget |
+| `Custom(fn)` | your own rule — return `False` or `(False, "why")` |
+
+Sub-agents carry their own, declared in the spec so it stays serialisable:
+
+```python
+SubAgentSpec(
+    name="researcher",
+    description="Finds things out.",
+    guardrails={"require_citation": True, "forbid_tools": ["publish"],
+                "max_retries": 1},
+)
+```
+
+And `AgentGuardrails(content=Guardrails(...))` gives one agent stricter text
+rules than the rest of the harness.
+
 ## The rails
 
 ```python
@@ -293,16 +442,23 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 |---|---|
 | `PolicyGate` | allow / ask / deny per action, glob rules, conditional on arguments, approver callback |
 | `BudgetGuard` | spend, token, step, tool-call and sub-agent ceilings; child guards roll up to the parent |
+| `RateGuard` | requests- and tokens-per-minute pacing, so you are not rate-limited by the provider |
 | `HookEngine` | 12 events; `pre_tool` can block or rewrite arguments, `post_tool` can rewrite the result |
 | `Guardrails` | secret redaction, private-key blocking, injection warnings, size caps — on tool output *and* final answers |
+| `StopController` | abort a run and drain the sub-agents; a human is always in charge |
 | `Tracer` | one span per run, step, model call, tool and sub-agent; console and JSONL exporters |
+| `AuditTrail` | immutable, hash-chained who-did-what; `verify()` names the first tampered entry |
+| `ServiceHealth` | latency, failure rate and saturation per model, tool and MCP server |
 | `RunJournal` | what each agent was asked and what it returned, append-only |
 | `ResultCache` | identical task + identical input served from cache, memory and disk tiers |
-| `Checkpointer` | step-level snapshots; resume or replay from any prior step |
+| `Checkpointer` + `Replayer` | step snapshots, a timeline, and resume-from-any-step |
+| `RecordingProvider` / `ReplayProvider` | record a run once, reproduce it exactly with no network and no spend |
+| `DeliverableStore` | the documents and reports a run produced, versioned and digested |
 | `SessionStore` | resume, fork or branch a run; a long job survives a restart |
 | `WorkspaceBroker` | a jailed directory per sub-agent (or a shared one for handovers), local or Docker |
 | `ConcurrencyScheduler` | semaphore, queue, backpressure, peak tracking |
 | `ModelRouter` | per-task model and effort tier instead of one model for everything |
+| `SpecCompiler` | a sub-agent blueprint → the exact provider payload, inspectable before you spend |
 
 Path safety is enforced, not clamped: a workspace tool given `../../etc/passwd`
 refuses rather than resolving it. `shell` is absent unless the workspace was
@@ -326,6 +482,63 @@ Adapters normalise everything the loop depends on: tool calls, tool results,
 thinking blocks, cache tokens, stop reasons and refusals. Cost is computed per
 call from a built-in price table (`register_model` to extend it), so
 `result.cost_usd` is real money, not an estimate.
+
+## Stopping, reproducing, and proving it got better
+
+A human is always in charge:
+
+```python
+harness.stop("the customer withdrew the request")   # drains; nothing new starts
+harness.control.abort("pull the plug")              # cancels what is in flight
+```
+
+The loop checks between steps and before every tool, so a stop lands at a safe
+boundary and the work already done is kept.
+
+Reproduce a failure before you fix it:
+
+```python
+from agent_harness import RecordingProvider, ReplayProvider
+
+agent = Agent("support", provider=RecordingProvider(AnthropicProvider(), "run.jsonl"))
+await agent.run("...")                # once, against the real model
+
+replay = ReplayProvider("run.jsonl")  # then as often as you like: no network, no spend
+twin = Agent("support", provider=replay)
+assert (await twin.run("...")).output == original.output
+```
+
+Or travel back to any step and try it differently:
+
+```python
+print(await harness.replayer.timeline(result.run_id))
+again = await harness.replayer.resume(agent, result.run_id, step=3,
+                                      task="Give the figure, not a summary.")
+```
+
+And prove a change actually helped:
+
+```python
+from agent_harness import Evaluator, Expect, GoldenTask
+
+suite = Evaluator([
+    GoldenTask(id="refund-window", input="Can I refund a 40-day-old order?",
+               expect=Expect(contains=["30-day"], not_contains=["yes, of course"])),
+    GoldenTask(id="uses-lookup", input="Where is order 4182?",
+               expect=Expect(tool_called="order_status", max_steps=4)),
+])
+
+baseline = await suite.run(agent, label="before"); baseline.save("baseline.json")
+# ... change the prompt ...
+after = await suite.run(agent, label="after")
+print(after.compare(baseline).render())
+# REGRESSED: 100.00% → 50.00% (-50.00%)
+#   REGRESSED:    uses-lookup
+```
+
+Expectations can check the text, the tools that were called, the structured
+output, the step count or the cost. `llm_judge` is there for genuinely
+open-ended answers — reach for it last; it costs money and it can be wrong.
 
 ## Streaming and structured output
 
@@ -369,7 +582,7 @@ assert provider.requests[0].system.startswith("You are support")
 
 No network, no keys, no recorded cassettes. Script strings, tool calls, whole
 messages, exceptions, or a callable that inspects the request and answers
-accordingly. The harness's own suite is 150 tests and runs in half a second.
+accordingly. The harness's own suite is 296 tests and runs in half a second.
 
 ## CLI
 
@@ -402,13 +615,30 @@ agent-harness mcp npx -y @modelcontextprotocol/server-filesystem /data
 git clone https://github.com/MuhammadHusnainAli/agent-harness-adk
 cd agent-harness-adk
 uv sync --extra dev
-uv run pytest -q
+uv run pytest -q                        # no API key needed — everything runs on FakeProvider
 uv run ruff check src tests examples
 ```
 
 Every push to `main` runs the suite on Python 3.10, 3.11, 3.12, 3.13 and 3.14,
-lints, builds the wheel and smoke-tests it. Releases are cut by pushing a tag —
-see [RELEASING.md](RELEASING.md).
+lints, builds the wheel, installs it into a clean environment and smoke-tests
+it, and runs every example without an API key.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the details — including the three things
+this project is picky about: the dependency count, the import time, and the
+3.10 floor.
+
+| | |
+|---|---|
+| Report a bug or ask for a feature | [Issues](https://github.com/MuhammadHusnainAli/agent-harness-adk/issues) |
+| Ask how to do something | [Discussions](https://github.com/MuhammadHusnainAli/agent-harness-adk/discussions) · [SUPPORT.md](SUPPORT.md) |
+| Report a vulnerability | **Privately** — [SECURITY.md](SECURITY.md) |
+| Community standards | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
+| Cut a release (maintainers) | [RELEASING.md](RELEASING.md) |
+
+Running agents safely — tool allowlists, policy gates, workspace isolation and
+what this library does *not* defend against — is covered in
+[SECURITY.md](SECURITY.md). Worth reading before you give an agent a tool that
+writes, spends or sends.
 
 ## Status
 
@@ -416,8 +646,9 @@ see [RELEASING.md](RELEASING.md).
 Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 Not in this release: a vector-database backend (the built-in index is exact
-brute force, fine to ~50k records), OCR and document parsing, and provider-side
-batch APIs.
+brute force, fine to ~50k records) and provider-side batch APIs. OCR, PDF and
+DOCX parsing work through an optional install each rather than shipping in the
+default dependency set.
 
 ## Licence
 
