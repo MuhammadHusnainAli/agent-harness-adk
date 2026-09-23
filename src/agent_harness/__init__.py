@@ -152,7 +152,7 @@ from .types import (
     Usage,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # MCP pulls in the HTTP stack, and most agents never touch it — so it loads on
 # first use. `from agent_harness import MCPServer` still works.

@@ -165,12 +165,25 @@ def _has_jinja(text: str) -> bool:
 
 def _render_jinja(text: str, variables: Mapping[str, Any]) -> str:
     try:
-        from jinja2 import Template
+        from jinja2 import Template, select_autoescape
     except ImportError as exc:  # pragma: no cover - optional path
         raise ConfigurationError(
             "this prompt uses Jinja syntax; `pip install jinja2` to render it"
         ) from exc
-    return Template(text, keep_trailing_newline=True).render(**variables)
+    # A prompt is plain text on its way to a model, so HTML-escaping it would
+    # corrupt it — `&amp;` in a prompt is a bug, not a defence. `select_autoescape`
+    # says that explicitly and still escapes if a prompt is ever loaded from an
+    # .html or .xml template, where the escaping would actually matter.
+    template = Template(
+        text,
+        keep_trailing_newline=True,
+        autoescape=select_autoescape(
+            enabled_extensions=("html", "xml"),
+            default_for_string=False,
+            default=False,
+        ),
+    )
+    return template.render(**variables)
 
 
 class PromptLibrary:

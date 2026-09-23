@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.1] — 2026-09-23
+
 Completes the architecture in `preview-01.png` — every box in the diagram now has
 a working implementation, and `tests/test_harness_completeness.py` fails if one
 goes missing.
@@ -105,6 +109,17 @@ goes missing.
 - The `delegate` tool's schema listed only the sub-agents present when it was
   first built, hiding every one attached afterwards.
 
+### Security
+
+- Jinja prompt rendering now goes through `select_autoescape` rather than
+  leaving autoescaping off outright. Prompts still render as plain text — HTML
+  escaping a prompt would corrupt it — but a template loaded from `.html` or
+  `.xml` is escaped, and the intent is explicit rather than implied.
+  (CodeQL `py/jinja2/autoescape-false`.)
+- Every GitHub Action in the pipeline is pinned to a commit SHA instead of a
+  moving tag, so a retagged upstream action cannot change what runs in the job
+  that publishes to PyPI. (CodeQL `actions/unpinned-tag`.)
+
 ## [0.1.0] — 2026-09-23
 
 The first release. Published as `agent-harness-adk`, imported as `agent_harness`.
@@ -171,5 +186,6 @@ The first release. Published as `agent-harness-adk`, imported as `agent_harness`
 - Typed (`py.typed`), three runtime dependencies, ~100 ms import.
 - 150 tests, green on Python 3.10 through 3.14.
 
-[Unreleased]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MuhammadHusnainAli/agent-harness-adk/releases/tag/v0.1.0

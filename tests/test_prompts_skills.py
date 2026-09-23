@@ -98,3 +98,20 @@ def test_skill_bundles_its_own_tools(tmp_path):
     skill = Skill.from_dir(tmp_path / "pricing")
     assert [t.name for t in skill.tools] == ["price"]
     assert "tools.py" in skill.resources
+
+
+def test_jinja_prompts_render_as_text_not_escaped_html():
+    """A prompt goes to a model, so `&amp;` in it would be a bug, not a defence."""
+    pytest.importorskip("jinja2")
+
+    prompt = Prompt("report",
+                    "{{ company }} profit {{ profit }}{% if urgent %} — URGENT{% endif %}")
+    rendered = prompt.render(company="Ada & Co", profit="<1M>", urgent=True)
+
+    assert rendered == "Ada & Co profit <1M> — URGENT"
+    assert "&amp;" not in rendered and "&lt;" not in rendered
+
+
+def test_a_plain_template_never_goes_near_jinja():
+    prompt = Prompt("greet", "Hello {name} & welcome")
+    assert prompt.render(name="Ada") == "Hello Ada & welcome"
