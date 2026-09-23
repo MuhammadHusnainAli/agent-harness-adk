@@ -273,8 +273,18 @@ class MCPClient:
                     self._proc.stdin.close()
                 self._proc.terminate()
                 await asyncio.wait_for(self._proc.wait(), 5)
-            except (ProcessLookupError, TimeoutError):
+            except (ProcessLookupError, *_Timeout):
                 self._proc.kill()
+            finally:
+                # Release the transport here rather than leaving it to __del__,
+                # which on 3.10 runs after the loop that owns it has closed and
+                # raises "Event loop is closed" where nothing can catch it.
+                transport = getattr(self._proc, "_transport", None)
+                if transport is not None:
+                    try:
+                        transport.close()
+                    except (RuntimeError, AttributeError):
+                        pass
             self._proc = None
         if self._http is not None and self._owns_http:
             await self._http.aclose()

@@ -365,6 +365,20 @@ def test_the_feature_areas_are_packages_with_a_clear_shape():
             assert hasattr(module, member), f"{package}.{member} is missing"
 
 
+def test_memory_can_be_stored_in_every_backend_the_docs_promise():
+    from agent_harness.memory import providers
+
+    assert set(providers.BACKENDS) >= {
+        "memory", "file", "sqlite", "postgres", "mysql", "mongo", "redis",
+        "dynamodb", "elasticsearch", "s3", "azure", "gcs", "http",
+    }
+    # Each one is scoped by a trace and implements the same contract.
+    for name in providers.BACKENDS:
+        cls = providers.get_backend(name)
+        for method in ("append", "all", "clear", "read_doc", "write_doc", "search"):
+            assert hasattr(cls, method), f"{name} has no {method}"
+
+
 def test_the_old_module_paths_still_import():
     """0.1.0 shipped these as modules; moving them must not break an import."""
     from agent_harness.runtime.guardrails import Guardrails as FromRuntime

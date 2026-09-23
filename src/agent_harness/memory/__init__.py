@@ -8,6 +8,8 @@ from .manager import (
     SubAgentMemory,
     UserMemory,
 )
+from .providers import available as available_backends
+from .providers import memory_provider, register_backend
 from .semantic import (
     Embedder,
     HashEmbedder,
@@ -16,6 +18,7 @@ from .semantic import (
     VectorStore,
     cosine,
 )
+from .trace import Scope, Trace
 
 __all__ = [
     "MemoryRecord",
@@ -33,4 +36,9 @@ __all__ = [
     "HashEmbedder",
     "ProviderEmbedder",
     "cosine",
+    "Trace",
+    "Scope",
+    "memory_provider",
+    "register_backend",
+    "available_backends",
 ]

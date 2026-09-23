@@ -190,6 +190,98 @@ await agent.run("What currency do I use?", messages=[])   # clean run, still kno
 print(await agent.close_session())   # session close → user.md rewritten
 ```
 
+### Whose memory is it? — `trace`
+
+A trace says who a memory belongs to. Pass one and every record is stamped with
+it on the way in and filtered by it on the way out, so one store serves any
+number of users without them ever seeing each other.
+
+```python
+agent = Agent("support", trace="alice")                      # a bare user id
+agent = Agent("support", trace=Trace(user_id="alice", session_id="s-42"))
+agent = Agent("support", trace=Trace(tenant_id="acme", user_id="alice"))
+```
+
+```python
+alice = MemoryManager(store, trace="alice")
+bob   = MemoryManager(store, trace="bob")
+
+await alice.user.remember("bills in EUR")
+await bob.user.load()        # "" — bob never sees it
+```
+
+One manager, many users, one backend:
+
+```python
+shared = MemoryManager(store)
+await shared.for_trace(request.user_id).user.remember(fact)
+```
+
+`for_trace` reuses the store and its vector index, so serving a request per user
+costs a small object rather than a rebuilt index.
+
+`scope` decides what documents like `user.md` are namespaced by — `"user"` (the
+default: preferences follow the person across sessions), `"session"`, `"tenant"`
+or `"global"`. A record written without a trace stays visible to everyone: it is
+shared, not orphaned.
+
+### Where is it stored? — `memory/providers`
+
+Thirteen backends, one contract. The agent loop never learns which is behind it.
+
+```python
+from agent_harness import memory_provider
+
+store = memory_provider("postgresql://user:pass@host/agents")
+store = memory_provider("mongodb://localhost:27017", database="agents")
+store = memory_provider("s3://my-bucket/agent-memory")
+store = memory_provider("sqlite:///./memory.db")
+
+agent = Agent("support", memory=MemoryManager(store, trace="alice"))
+```
+
+| Backend | Class | Needs |
+|---|---|---|
+| in-process | `InMemoryStore` | — |
+| files | `FileStore` | — |
+| **SQLite** | `SQLiteMemory` | — (standard library) |
+| **PostgreSQL** | `PostgresMemory` | `asyncpg` or `psycopg` |
+| **MySQL / MariaDB** | `MySQLMemory` | `aiomysql` |
+| **MongoDB** | `MongoMemory` | `motor` or `pymongo` |
+| **Redis** | `RedisMemory` | `redis` |
+| **DynamoDB** | `DynamoDBMemory` | `boto3` |
+| **Elasticsearch / OpenSearch** | `ElasticsearchMemory` | `elasticsearch` |
+| **Amazon S3** | `S3Memory` | `boto3` |
+| **Azure Blob Storage** | `AzureBlobMemory` | `azure-storage-blob` |
+| **Google Cloud Storage** | `GCSMemory` | `google-cloud-storage` |
+| **your own API** | `HTTPMemory` | — (httpx already ships) |
+
+Nothing is imported until you ask for it — a driver you do not use costs nothing
+at import, and one you have not installed names its own `pip install` rather than
+raising `ImportError` somewhere deep in a run:
+
+```python
+from agent_harness import available_backends
+available_backends()
+# {'sqlite': True, 'postgres': False, 's3': False, ...}
+```
+
+Choosing between them:
+
+- **SQLite** is the right default for a single service — durable, indexed, no
+  server to run.
+- **Postgres, MySQL and Mongo** index on the trace, so reading one user's memory
+  is one query however many users you have.
+- **Redis** suits session-scoped memory: pass `ttl=` and it expires itself.
+- **Elasticsearch** is the only backend where `search()` is ranked by the engine,
+  so recall is good without an embedder.
+- **S3, Azure Blob and GCS** lay keys out so a trace is a prefix. That makes one
+  user's memory a single listing, but anything narrower is filtered after the
+  fetch — treat them as durable archival rather than a hot query path.
+- **HTTPMemory** is for when memory must live behind a service you already run.
+
+`register_backend("cassandra", "myapp.memory", "CassandraMemory")` adds your own.
+
 The agent gets `remember` and `recall` tools. Recall is semantic: embeddings
 come from whatever you configure, and the default is a deterministic offline
 hashing embedder so semantic recall works with no extra dependency and no
@@ -702,6 +794,26 @@ goes missing.
 - `Orchestrator` takes `runtime_agents`, `max_runtime_agents` and `compact_at`
   and passes them to its manager.
 
+**Memory knows whose it is, and where it lives**
+- `Trace` — a user id, a session id, a tenant, or any combination. Pass it to an
+  `Agent` or a `MemoryManager` and every record is stamped with it on write and
+  filtered by it on read, so one store serves many users without them seeing
+  each other. `scope` decides what documents like `user.md` are namespaced by:
+  `"user"` (default), `"session"`, `"tenant"` or `"global"`. A record written
+  without a trace stays shared rather than orphaned.
+- `MemoryManager.for_trace(user_id)` — the same backend scoped to somebody else,
+  reusing the store and its vector index rather than rebuilding them.
+- New `agent_harness.memory.providers` package: thirteen interchangeable
+  backends — `SQLiteMemory` (standard library), `PostgresMemory`, `MySQLMemory`,
+  `MongoMemory`, `RedisMemory`, `DynamoDBMemory`, `ElasticsearchMemory`,
+  `S3Memory`, `AzureBlobMemory`, `GCSMemory`, `HTTPMemory`, plus the existing
+  in-process and file stores.
+- `memory_provider("postgresql://...")` builds one from a connection string;
+  `available_backends()` says which are ready; `register_backend()` adds yours.
+- Every driver is imported on first use, so `import agent_harness` still touches
+  none of them, and a driver you have not installed names its own `pip install`
+  instead of raising `ImportError` mid-run.
+
 **Guardrails you can put on one agent** — new `agent_harness.guardrails` package
 - `AgentGuardrails` — what an agent may touch and what must be true before its
   answer is accepted. A forbidden tool is refused before it runs; everything
@@ -780,6 +892,15 @@ goes missing.
   when the bar reached the plot floor.
 - The `delegate` tool's schema listed only the sub-agents present when it was
   first built, hiding every one attached afterwards.
+- Subprocess transports (workspace `shell`, the sandboxed Python tool, and MCP
+  stdio servers) are now released when the process finishes instead of being
+  left to the garbage collector. On Python 3.10 the collector runs after the
+  event loop has closed, so the destructor raised "Event loop is closed" from
+  somewhere nothing could catch it. The test suite now fails on an unraisable
+  exception rather than warning about it.
+- `MCPClient.close()` did not catch `asyncio.TimeoutError` on Python 3.10,
+  where it is a different class from the builtin `TimeoutError`, so a server
+  that ignored `terminate()` was never killed.
 
 ### Security
 
@@ -1589,24 +1710,36 @@ Properties: names
 
 ### `MemoryManager`  (class)
 One object an agent holds that knows about all four scopes.
-Methods: `close_session(self, summary: str | None = None) -> str`, `prompt_blocks(self, query: str = ) -> list[str]`, `recall(self, query: str, *, limit: int | None = None, scope: str | None = None) -> list[MemoryRecord]`, `remember(self, text: str, *, kind: str = fact, scope: str = user, tags: list[str] | None = None) -> MemoryRecord`, `subagent(self, task: str, agent: str = ) -> SubAgentMemory`, `tools(self) -> list[Tool]`
+Methods: `aclose(self) -> None`, `close_session(self, summary: str | None = None) -> str`, `for_trace(self, trace: Trace | str | dict[str, Any], **kw: Any) -> MemoryManager`, `prompt_blocks(self, query: str = ) -> list[str]`, `recall(self, query: str, *, limit: int | None = None, scope: str | None = None) -> list[MemoryRecord]`, `remember(self, text: str, *, kind: str = fact, scope: str = user, tags: list[str] | None = None) -> MemoryRecord`, `subagent(self, task: str, agent: str = ) -> SubAgentMemory`, `tools(self) -> list[Tool]`
+
+### `Trace`  (class)
+Who a memory belongs to, and how widely it is shared.
+Methods: `at(self, scope: Scope) -> Trace`, `axes(self, *, depth: int | None = None) -> list[tuple[str, str]]`, `child(self, **overrides: Any) -> Trace`, `filters(self) -> dict[str, str]`, `matches(self, record: Any) -> bool`, `of(value: Trace | str | dict[str, Any] | None, **kw: Any) -> Trace`, `stamp(self, record: Any) -> Any`
+Properties: is_empty, namespace, slug
+Fields: user_id, session_id, tenant_id, agent, run_id, scope, tags
+
+### `memory_provider(url: str, **options: Any) -> MemoryStore`  (function)
+Build a store from a connection string.
+
+### `available_backends() -> dict[str, bool]`  (function)
+Which backends can be used right now, without installing anything.
 
 ### `MemoryStore`  (class)
 Append-only records plus a handful of named documents (like `user.md`).
-Methods: `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None) -> None`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str) -> None`
+Methods: `aclose(self) -> None`, `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None, trace: Trace | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None, *, trace: Trace | None = None) -> None`, `doc_key(name: str, trace: Trace | None) -> str`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str, *, trace: Trace | None = None) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5, trace: Trace | None = None) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str, *, trace: Trace | None = None) -> None`
 
 ### `MemoryRecord`  (class)
 One remembered thing. `kind` is free-form: fact, decision, finding, plan...
 Methods: `line(self) -> str`
-Fields: id, scope, kind, text, data, tags, source, ts, embedding
+Fields: id, scope, kind, text, data, tags, source, user_id, session_id, tenant_id, ts, embedding
 
 ### `InMemoryStore`  (class)
 The default. Fast, and gone when the process exits.
-Methods: `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None) -> None`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str) -> None`
+Methods: `aclose(self) -> None`, `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None, trace: Trace | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None, *, trace: Trace | None = None) -> None`, `doc_key(name: str, trace: Trace | None) -> str`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str, *, trace: Trace | None = None) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5, trace: Trace | None = None) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str, *, trace: Trace | None = None) -> None`
 
 ### `FileStore`  (class)
 Durable memory on disk: one JSONL per scope, plain files for documents.
-Methods: `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None) -> None`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str) -> None`
+Methods: `aclose(self) -> None`, `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None, trace: Trace | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None, *, trace: Trace | None = None) -> None`, `doc_key(name: str, trace: Trace | None) -> str`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str, *, trace: Trace | None = None) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5, trace: Trace | None = None) -> list[MemoryRecord]`, `write_doc(self, name: str, text: str, *, trace: Trace | None = None) -> None`
 
 ### `UserMemory`  (class)
 `user.md` — what is true across sessions. Loaded in full, every message.
@@ -1626,11 +1759,11 @@ Methods: `close(self) -> list[Artifact]`, `note(self, text: str) -> None`, `prod
 
 ### `SemanticMemory`  (class)
 A MemoryStore that also retrieves by meaning. Wraps any other store.
-Methods: `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None) -> None`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[MemoryRecord]`, `search_scored(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[tuple[float, MemoryRecord]]`, `write_doc(self, name: str, text: str) -> None`
+Methods: `aclose(self) -> None`, `all(self, scope: str | None = None, *, limit: int | None = None, kind: str | None = None, trace: Trace | None = None) -> list[MemoryRecord]`, `append(self, record: MemoryRecord) -> MemoryRecord`, `clear(self, scope: str | None = None, *, trace: Trace | None = None) -> None`, `doc_key(name: str, trace: Trace | None) -> str`, `extend(self, records: list[MemoryRecord]) -> None`, `read_doc(self, name: str, *, trace: Trace | None = None) -> str`, `search(self, query: str, *, scope: str | None = None, limit: int = 5, trace: Trace | None = None) -> list[MemoryRecord]`, `search_scored(self, query: str, *, scope: str | None = None, limit: int = 5, trace: Trace | None = None) -> list[tuple[float, MemoryRecord]]`, `write_doc(self, name: str, text: str, *, trace: Trace | None = None) -> None`
 
 ### `VectorStore`  (class)
 A brute-force cosine index. Exact, dependency-free, fine to ~50k rows.
-Methods: `add(self, vector: list[float], record: MemoryRecord) -> None`, `clear(self) -> None`, `search(self, vector: list[float], *, limit: int = 5, scope: str | None = None, min_score: float = 0.0) -> list[tuple[float, MemoryRecord]]`
+Methods: `add(self, vector: list[float], record: MemoryRecord) -> None`, `clear(self) -> None`, `search(self, vector: list[float], *, limit: int = 5, scope: str | None = None, min_score: float = 0.0, trace: Trace | None = None) -> list[tuple[float, MemoryRecord]]`
 
 ### `Embedder`  (class)
 Base class for protocol classes.

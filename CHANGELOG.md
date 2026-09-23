@@ -30,6 +30,26 @@ goes missing.
 - `Orchestrator` takes `runtime_agents`, `max_runtime_agents` and `compact_at`
   and passes them to its manager.
 
+**Memory knows whose it is, and where it lives**
+- `Trace` — a user id, a session id, a tenant, or any combination. Pass it to an
+  `Agent` or a `MemoryManager` and every record is stamped with it on write and
+  filtered by it on read, so one store serves many users without them seeing
+  each other. `scope` decides what documents like `user.md` are namespaced by:
+  `"user"` (default), `"session"`, `"tenant"` or `"global"`. A record written
+  without a trace stays shared rather than orphaned.
+- `MemoryManager.for_trace(user_id)` — the same backend scoped to somebody else,
+  reusing the store and its vector index rather than rebuilding them.
+- New `agent_harness.memory.providers` package: thirteen interchangeable
+  backends — `SQLiteMemory` (standard library), `PostgresMemory`, `MySQLMemory`,
+  `MongoMemory`, `RedisMemory`, `DynamoDBMemory`, `ElasticsearchMemory`,
+  `S3Memory`, `AzureBlobMemory`, `GCSMemory`, `HTTPMemory`, plus the existing
+  in-process and file stores.
+- `memory_provider("postgresql://...")` builds one from a connection string;
+  `available_backends()` says which are ready; `register_backend()` adds yours.
+- Every driver is imported on first use, so `import agent_harness` still touches
+  none of them, and a driver you have not installed names its own `pip install`
+  instead of raising `ImportError` mid-run.
+
 **Guardrails you can put on one agent** — new `agent_harness.guardrails` package
 - `AgentGuardrails` — what an agent may touch and what must be true before its
   answer is accepted. A forbidden tool is refused before it runs; everything
@@ -108,6 +128,15 @@ goes missing.
   when the bar reached the plot floor.
 - The `delegate` tool's schema listed only the sub-agents present when it was
   first built, hiding every one attached afterwards.
+- Subprocess transports (workspace `shell`, the sandboxed Python tool, and MCP
+  stdio servers) are now released when the process finishes instead of being
+  left to the garbage collector. On Python 3.10 the collector runs after the
+  event loop has closed, so the destructor raised "Event loop is closed" from
+  somewhere nothing could catch it. The test suite now fails on an unraisable
+  exception rather than warning about it.
+- `MCPClient.close()` did not catch `asyncio.TimeoutError` on Python 3.10,
+  where it is a different class from the builtin `TimeoutError`, so a server
+  that ignored `terminate()` was never killed.
 
 ### Security
 

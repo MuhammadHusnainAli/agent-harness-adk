@@ -36,6 +36,7 @@ from .guardrails import AgentGuardrails
 from .guardrails.checks import CompletionContext
 from .harness import Harness
 from .memory.manager import MemoryManager
+from .memory.trace import Trace
 from .prompts import Prompt
 from .providers import resolve_provider
 from .providers.base import CompletionRequest, Provider
@@ -131,6 +132,7 @@ class Agent:
         max_runtime_agents: int = 5,
         runtime_agent_tools: Iterable[str] | None = None,
         memory: MemoryManager | bool = True,
+        trace: Trace | str | dict[str, Any] | None = None,
         harness: Harness | None = None,
         hooks: HookEngine | None = None,
         policy: PolicyGate | None = None,
@@ -192,13 +194,19 @@ class Agent:
             self.skills = None
 
         # --- memory -----------------------------------------------------
+        self.trace = Trace.of(trace, agent=name) if trace is not None else None
         if isinstance(memory, MemoryManager):
             self.memory: MemoryManager | None = memory
+            if self.trace is not None:
+                self.memory = memory.for_trace(self.trace)
         elif memory:
             self.memory = MemoryManager(self.harness.memory_store,
-                                        summarize=self._summarize)
+                                        summarize=self._summarize,
+                                        trace=self.trace)
         else:
             self.memory = None
+        if self.memory is not None:
+            self.trace = self.memory.trace
 
         # --- workspace --------------------------------------------------
         if isinstance(workspace, Workspace):

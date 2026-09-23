@@ -79,8 +79,11 @@ from .memory import (
     SemanticMemory,
     SessionMemory,
     SubAgentMemory,
+    Trace,
     UserMemory,
     VectorStore,
+    available_backends,
+    memory_provider,
 )
 from .orchestrator import Orchestrator, Plan, Review, Task
 from .prompts import Prompt, PromptLibrary
@@ -208,6 +211,9 @@ __all__ = [
     "SubAgentMemory",
     "SemanticMemory",
     "VectorStore",
+    "Trace",
+    "memory_provider",
+    "available_backends",
     "Embedder",
     "HashEmbedder",
     "ProviderEmbedder",

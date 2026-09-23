@@ -178,6 +178,98 @@ await agent.run("What currency do I use?", messages=[])   # clean run, still kno
 print(await agent.close_session())   # session close → user.md rewritten
 ```
 
+### Whose memory is it? — `trace`
+
+A trace says who a memory belongs to. Pass one and every record is stamped with
+it on the way in and filtered by it on the way out, so one store serves any
+number of users without them ever seeing each other.
+
+```python
+agent = Agent("support", trace="alice")                      # a bare user id
+agent = Agent("support", trace=Trace(user_id="alice", session_id="s-42"))
+agent = Agent("support", trace=Trace(tenant_id="acme", user_id="alice"))
+```
+
+```python
+alice = MemoryManager(store, trace="alice")
+bob   = MemoryManager(store, trace="bob")
+
+await alice.user.remember("bills in EUR")
+await bob.user.load()        # "" — bob never sees it
+```
+
+One manager, many users, one backend:
+
+```python
+shared = MemoryManager(store)
+await shared.for_trace(request.user_id).user.remember(fact)
+```
+
+`for_trace` reuses the store and its vector index, so serving a request per user
+costs a small object rather than a rebuilt index.
+
+`scope` decides what documents like `user.md` are namespaced by — `"user"` (the
+default: preferences follow the person across sessions), `"session"`, `"tenant"`
+or `"global"`. A record written without a trace stays visible to everyone: it is
+shared, not orphaned.
+
+### Where is it stored? — `memory/providers`
+
+Thirteen backends, one contract. The agent loop never learns which is behind it.
+
+```python
+from agent_harness import memory_provider
+
+store = memory_provider("postgresql://user:pass@host/agents")
+store = memory_provider("mongodb://localhost:27017", database="agents")
+store = memory_provider("s3://my-bucket/agent-memory")
+store = memory_provider("sqlite:///./memory.db")
+
+agent = Agent("support", memory=MemoryManager(store, trace="alice"))
+```
+
+| Backend | Class | Needs |
+|---|---|---|
+| in-process | `InMemoryStore` | — |
+| files | `FileStore` | — |
+| **SQLite** | `SQLiteMemory` | — (standard library) |
+| **PostgreSQL** | `PostgresMemory` | `asyncpg` or `psycopg` |
+| **MySQL / MariaDB** | `MySQLMemory` | `aiomysql` |
+| **MongoDB** | `MongoMemory` | `motor` or `pymongo` |
+| **Redis** | `RedisMemory` | `redis` |
+| **DynamoDB** | `DynamoDBMemory` | `boto3` |
+| **Elasticsearch / OpenSearch** | `ElasticsearchMemory` | `elasticsearch` |
+| **Amazon S3** | `S3Memory` | `boto3` |
+| **Azure Blob Storage** | `AzureBlobMemory` | `azure-storage-blob` |
+| **Google Cloud Storage** | `GCSMemory` | `google-cloud-storage` |
+| **your own API** | `HTTPMemory` | — (httpx already ships) |
+
+Nothing is imported until you ask for it — a driver you do not use costs nothing
+at import, and one you have not installed names its own `pip install` rather than
+raising `ImportError` somewhere deep in a run:
+
+```python
+from agent_harness import available_backends
+available_backends()
+# {'sqlite': True, 'postgres': False, 's3': False, ...}
+```
+
+Choosing between them:
+
+- **SQLite** is the right default for a single service — durable, indexed, no
+  server to run.
+- **Postgres, MySQL and Mongo** index on the trace, so reading one user's memory
+  is one query however many users you have.
+- **Redis** suits session-scoped memory: pass `ttl=` and it expires itself.
+- **Elasticsearch** is the only backend where `search()` is ranked by the engine,
+  so recall is good without an embedder.
+- **S3, Azure Blob and GCS** lay keys out so a trace is a prefix. That makes one
+  user's memory a single listing, but anything narrower is filtered after the
+  fetch — treat them as durable archival rather than a hot query path.
+- **HTTPMemory** is for when memory must live behind a service you already run.
+
+`register_backend("cassandra", "myapp.memory", "CassandraMemory")` adds your own.
+
 The agent gets `remember` and `recall` tools. Recall is semantic: embeddings
 come from whatever you configure, and the default is a deterministic offline
 hashing embedder so semantic recall works with no extra dependency and no

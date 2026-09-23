@@ -21,6 +21,7 @@ from ..tools import Tool, tool
 from ..types import Artifact, Message, new_id
 from .base import InMemoryStore, MemoryRecord, MemoryStore
 from .semantic import Embedder, SemanticMemory, VectorStore
+from .trace import Trace
 
 __all__ = ["UserMemory", "SessionMemory", "OrchestratorMemory", "SubAgentMemory",
            "MemoryManager"]
@@ -53,23 +54,27 @@ class UserMemory:
     """`user.md` — what is true across sessions. Loaded in full, every message."""
 
     def __init__(self, store: MemoryStore, *, doc: str = "user.md",
-                 max_chars: int = 8000) -> None:
+                 max_chars: int = 8000, trace: Trace | None = None) -> None:
         self.store = store
         self.doc = doc
         self.max_chars = max_chars
+        self.trace = trace
 
     async def load(self) -> str:
-        return (await self.store.read_doc(self.doc)).strip()
+        return (await self.store.read_doc(self.doc, trace=self.trace)).strip()
 
     async def write(self, text: str) -> None:
-        await self.store.write_doc(self.doc, text.strip()[: self.max_chars])
+        await self.store.write_doc(self.doc, text.strip()[: self.max_chars],
+                                   trace=self.trace)
 
     async def remember(self, text: str, *, kind: str = "preference",
                        tags: list[str] | None = None) -> MemoryRecord:
         """Record a durable fact and append it to the document."""
-        record = await self.store.append(MemoryRecord(
-            scope="user", kind=kind, text=text.strip(), tags=tags or []
-        ))
+        record = MemoryRecord(scope="user", kind=kind, text=text.strip(),
+                              tags=tags or [])
+        if self.trace is not None:
+            self.trace.stamp(record)
+        record = await self.store.append(record)
         current = await self.load()
         if record.line() not in current:
             await self.write(f"{current}\n{record.line()}" if current else record.line())
@@ -147,14 +152,18 @@ class SessionMemory:
 class OrchestratorMemory:
     """Plans, staffing calls, spend, findings — read back as a digest, never raw."""
 
-    def __init__(self, store: MemoryStore, *, job_id: str | None = None) -> None:
+    def __init__(self, store: MemoryStore, *, job_id: str | None = None,
+                 trace: Trace | None = None) -> None:
         self.store = store
         self.job_id = job_id or new_id("job")
+        self.trace = trace
         self._local: list[MemoryRecord] = []
 
     async def note(self, kind: str, text: str, **data: Any) -> MemoryRecord:
         record = MemoryRecord(scope="orchestrator", kind=kind, text=text, data=data,
                               source=self.job_id)
+        if self.trace is not None:
+            self.trace.stamp(record)
         self._local.append(record)
         await self.store.append(record)
         return record
@@ -242,6 +251,7 @@ class MemoryManager:
         user_doc: str = "user.md",
         summarize: Summarizer | None = None,
         recall_limit: int = 4,
+        trace: Trace | str | dict[str, Any] | None = None,
     ) -> None:
         base = store or InMemoryStore()
         if isinstance(semantic, SemanticMemory):
@@ -250,9 +260,15 @@ class MemoryManager:
             self.store = SemanticMemory(base, embedder=embedder, index=index)
         else:
             self.store = base
-        self.user = UserMemory(self.store, doc=user_doc)
+        self.trace = Trace.of(trace)
+        # A session id on the trace and the live session should be the same thing.
+        if self.trace.session_id is None and session is not None:
+            self.trace.session_id = session.id
+        self.user = UserMemory(self.store, doc=user_doc, trace=self.trace)
         self.session = session or SessionMemory()
-        self.orchestrator = OrchestratorMemory(self.store)
+        if self.trace.session_id is None:
+            self.trace.session_id = self.session.id
+        self.orchestrator = OrchestratorMemory(self.store, trace=self.trace)
         self.summarize = summarize
         self.recall_limit = recall_limit
 
@@ -264,14 +280,31 @@ class MemoryManager:
                        tags: list[str] | None = None) -> MemoryRecord:
         if scope == "user":
             return await self.user.remember(text, kind=kind, tags=tags)
-        return await self.store.append(
-            MemoryRecord(scope=scope, kind=kind, text=text, tags=tags or [])
-        )
+        record = MemoryRecord(scope=scope, kind=kind, text=text, tags=tags or [])
+        self.trace.stamp(record)
+        return await self.store.append(record)
 
     async def recall(self, query: str, *, limit: int | None = None,
                      scope: str | None = None) -> list[MemoryRecord]:
         return await self.store.search(query, scope=scope,
-                                       limit=limit or self.recall_limit)
+                                       limit=limit or self.recall_limit,
+                                       trace=self.trace)
+
+    def for_trace(self, trace: Trace | str | dict[str, Any], **kw: Any) -> MemoryManager:
+        """The same backend, scoped to somebody else. One store, many users.
+
+        The store is reused as it is — including its vector index — so serving a
+        request per user costs a small object, not a rebuilt index.
+        """
+        return MemoryManager(
+            self.store,
+            semantic=self.store if isinstance(self.store, SemanticMemory) else False,
+            trace=Trace.of(trace, **kw), summarize=self.summarize,
+            recall_limit=self.recall_limit, user_doc=self.user.doc,
+        )
+
+    async def aclose(self) -> None:
+        await self.store.aclose()
 
     # ---- what reaches the model ---------------------------------------
     async def prompt_blocks(self, query: str = "") -> list[str]:

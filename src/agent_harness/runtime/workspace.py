@@ -27,6 +27,23 @@ __all__ = ["Workspace", "DockerWorkspace", "WorkspaceBroker"]
 _Timeout = (TimeoutError, asyncio.TimeoutError)
 
 
+def _release(proc: Any) -> None:
+    """Close a finished subprocess's transport.
+
+    Without this the transport is closed by `__del__` whenever the garbage
+    collector gets to it — which, on Python 3.10, is usually after the event
+    loop that owns it has closed, and it raises "Event loop is closed" from a
+    destructor where nothing can catch it.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except (RuntimeError, AttributeError):  # already closed, or loop gone
+        pass
+
+
 class Workspace:
     """A jailed directory plus the tools that operate inside it."""
 
@@ -124,18 +141,21 @@ class Workspace:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(),
-                                              timeout or self.timeout)
-        except _Timeout:
-            proc.kill()
-            await proc.wait()
-            raise ToolError(f"command timed out after {timeout or self.timeout}s",
-                            tool="shell") from None
-        return {
-            "returncode": proc.returncode,
-            "stdout": out.decode(errors="replace")[-20_000:],
-            "stderr": err.decode(errors="replace")[-8_000:],
-        }
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(),
+                                                  timeout or self.timeout)
+            except _Timeout:
+                proc.kill()
+                await proc.wait()
+                raise ToolError(f"command timed out after {timeout or self.timeout}s",
+                                tool="shell") from None
+            return {
+                "returncode": proc.returncode,
+                "stdout": out.decode(errors="replace")[-20_000:],
+                "stderr": err.decode(errors="replace")[-8_000:],
+            }
+        finally:
+            _release(proc)
 
     # ---- tools ------------------------------------------------------------
     def tools(self) -> list[Tool]:
@@ -238,17 +258,21 @@ class DockerWorkspace(Workspace):
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout or self.timeout)
-        except _Timeout:
-            proc.kill()
-            await proc.wait()
-            raise ToolError(f"container timed out after {timeout or self.timeout}s",
-                            tool="shell") from None
-        return {
-            "returncode": proc.returncode,
-            "stdout": out.decode(errors="replace")[-20_000:],
-            "stderr": err.decode(errors="replace")[-8_000:],
-        }
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(),
+                                                  timeout or self.timeout)
+            except _Timeout:
+                proc.kill()
+                await proc.wait()
+                raise ToolError(f"container timed out after {timeout or self.timeout}s",
+                                tool="shell") from None
+            return {
+                "returncode": proc.returncode,
+                "stdout": out.decode(errors="replace")[-20_000:],
+                "stderr": err.decode(errors="replace")[-8_000:],
+            }
+        finally:
+            _release(proc)
 
 
 class WorkspaceBroker:

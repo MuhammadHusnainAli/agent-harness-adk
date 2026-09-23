@@ -54,6 +54,12 @@ module-name = "agent_harness"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # An exception escaping a __del__ means we leaked a resource — a subprocess
+    # transport closed after its loop, say. It is a bug, so fail on it rather
+    # than printing it and moving on.
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100

@@ -432,3 +432,32 @@ async def test_an_agent_run_is_paced_by_the_harness_rate_limit():
 
     assert harness.rate.waits >= 1
     assert harness.report()["rate"]["waits"] >= 1
+
+
+async def test_a_finished_subprocess_releases_its_transport(tmp_path):
+    """Regression: the transport used to be closed by the garbage collector.
+
+    On Python 3.10 that happens after the event loop has closed, and the
+    destructor raises "Event loop is closed" where nothing can catch it. The
+    suite now treats an unraisable exception as a failure, so if this regresses
+    the whole run fails rather than printing a warning.
+    """
+    workspace = Workspace(tmp_path / "ws", allow_shell=True)
+
+    result = await workspace.shell("echo hello")
+    assert result["returncode"] == 0
+
+    # Nothing is left holding an open transport once the command has finished.
+    import gc
+
+    gc.collect()
+
+
+async def test_a_timed_out_subprocess_also_releases_its_transport(tmp_path):
+    workspace = Workspace(tmp_path / "ws", timeout=0.2)
+    with pytest.raises(ToolError, match="timed out"):
+        await workspace.shell("sleep 5")
+
+    import gc
+
+    gc.collect()

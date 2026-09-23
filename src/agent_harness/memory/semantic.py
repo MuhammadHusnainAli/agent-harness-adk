@@ -16,6 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..providers.fake import hash_embedding
 from .base import MemoryRecord, MemoryStore
+from .trace import Trace
 
 __all__ = ["Embedder", "HashEmbedder", "ProviderEmbedder", "VectorStore", "SemanticMemory",
            "cosine"]
@@ -92,11 +93,13 @@ class VectorStore:
                 fh.write(json.dumps(blob) + "\n")
 
     def search(self, vector: list[float], *, limit: int = 5, scope: str | None = None,
-               min_score: float = 0.0) -> list[tuple[float, MemoryRecord]]:
+               min_score: float = 0.0,
+               trace: Trace | None = None) -> list[tuple[float, MemoryRecord]]:
         scored = [
             (cosine(vector, vec), rec)
             for vec, rec in self._rows
-            if scope is None or rec.scope == scope
+            if (scope is None or rec.scope == scope)
+            and (trace is None or trace.matches(rec))
         ]
         scored = [pair for pair in scored if pair[0] > min_score]
         scored.sort(key=lambda pair: -pair[0])
@@ -131,33 +134,42 @@ class SemanticMemory(MemoryStore):
         return record
 
     async def all(self, scope: str | None = None, *, limit: int | None = None,
-                  kind: str | None = None) -> list[MemoryRecord]:
-        return await self.store.all(scope, limit=limit, kind=kind)
+                  kind: str | None = None,
+                  trace: Trace | None = None) -> list[MemoryRecord]:
+        return await self.store.all(scope, limit=limit, kind=kind, trace=trace)
 
-    async def clear(self, scope: str | None = None) -> None:
-        await self.store.clear(scope)
-        if scope is None:
+    async def clear(self, scope: str | None = None, *,
+                    trace: Trace | None = None) -> None:
+        await self.store.clear(scope, trace=trace)
+        if scope is None and trace is None:
             self.index.clear()
 
-    async def read_doc(self, name: str) -> str:
-        return await self.store.read_doc(name)
+    async def read_doc(self, name: str, *, trace: Trace | None = None) -> str:
+        return await self.store.read_doc(name, trace=trace)
 
-    async def write_doc(self, name: str, text: str) -> None:
-        await self.store.write_doc(name, text)
+    async def write_doc(self, name: str, text: str, *,
+                        trace: Trace | None = None) -> None:
+        await self.store.write_doc(name, text, trace=trace)
 
-    async def search(self, query: str, *, scope: str | None = None,
-                     limit: int = 5) -> list[MemoryRecord]:
+    async def aclose(self) -> None:
+        await self.store.aclose()
+
+    async def search(self, query: str, *, scope: str | None = None, limit: int = 5,
+                     trace: Trace | None = None) -> list[MemoryRecord]:
         if not query.strip() or len(self.index) == 0:
-            return await self.store.search(query, scope=scope, limit=limit)
+            return await self.store.search(query, scope=scope, limit=limit,
+                                           trace=trace)
         vector = (await self.embedder.embed([query]))[0]
         hits = self.index.search(vector, limit=limit, scope=scope,
-                                 min_score=self.min_score)
+                                 min_score=self.min_score, trace=trace)
         if not hits:
-            return await self.store.search(query, scope=scope, limit=limit)
+            return await self.store.search(query, scope=scope, limit=limit,
+                                           trace=trace)
         return [rec for _, rec in hits]
 
     async def search_scored(self, query: str, *, scope: str | None = None,
-                            limit: int = 5) -> list[tuple[float, MemoryRecord]]:
+                            limit: int = 5, trace: Trace | None = None
+                            ) -> list[tuple[float, MemoryRecord]]:
         vector = (await self.embedder.embed([query]))[0]
         return self.index.search(vector, limit=limit, scope=scope,
-                                 min_score=self.min_score)
+                                 min_score=self.min_score, trace=trace)
