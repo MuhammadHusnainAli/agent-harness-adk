@@ -137,35 +137,64 @@ async def test_an_attached_sub_agent_runs():
 # --- running them at once ----------------------------------------------------------
 
 async def test_sub_agents_asked_for_together_run_together():
-    """Three delegations in one turn should take one delay, not three."""
-    provider = FakeProvider([
-        Message(role="assistant", content=[
-            ToolUseBlock(id=f"c{i}", name="delegate",
-                         input={"agent_name": f"worker{i}", "task": f"part {i}"})
-            for i in range(3)
-        ]),
-        tool_call("slow_lookup", topic="a"), "part 0 done",
-        tool_call("slow_lookup", topic="b"), "part 1 done",
-        tool_call("slow_lookup", topic="c"), "part 2 done",
-        "All three parts are done.",
-    ])
+    """Three delegations in one turn overlap; they do not queue.
+
+    Every child is given the same shape of work by the provider, so the timing
+    measures the harness rather than the order a shared script happens to be
+    consumed in.
+    """
+    started: dict[str, float] = {}
+    finished: dict[str, float] = {}
+
+    @tool
+    async def timed(part: str) -> str:
+        """Do one part, slowly.
+
+        Args:
+            part: which part
+        """
+        started[part] = time.perf_counter()
+        await asyncio.sleep(0.05)
+        finished[part] = time.perf_counter()
+        return part
+
+    def router(request):
+        text = request.messages[-1].text
+        if "split it" in text:
+            return Message(role="assistant", content=[
+                ToolUseBlock(id=f"c{i}", name="delegate",
+                             input={"agent_name": f"worker{i}", "task": f"part {i}"})
+                for i in range(3)])
+        for index in range(3):
+            already_ran = any(getattr(b, "type", "") == "tool_result"
+                              for m in request.messages for b in m.content)
+            if f"part {index}" in text and not already_ran:
+                return tool_call("timed", part=str(index))
+        return "done"
+
+    provider = FakeProvider([router], loop=True)
     harness = Harness.testing(provider)
-    manager = Agent("manager", provider=provider, harness=harness,
-                    tools=[slow_lookup], memory=False,
+    manager = Agent("manager", provider=provider, harness=harness, tools=[timed],
+                    memory=False,
                     subagents=[SubAgentSpec(name=f"worker{i}",
                                             description=f"Does part {i}.",
-                                            tools=["slow_lookup"])
+                                            tools=["timed"])
                                for i in range(3)])
 
-    started = time.perf_counter()
+    clock = time.perf_counter()
     result = await manager.run("split it three ways")
-    elapsed = time.perf_counter() - started
+    elapsed = time.perf_counter() - clock
 
-    assert result.output == "All three parts are done."
     assert len(result.children) == 3
     assert {c.agent for c in result.children} == {"worker0", "worker1", "worker2"}
-    # Each worker sleeps 50ms. Serially that is 150ms; together it is about 50.
-    assert elapsed < 0.12, f"they ran one after another ({elapsed:.3f}s)"
+
+    # Each sleeps 50ms. Serially that is 150ms; overlapped it is about 50.
+    assert elapsed < 0.09, f"they queued rather than overlapping ({elapsed:.3f}s)"
+    assert len(started) == 3
+
+    # The strong statement: every one of them had started before any finished.
+    assert max(started.values()) < min(finished.values())
+    assert harness.scheduler.peak == 3
 
 
 async def test_one_sub_agent_failing_does_not_take_the_others_down():

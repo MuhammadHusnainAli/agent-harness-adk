@@ -116,14 +116,40 @@ _m(id="gemini-2.0-flash", provider="gemini", context_window=1_048_576, max_outpu
 
 
 def model_info(model: str) -> ModelInfo | None:
-    """Exact match first, then longest known prefix — so dated snapshots still bill."""
-    if model in MODELS:
-        return MODELS[model]
+    """Exact match first, then longest known prefix — so dated snapshots still bill.
+
+    Platform-prefixed ids (`anthropic.claude-opus-5` on Bedrock) resolve to the
+    same model, so cost accounting works wherever it is served from.
+    """
+    for candidate in (model, normalise_model(model)):
+        if candidate in MODELS:
+            return MODELS[candidate]
     best: ModelInfo | None = None
-    for key, info in MODELS.items():
-        if model.startswith(key) and (best is None or len(key) > len(best.id)):
-            best = info
+    for candidate in (model, normalise_model(model)):
+        for key, info in MODELS.items():
+            if candidate.startswith(key) and (best is None or len(key) > len(best.id)):
+                best = info
+        if best is not None:
+            return best
     return best
+
+
+def normalise_model(model: str) -> str:
+    """Strip the platform prefixes so pricing and routing still recognise a model.
+
+    Bedrock and Vertex rename the same models: `anthropic.claude-opus-5`,
+    `us.anthropic.claude-opus-5`, `claude-opus-5@20260401`. They are the same
+    model and should cost and route the same.
+    """
+    name = model.split("@", 1)[0]                   # Vertex version suffix
+    for prefix in ("anthropic.", "us.anthropic.", "eu.anthropic.",
+                   "apac.anthropic.", "google.", "publishers/anthropic/models/",
+                   "publishers/google/models/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    if name.startswith(("us.", "eu.", "apac.")):    # cross-region inference profiles
+        name = name.split(".", 1)[1]
+    return name
 
 
 def provider_for_model(model: str) -> str:
@@ -155,24 +181,67 @@ def estimate_cost(model: str, usage: Usage) -> float:
     return round(cost, 8)
 
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
 class CompletionRequest(BaseModel):
-    """Everything one model call needs, in a form all three adapters accept."""
+    """Everything one model call needs, in a form every adapter accepts.
+
+    A parameter a provider does not have is dropped rather than guessed at —
+    Anthropic has no `seed`, OpenAI has no `top_k`, and inventing an equivalent
+    would change what you asked for. `extra` goes into the payload untouched, so
+    anything this does not cover is still reachable.
+    """
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
+    # --- what to send -------------------------------------------------------
     model: str
     messages: list[Message] = Field(default_factory=list)
     system: str | None = None
     tools: list[ToolSchema] = Field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = None  # auto | any | none | {"name": ...}
+
+    # --- how much ------------------------------------------------------------
     max_tokens: int = 8192
+
+    # --- how it should think --------------------------------------------------
+    #: Reasoning depth. `low` for mechanical work, `high` for judgement, `max`
+    #: when correctness matters more than cost.
+    effort: Effort | None = None
+    thinking: bool | None = None
+    #: An explicit thinking-token ceiling, for models that take one instead of
+    #: an effort level.
+    thinking_budget: int | None = None
+
+    # --- sampling --------------------------------------------------------------
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None                    # Anthropic, Gemini
+    seed: int | None = None                     # OpenAI, Gemini
+    frequency_penalty: float | None = None      # OpenAI, Gemini
+    presence_penalty: float | None = None       # OpenAI, Gemini
     stop: list[str] = Field(default_factory=list)
-    thinking: bool | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+    # --- shape of the answer -----------------------------------------------------
     response_schema: dict[str, Any] | None = None
+    response_mime_type: str | None = None       # Gemini
+    parallel_tool_calls: bool | None = None
+
+    # --- cost and operations -------------------------------------------------------
+    cache: bool | None = None                   # prompt caching, where supported
+    speed: str | None = None                    # Anthropic fast mode
+    user: str | None = None                     # end-user id, for abuse tracing
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    safety_settings: list[dict[str, Any]] = Field(default_factory=list)  # Gemini
+    timeout: float | None = None
+
+    #: Merged into the payload verbatim. The escape hatch for anything above.
     extra: dict[str, Any] = Field(default_factory=dict)
+
+    def merged(self, **overrides: Any) -> CompletionRequest:
+        """A copy with some fields changed — used when walking a fallback chain."""
+        return self.model_copy(update=overrides)
 
 
 class Provider(ABC):

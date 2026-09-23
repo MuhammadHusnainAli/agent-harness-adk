@@ -122,14 +122,21 @@ class OpenAIProvider(Provider):
                     "type": "function", "function": {"name": req.tool_choice["name"]}
                 }
         if not reasoning:
-            if req.temperature is not None:
-                payload["temperature"] = req.temperature
-            if req.top_p is not None:
-                payload["top_p"] = req.top_p
+            for field in ("temperature", "top_p", "frequency_penalty",
+                          "presence_penalty", "seed"):
+                value = getattr(req, field)
+                if value is not None:
+                    payload[field] = value
         elif req.effort:
+            # OpenAI's reasoning models take low/medium/high; the two levels
+            # above that map to the highest they have rather than erroring.
             payload["reasoning_effort"] = {"xhigh": "high", "max": "high"}.get(
                 req.effort, req.effort
             )
+        if req.parallel_tool_calls is not None and req.tools:
+            payload["parallel_tool_calls"] = req.parallel_tool_calls
+        if req.user:
+            payload["user"] = req.user
         if req.stop:
             payload["stop"] = req.stop
         if req.response_schema:

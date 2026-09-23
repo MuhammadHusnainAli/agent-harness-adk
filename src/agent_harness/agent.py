@@ -126,6 +126,13 @@ class Agent:
         temperature: float | None = None,
         max_tokens: int = 8192,
         thinking: bool | None = None,
+        thinking_budget: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+        cache: bool | None = None,
+        user: str | None = None,
+        model_options: dict[str, Any] | None = None,
         tools: Iterable[Tool | Callable[..., Any]] = (),
         skills: SkillRegistry | Iterable[Skill | str] | str | None = None,
         subagents: Sequence[Any] = (),
@@ -170,7 +177,10 @@ class Agent:
             "instructions": instructions, "description": description,
             "model": model, "provider": provider, "tier": tier, "effort": effort,
             "temperature": temperature, "max_tokens": max_tokens,
-            "thinking": thinking, "tools": list(tools), "skills": skills,
+            "thinking": thinking, "thinking_budget": thinking_budget,
+            "top_p": top_p, "top_k": top_k, "seed": seed, "cache": cache,
+            "user": user, "model_options": model_options,
+            "tools": list(tools), "skills": skills,
             "subagents": list(subagents), "runtime_agents": runtime_agents,
             "max_runtime_agents": max_runtime_agents,
             "runtime_agent_tools": runtime_agent_tools, "memory": memory,
@@ -235,6 +245,15 @@ class Agent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.thinking = thinking
+        # Everything else a provider will take. `model_options` is the escape
+        # hatch for anything these do not name.
+        self.model_options: dict[str, Any] = {
+            "thinking_budget": thinking_budget, "top_p": top_p, "top_k": top_k,
+            "seed": seed, "cache": cache, "user": user,
+            **(model_options or {}),
+        }
+        self.model_options = {k: v for k, v in self.model_options.items()
+                              if v is not None}
         self.max_steps = max_steps
         self.output_type = output_type
         self.tool_choice = tool_choice
@@ -589,6 +608,7 @@ class Agent:
                         stop=self.stop,
                         response_schema=(self.output_type.model_json_schema()
                                          if self.output_type else None),
+                        **self.model_options,
                     )
 
                     hook = await self.hooks.emit("pre_model", agent=self.name,

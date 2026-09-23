@@ -6,6 +6,7 @@ from typing import Any
 
 from ..errors import ConfigurationError
 from .anthropic import AnthropicProvider
+from .azure import AzureFoundryProvider, AzureOpenAIProvider
 from .base import (
     MODELS,
     CompletionRequest,
@@ -17,15 +18,23 @@ from .base import (
     provider_for_model,
     register_model,
 )
+from .bedrock import BedrockProvider
 from .fake import FakeProvider, hash_embedding, tool_call
 from .gemini import GeminiProvider
 from .openai import OpenAIProvider
+from .vertex import GoogleAuth, VertexGeminiProvider, VertexProvider
 
 __all__ = [
     "AnthropicProvider",
     "OpenAIProvider",
     "GeminiProvider",
     "FakeProvider",
+    "BedrockProvider",
+    "VertexProvider",
+    "VertexGeminiProvider",
+    "AzureOpenAIProvider",
+    "AzureFoundryProvider",
+    "GoogleAuth",
     "Provider",
     "CompletionRequest",
     "ToolSchema",
@@ -46,10 +55,19 @@ PROVIDERS: dict[str, type[Provider]] = {
     "anthropic": AnthropicProvider,
     "claude": AnthropicProvider,
     "openai": OpenAIProvider,
-    "azure": OpenAIProvider,
     "gemini": GeminiProvider,
     "google": GeminiProvider,
     "fake": FakeProvider,
+    # The same models, served by a cloud platform.
+    "bedrock": BedrockProvider,
+    "aws": BedrockProvider,
+    "vertex": VertexProvider,
+    "vertex-gemini": VertexGeminiProvider,
+    "gcp": VertexProvider,
+    "azure": AzureOpenAIProvider,
+    "azure-openai": AzureOpenAIProvider,
+    "azure-foundry": AzureFoundryProvider,
+    "foundry": AzureFoundryProvider,
 }
 
 _CACHE: dict[tuple[str, tuple], Provider] = {}

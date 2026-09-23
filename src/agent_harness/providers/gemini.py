@@ -109,17 +109,35 @@ class GeminiProvider(Provider):
         contents, inline_systems = self._encode_contents(req)
         system_parts = [p for p in ([req.system] + inline_systems) if p]
         gen: dict[str, Any] = {"maxOutputTokens": req.max_tokens}
-        if req.temperature is not None:
-            gen["temperature"] = req.temperature
-        if req.top_p is not None:
-            gen["topP"] = req.top_p
+        for field, key in (("temperature", "temperature"), ("top_p", "topP"),
+                           ("top_k", "topK"), ("seed", "seed"),
+                           ("frequency_penalty", "frequencyPenalty"),
+                           ("presence_penalty", "presencePenalty")):
+            value = getattr(req, field)
+            if value is not None:
+                gen[key] = value
         if req.stop:
             gen["stopSequences"] = req.stop
+        if req.response_mime_type:
+            gen["responseMimeType"] = req.response_mime_type
         if req.response_schema:
             gen["responseMimeType"] = "application/json"
             gen["responseSchema"] = _clean_schema(req.response_schema)
+        if req.thinking is not None or req.effort or req.thinking_budget:
+            budget = req.thinking_budget
+            if budget is None and req.effort:
+                # Gemini takes a token budget, not a level, so the levels are
+                # mapped to budgets rather than being dropped.
+                budget = {"low": 1024, "medium": 8192, "high": 16384,
+                          "xhigh": 24576, "max": 32768}[req.effort]
+            gen["thinkingConfig"] = {
+                "includeThoughts": bool(req.thinking),
+                **({"thinkingBudget": budget} if budget is not None else {}),
+            }
 
         payload: dict[str, Any] = {"contents": contents, "generationConfig": gen}
+        if req.safety_settings:
+            payload["safetySettings"] = req.safety_settings
         if system_parts:
             payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
         if req.tools:

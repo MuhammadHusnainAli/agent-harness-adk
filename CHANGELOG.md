@@ -37,6 +37,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `build("support", tools=[...])`. Tools stay in code; everything else is
   declaration. Tools may also be named as import paths.
 
+**Cloud platforms**
+- `BedrockProvider` — Claude on AWS Bedrock, with SigV4 signing implemented from
+  the standard library and checked against AWS's published test vectors
+  (signing-key derivation and the `get-vanilla` signature both match exactly).
+  Credentials come from arguments, `AWS_*`, or the botocore chain if boto3 is
+  installed.
+- `VertexProvider` and `VertexGeminiProvider` — Claude and Gemini on Google
+  Vertex AI, authenticating through `google-auth`, `gcloud`, or a token you pass.
+- `AzureOpenAIProvider` and `AzureFoundryProvider` — deployments, api-version
+  routing, `api-key` or Entra ID via `credential=`, with the Foundry route
+  overridable because those routes move.
+- Platform model ids are normalised, so `anthropic.claude-opus-5`,
+  `us.anthropic.claude-opus-5` and `claude-opus-5@20260401` resolve to the same
+  model and are priced identically — cost attribution survives the move to a
+  cloud platform.
+
+**Every connection parameter**
+- `CompletionRequest` now carries `effort` (low/medium/high/xhigh/max),
+  `thinking_budget`, `top_k`, `seed`, `frequency_penalty`, `presence_penalty`,
+  `parallel_tool_calls`, `cache`, `speed`, `user`, `metadata`,
+  `response_mime_type`, `safety_settings` and `timeout`, alongside what was
+  there before. `Agent` takes the common ones directly and `model_options={}`
+  for the rest.
+- Each adapter maps what its provider supports and drops what it does not,
+  rather than inventing an equivalent. Sampling is withheld from thinking-only
+  models that reject it, `effort` maps onto OpenAI's three levels, and becomes
+  a token budget on Gemini.
+
 **Guardrails at industry scale**
 - Algorithmic detectors that are exact where they can be: `PIIDetector`
   (Luhn-checked cards, mod-97 IBANs, precedence-ordered so a card is not also

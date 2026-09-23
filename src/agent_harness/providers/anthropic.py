@@ -113,24 +113,38 @@ class AnthropicProvider(Provider):
         if req.stop:
             payload["stop_sequences"] = req.stop
 
+        adaptive = req.model.startswith(_ADAPTIVE_THINKING)
         thinking_on = bool(req.thinking)
         if thinking_on:
-            if req.model.startswith(_ADAPTIVE_THINKING):
+            if adaptive:
                 payload["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
-                budget = max(1024, min(req.max_tokens - 1, req.max_tokens // 2))
+                budget = req.thinking_budget or max(
+                    1024, min(req.max_tokens - 1, req.max_tokens // 2))
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # Sampling knobs are rejected by the thinking-only models; only send when safe.
-        if not thinking_on and not req.model.startswith(_ADAPTIVE_THINKING):
-            if req.temperature is not None:
-                payload["temperature"] = req.temperature
-            if req.top_p is not None:
-                payload["top_p"] = req.top_p
+        # Sampling is rejected outright by the thinking-only models, so it is sent
+        # only where it is accepted rather than being silently dropped by the API.
+        if not adaptive:
+            for field, key in (("temperature", "temperature"), ("top_p", "top_p"),
+                               ("top_k", "top_k")):
+                value = getattr(req, field)
+                if value is not None:
+                    payload[key] = value
         if req.effort:
             payload["output_config"] = {"effort": req.effort}
         if req.response_schema:
             oc = payload.setdefault("output_config", {})
             oc["format"] = {"type": "json_schema", "schema": req.response_schema}
+        if req.parallel_tool_calls is False and req.tools:
+            payload.setdefault("tool_choice", {"type": "auto"})
+            payload["tool_choice"]["disable_parallel_tool_use"] = True
+        if req.cache:
+            payload["cache_control"] = {"type": "ephemeral"}
+        if req.speed:
+            payload["speed"] = req.speed
+        if req.user or req.metadata:
+            payload["metadata"] = {**req.metadata,
+                                   **({"user_id": req.user} if req.user else {})}
         if stream:
             payload["stream"] = True
         payload.update(req.extra)

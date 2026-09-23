@@ -283,3 +283,130 @@ def test_message_helpers():
     message = Message.assistant([TextBlock(text="a"), ToolUseBlock(name="t")])
     assert message.text == "a"
     assert message.tool_uses[0].name == "t"
+
+
+# --- every connection parameter, mapped per provider --------------------------
+
+FULL = dict(
+    max_tokens=4096, effort="max", thinking=True, thinking_budget=8192,
+    temperature=0.3, top_p=0.9, top_k=40, seed=7,
+    frequency_penalty=0.2, presence_penalty=0.1, stop=["END"],
+    parallel_tool_calls=False, cache=True, user="user-42",
+    metadata={"team": "support"}, response_mime_type="application/json",
+)
+
+
+async def test_anthropic_maps_what_it_supports_and_drops_what_it_does_not():
+    seen, client = capture({"content": [], "stop_reason": "end_turn", "usage": {}})
+    provider = AnthropicProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="claude-haiku-4-5", messages=[Message.user("x")], tools=TOOLS, **FULL))
+
+    body = seen["body"]
+    assert body["max_tokens"] == 4096
+    assert body["output_config"]["effort"] == "max"
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert body["temperature"] == 0.3 and body["top_p"] == 0.9 and body["top_k"] == 40
+    assert body["stop_sequences"] == ["END"]
+    assert body["tool_choice"]["disable_parallel_tool_use"] is True
+    assert body["cache_control"] == {"type": "ephemeral"}
+    assert body["metadata"] == {"team": "support", "user_id": "user-42"}
+    # Anthropic has no seed or penalties, so they are dropped rather than invented.
+    for absent in ("seed", "frequency_penalty", "presence_penalty"):
+        assert absent not in body
+
+
+async def test_a_thinking_model_is_not_sent_sampling_it_would_reject():
+    seen, client = capture({"content": [], "stop_reason": "end_turn", "usage": {}})
+    provider = AnthropicProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="claude-opus-5", messages=[Message.user("x")], thinking=True,
+        temperature=0.5, top_k=10, effort="xhigh"))
+
+    body = seen["body"]
+    assert body["thinking"]["type"] == "adaptive"
+    assert body["output_config"]["effort"] == "xhigh"
+    assert "temperature" not in body and "top_k" not in body
+
+
+async def test_openai_maps_what_it_supports():
+    seen, client = capture({"choices": [{"finish_reason": "stop",
+                                         "message": {"content": "x"}}], "usage": {}})
+    provider = OpenAIProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="gpt-4.1", messages=[Message.user("x")], tools=TOOLS, **FULL))
+
+    body = seen["body"]
+    assert body["temperature"] == 0.3 and body["top_p"] == 0.9
+    assert body["seed"] == 7
+    assert body["frequency_penalty"] == 0.2 and body["presence_penalty"] == 0.1
+    assert body["parallel_tool_calls"] is False
+    assert body["user"] == "user-42"
+    assert body["stop"] == ["END"]
+    assert "top_k" not in body                   # OpenAI has none
+
+
+async def test_effort_maps_onto_openais_three_levels():
+    for given, expected in (("low", "low"), ("medium", "medium"), ("high", "high"),
+                            ("xhigh", "high"), ("max", "high")):
+        seen, client = capture({"choices": [{"finish_reason": "stop",
+                                             "message": {"content": "x"}}],
+                                "usage": {}})
+        provider = OpenAIProvider(api_key="k", client=client)
+        await provider.complete(CompletionRequest(
+            model="o3", messages=[Message.user("x")], effort=given))
+        assert seen["body"]["reasoning_effort"] == expected, given
+
+
+async def test_gemini_maps_what_it_supports_including_a_thinking_budget():
+    seen, client = capture({"candidates": [{"finishReason": "STOP",
+                                            "content": {"parts": [{"text": "x"}]}}],
+                            "usageMetadata": {}})
+    provider = GeminiProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="gemini-2.5-pro", messages=[Message.user("x")], tools=TOOLS,
+        safety_settings=[{"category": "HARM_CATEGORY_HARASSMENT",
+                          "threshold": "BLOCK_ONLY_HIGH"}],
+        **FULL))
+
+    gen = seen["body"]["generationConfig"]
+    assert gen["temperature"] == 0.3 and gen["topP"] == 0.9 and gen["topK"] == 40
+    assert gen["seed"] == 7
+    assert gen["frequencyPenalty"] == 0.2 and gen["presencePenalty"] == 0.1
+    assert gen["stopSequences"] == ["END"]
+    assert gen["thinkingConfig"] == {"includeThoughts": True, "thinkingBudget": 8192}
+    assert seen["body"]["safetySettings"][0]["threshold"] == "BLOCK_ONLY_HIGH"
+
+
+async def test_an_effort_level_becomes_a_thinking_budget_on_gemini():
+    for effort, budget in (("low", 1024), ("medium", 8192), ("high", 16384),
+                           ("xhigh", 24576), ("max", 32768)):
+        seen, client = capture({"candidates": [{"finishReason": "STOP",
+                                                "content": {"parts": []}}],
+                                "usageMetadata": {}})
+        provider = GeminiProvider(api_key="k", client=client)
+        await provider.complete(CompletionRequest(
+            model="gemini-2.5-pro", messages=[Message.user("x")], effort=effort))
+        config = seen["body"]["generationConfig"]["thinkingConfig"]
+        assert config["thinkingBudget"] == budget, effort
+
+
+async def test_extra_reaches_the_payload_untouched():
+    seen, client = capture({"content": [], "stop_reason": "end_turn", "usage": {}})
+    provider = AnthropicProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="claude-opus-5", messages=[Message.user("x")],
+        extra={"betas": ["some-beta-2026-01-01"], "speed": "fast"}))
+    assert seen["body"]["betas"] == ["some-beta-2026-01-01"]
+    assert seen["body"]["speed"] == "fast"
+
+
+def test_the_request_carries_every_documented_parameter():
+    fields = set(CompletionRequest.model_fields)
+    assert fields >= {
+        "model", "messages", "system", "tools", "tool_choice", "max_tokens",
+        "effort", "thinking", "thinking_budget", "temperature", "top_p", "top_k",
+        "seed", "frequency_penalty", "presence_penalty", "stop",
+        "response_schema", "response_mime_type", "parallel_tool_calls",
+        "cache", "speed", "user", "metadata", "safety_settings", "timeout", "extra",
+    }

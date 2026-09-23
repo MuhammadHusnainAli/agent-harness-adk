@@ -722,8 +722,72 @@ Agent("d", provider=OpenAIProvider(base_url="http://localhost:11434/v1"))
 
 The provider is inferred from the model id. Keys come from `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `GEMINI_API_KEY`. Anything that speaks the OpenAI wire format
-(Azure, Groq, Together, Ollama, vLLM) works through `OpenAIProvider(base_url=...)`,
+(Groq, Together, Ollama, vLLM) works through `OpenAIProvider(base_url=...)`,
 and `register_provider("name", MyProvider)` adds your own.
+
+### The same models, on your cloud
+
+```python
+from agent_harness import BedrockProvider, VertexProvider, AzureOpenAIProvider
+
+# AWS Bedrock — SigV4 signed, no API key
+Agent("support", model="anthropic.claude-opus-5",
+      provider=BedrockProvider(region="eu-west-1"))
+
+# Google Vertex AI
+Agent("support", model="claude-opus-5",
+      provider=VertexProvider(project="my-project", region="europe-west1"))
+Agent("support", model="gemini-2.5-pro",
+      provider=VertexGeminiProvider(project="my-project"))
+
+# Azure OpenAI, and Azure AI Foundry
+Agent("support", provider=AzureOpenAIProvider(
+    endpoint="https://my-resource.openai.azure.com",
+    deployment="gpt-4.1-prod", api_version="2024-10-21"))
+Agent("support", provider=AzureFoundryProvider(
+    endpoint="https://my-project.services.ai.azure.com",
+    deployment="claude-opus-5"))
+```
+
+Credentials follow each platform's own conventions: `AWS_*` environment
+variables or the botocore chain (instance roles, SSO) if boto3 happens to be
+installed; `google-auth` or `gcloud auth print-access-token`; an `api-key` or
+`credential=` from `azure-identity` for Entra ID. None of those libraries are
+required — SigV4 is implemented against AWS's published test vectors using only
+the standard library.
+
+Platform model ids are normalised, so `anthropic.claude-opus-5` on Bedrock,
+`us.anthropic.claude-opus-5` on a cross-region profile and `claude-opus-5@20260401`
+on Vertex are all recognised as the same model and **priced the same** — cost
+attribution keeps working wherever a model is served from.
+
+### Every connection parameter
+
+```python
+Agent("deep",
+      model="claude-opus-5",
+      effort="max",              # low · medium · high · xhigh · max
+      thinking=True,
+      thinking_budget=16_000,    # for models that take a budget, not a level
+      temperature=0.2, top_p=0.9, top_k=40, seed=7,
+      cache=True,                # prompt caching where the provider has it
+      user="customer-42",        # for abuse tracing
+      model_options={"speed": "fast", "safety_settings": [...]})
+```
+
+A parameter a provider does not have is **dropped, not translated**: Anthropic
+has no `seed`, OpenAI has no `top_k`, and quietly substituting something else
+would change what you asked for. Two places where the mapping does real work:
+
+- **Sampling is withheld from thinking-only models**, which reject it outright —
+  so `temperature` on `claude-opus-5` with thinking on is omitted rather than
+  400-ing your run.
+- **`effort` travels everywhere.** OpenAI's reasoning models take three levels,
+  so `xhigh` and `max` map to `high`; Gemini takes a token budget, so the five
+  levels map to budgets. You write one thing and it means the same thing.
+
+`extra={...}` is merged into the payload verbatim for anything not covered —
+beta headers, new fields, a provider feature that shipped this morning.
 
 Adapters normalise everything the loop depends on: tool calls, tool results,
 thinking blocks, cache tokens, stop reasons and refusals. Cost is computed per
