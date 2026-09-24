@@ -29,6 +29,9 @@ dependencies = [
 
 [project.optional-dependencies]
 cli = ["rich>=13.0"]
+# Ed25519-signed audit trails, verifiable by auditors with only the public key.
+# Governance itself needs nothing extra: HMAC signing is in the standard library.
+governance = ["cryptography>=42"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

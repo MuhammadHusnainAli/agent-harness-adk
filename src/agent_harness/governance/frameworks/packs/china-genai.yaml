@@ -1,0 +1,39 @@
+id: china-genai
+name: China — PIPL, Generative AI Interim Measures, AI Content Labeling Measures and GB 45438-2025
+jurisdiction: cn
+kind: regulation
+binding: true
+status: >-
+  PIPL in force since 2021; GenAI Interim Measures since 15 Aug 2023; Labeling Measures
+  and mandatory standard GB 45438-2025 since 1 Sep 2025
+as_of: 2026-09-24
+summary: >-
+  Generated content carries an explicit label and implicit metadata (provider, content
+  id, timestamp); personal information leaves China only after a security assessment,
+  standard contract or certification; public-facing GenAI services are filed with the
+  CAC. Fines up to RMB 15 million or 5% of turnover.
+sources:
+  - https://www.chinalawtranslate.com/en/ai-labeling/
+  - https://www.twobirds.com/en/insights/2025/new-ai-content-labelling-rules-in-china-what-are-they-and-how-do-they-compare-to-the-eu-ai-act
+requirements:
+  - {ref: "Labeling Measures + GB 45438", title: "Explicit label on generated text", controls: [C9]}
+  - {ref: "Labeling Measures + GB 45438", title: "Implicit label — metadata with provider and content id", controls: [C9]}
+  - {ref: "GenAI Measures Art 4", title: "Generated content respects the content rules", manual: true, note: "add an LLMGuard with your content policy"}
+  - {ref: "GenAI Measures Art 7", title: "Lawful training and input data", manual: true}
+  - {ref: "GenAI Measures Art 17", title: "Security assessment and algorithm filing for public-opinion services", manual: true}
+  - {ref: "PIPL Art 28-29", title: "Sensitive personal information needs separate consent", controls: [C4, C7]}
+  - {ref: "PIPL Art 38-40", title: "Cross-border transfer only via assessment, standard contract or certification", controls: [C6]}
+  - {ref: "PIPL Art 55-56", title: "Personal information protection impact assessment", controls: [C12]}
+  - {ref: "PIPL Art 57", title: "Breach remedied and reported", controls: [C15]}
+  - {ref: "PIPL Art 24", title: "Automated decisions — transparency and the right to refuse", controls: [C8, C9]}
+policy:
+  residency:
+    transfers:
+      cn: [cn]
+    applies_to: [personal]
+  transparency: {disclose: true, label_output: true, label_for: [cn], provenance: true, languages: [zh]}
+incidents:
+  personal_data_breach:
+    - {notify: personal information protection authority and individuals, within: 0, basis: "PIPL Art 57 — immediately", min_severity: medium}
+  security_incident:
+    - {notify: CAC / sector regulator, within: 1, basis: "Measures for Reporting Cybersecurity Incidents (2025) — 1 hour for relatively major incidents", min_severity: high}

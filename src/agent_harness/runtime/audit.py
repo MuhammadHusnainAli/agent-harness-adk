@@ -3,6 +3,11 @@
 Every entry carries the hash of the one before it, so a tampered or deleted
 record breaks the chain and `verify()` says exactly where.
 
+A hash chain proves order and integrity, but anyone able to rewrite the file
+can rebuild the chain. Give the trail a `signer` (see
+`agent_harness.governance.records`) and every entry's hash is also signed, so a
+rebuilt chain fails verification without the key.
+
 This is deliberately separate from the run journal. The journal is for debugging
 and can be summarised, trimmed or thrown away; the audit trail is append-only
 and answers "who did what, when, and was it allowed".
@@ -37,6 +42,10 @@ class AuditEntry(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
     prev_hash: str = GENESIS
     hash: str = ""
+    #: A signature over `hash`, and which key made it. Outside the hashed
+    #: payload, so an unsigned trail and a signed one chain identically.
+    signature: str = ""
+    key_id: str = ""
 
     def payload(self) -> str:
         """The exact bytes the hash covers. Sorted, so it is reproducible."""
@@ -62,9 +71,13 @@ class AuditEntry(BaseModel):
 class AuditTrail:
     """Append-only, hash-chained. In memory by default; give it a path to persist."""
 
-    def __init__(self, path: str | Path | None = None, *, redact: bool = True) -> None:
+    def __init__(self, path: str | Path | None = None, *, redact: bool = True,
+                 signer: Any = None) -> None:
         self.path = Path(path) if path else None
         self.redact = redact
+        #: Anything with ``key_id``, ``sign(bytes) -> str`` and
+        #: ``verify(bytes, str) -> bool``.
+        self.signer = signer
         self.entries: list[AuditEntry] = []
         self._lock = asyncio.Lock()
         if self.path:
@@ -83,6 +96,9 @@ class AuditTrail:
             prev_hash=self.entries[-1].hash if self.entries else GENESIS,
         )
         entry.hash = entry.compute_hash()
+        if self.signer is not None:
+            entry.signature = self.signer.sign(entry.hash.encode())
+            entry.key_id = self.signer.key_id
         self.entries.append(entry)
         if self.path:
             with self.path.open("a", encoding="utf-8") as fh:
@@ -115,6 +131,11 @@ class AuditTrail:
                 return False, f"entry {entry.seq}: does not follow the previous entry"
             if entry.hash != entry.compute_hash():
                 return False, f"entry {entry.seq}: contents do not match its hash"
+            if self.signer is not None:
+                if not entry.signature:
+                    return False, f"entry {entry.seq}: is not signed"
+                if not self.signer.verify(entry.hash.encode(), entry.signature):
+                    return False, f"entry {entry.seq}: signature does not verify"
             previous = entry.hash
         return True, "chain intact"
 
@@ -130,8 +151,8 @@ class AuditTrail:
         return rows
 
     @classmethod
-    def load(cls, path: str | Path) -> AuditTrail:
-        return cls(path)
+    def load(cls, path: str | Path, *, signer: Any = None) -> AuditTrail:
+        return cls(path, signer=signer)
 
     def for_run(self, run_id: str) -> list[AuditEntry]:
         return [e for e in self.entries if e.run_id == run_id]

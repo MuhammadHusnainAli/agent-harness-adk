@@ -58,8 +58,15 @@ class Harness:
     control: StopController = field(default_factory=StopController)
     budget: Budget = field(default_factory=Budget)
     rate_limit: RateLimit = field(default_factory=RateLimit)
+    #: An `agent_harness.governance.Governance`, or None. Typed loosely so the
+    #: governance package is only imported by those who use it.
+    governance: Any = None
     _guard: BudgetGuard | None = field(default=None, repr=False)
     _rate: RateGuard | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.governance is not None:
+            self.governance.attach(self)
 
     @property
     def guard(self) -> BudgetGuard:
@@ -142,6 +149,8 @@ class Harness:
             "audit_entries": len(self.audit),
             "journal_entries": len(self.journal.entries),
             "spans": len(self.tracer.spans),
+            **({"governance": self.governance.summary()}
+               if self.governance is not None else {}),
         }
 
     async def aclose(self) -> None:

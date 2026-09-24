@@ -53,6 +53,9 @@ EXAMPLES: list[tuple[str, str]] = [
      "The whole pipeline: plan, staff, run in parallel, consolidate, review."),
     ("examples/06_assurance.py",
      "Stop control, audit trail, health, replay and quality evaluation."),
+    ("examples/07_governance.py",
+     "Governance: EU and Saudi customers on one harness — residency, approvals, "
+     "erasure and the evidence report."),
 ]
 
 

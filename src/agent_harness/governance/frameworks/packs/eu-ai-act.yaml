@@ -1,0 +1,56 @@
+id: eu-ai-act
+name: EU Artificial Intelligence Act (Regulation (EU) 2024/1689)
+jurisdiction: eu
+kind: regulation
+binding: true
+status: >-
+  Art 5 prohibitions and GPAI rules in force (Feb/Aug 2025); Art 50 transparency from
+  2 Aug 2026 (machine-readable marking for systems already on the market: 2 Dec 2026);
+  high-risk obligations deferred by the Digital Omnibus (in force 27 Jul 2026) to
+  2 Dec 2027 (Annex III) and 2 Aug 2028 (Annex I)
+as_of: 2026-09-24
+summary: >-
+  Risk-based rules for AI systems. For agents the practical duties are: refuse prohibited
+  practices, tell people they are dealing with AI, mark generated content, and — for
+  high-risk uses — log automatically, keep humans able to oversee and stop the system,
+  and report serious incidents.
+sources:
+  - https://eur-lex.europa.eu/eli/reg/2024/1689/oj
+  - https://artificialintelligenceact.eu/transparency-rules-article-50/
+  - https://www.gibsondunn.com/eu-ai-act-omnibus-agreement-postponed-high-risk-deadlines-and-other-key-changes/
+requirements:
+  - {ref: "Art 5", title: Prohibited AI practices are not deployed, controls: [C12]}
+  - {ref: "Art 4", title: AI literacy of staff operating the system, manual: true}
+  - {ref: "Art 6 + Annex III", title: High-risk classification of each use, controls: [C12, C1]}
+  - {ref: "Art 9", title: Risk management system across the lifecycle, controls: [C12, C14, C3]}
+  - {ref: "Art 10", title: Data governance for the data the system uses, controls: [C4, C5, C7]}
+  - {ref: "Art 11 + Annex IV", title: Technical documentation, controls: [C13, C16]}
+  - {ref: "Art 12", title: Automatic recording of events (logging), controls: [C10]}
+  - {ref: "Art 13", title: Instructions for use and transparency to deployers, controls: [C9, C13]}
+  - {ref: "Art 14", title: "Human oversight — understand, override and stop", controls: [C8]}
+  - {ref: "Art 15", title: "Accuracy, robustness and cybersecurity", controls: [C14, C13]}
+  - {ref: "Art 26(1)-(5)", title: "Deployer: use per instructions, assign competent oversight", controls: [C1, C8]}
+  - {ref: "Art 26(6)", title: "Deployer: keep automatically generated logs at least six months", controls: [C10]}
+  - {ref: "Art 26(7)", title: "Deployer: inform workers before workplace use", manual: true}
+  - {ref: "Art 27", title: "Fundamental rights impact assessment (public bodies, credit, insurance)", controls: [C12], note: "gov.impact_assessment(agent, 'fria') drafts it"}
+  - {ref: "Art 49", title: Registration of high-risk systems in the EU database, manual: true}
+  - {ref: "Art 50(1)", title: People are told they are interacting with an AI system, controls: [C9]}
+  - {ref: "Art 50(2)", title: Generated content is marked in a machine-readable way, controls: [C9]}
+  - {ref: "Art 50(4)", title: Deep fakes and public-interest text are disclosed, controls: [C9]}
+  - {ref: "Art 72", title: Post-market monitoring, controls: [C14, C16]}
+  - {ref: "Art 73", title: Serious incidents reported to market surveillance authorities, controls: [C15]}
+policy:
+  transparency: {disclose: true, provenance: true, languages: [en]}
+  log_retention_days: 183
+  rules:
+    - id: art14-oversight-high-risk
+      on: tool
+      match: {risk: high, tags: [consequential, irreversible]}
+      effect: require_approval
+      reason: "EU AI Act Art 14: a person reviews consequential actions of a high-risk system"
+      controls: [C8]
+incidents:
+  serious_incident:
+    - {notify: market surveillance authority, within: 360, basis: "Art 73(2) — 15 days", min_severity: medium}
+    - {notify: market surveillance authority, within: 240, basis: "Art 73(4) — 10 days where a death is involved", min_severity: high}
+    - {notify: market surveillance authority, within: 48, basis: "Art 73(3) — 2 days: widespread infringement or critical infrastructure", min_severity: critical}

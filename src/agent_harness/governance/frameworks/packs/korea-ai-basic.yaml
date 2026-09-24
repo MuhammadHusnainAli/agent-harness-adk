@@ -1,0 +1,42 @@
+id: korea-ai-basic
+name: South Korea Framework Act on AI (AI Basic Act) and PIPA
+jurisdiction: kr
+kind: law
+binding: true
+status: >-
+  AI Basic Act and Enforcement Decree in force 22 January 2026; MSIT grace period of at
+  least one year before fines, except serious harm
+as_of: 2026-09-24
+summary: >-
+  Tell users in advance that AI is used and label generated output; high-impact AI
+  (hiring, lending, healthcare, energy, public services, education) needs risk
+  management, explanation, human oversight and records. Foreign operators above the
+  thresholds appoint a domestic representative. Personal data breaches go to the PIPC
+  within 72 hours under PIPA.
+sources:
+  - https://www.cooley.com/news/insight/2026/2026-01-27-south-koreas-ai-basic-act-overview-and-key-takeaways
+  - https://www.loc.gov/item/global-legal-monitor/2026-02-20/south-korea-comprehensive-ai-legal-framework-takes-effect
+requirements:
+  - {ref: "Art 31(1)", title: "Users told in advance that the product uses AI", controls: [C9]}
+  - {ref: "Art 31(2)-(3)", title: "Generated output labelled as AI-generated", controls: [C9]}
+  - {ref: "Art 33", title: "Whether the system is high-impact is determined", controls: [C12]}
+  - {ref: "Art 34", title: "High-impact: risk management plan", controls: [C12, C14]}
+  - {ref: "Art 34", title: "High-impact: explanation of outcomes", controls: [C10, C9]}
+  - {ref: "Art 34", title: "High-impact: human oversight and supervision", controls: [C8]}
+  - {ref: "Art 34", title: "High-impact: documents kept on safety and reliability", controls: [C10, C13]}
+  - {ref: "Art 35", title: "Impact assessment on fundamental rights", controls: [C12]}
+  - {ref: "Art 36", title: "Domestic representative for foreign operators", manual: true}
+  - {ref: "PIPA Art 28-8", title: "Overseas transfer only on a lawful basis", controls: [C6]}
+  - {ref: "PIPA Art 34", title: "Breach notified to data subjects and the PIPC", controls: [C15]}
+policy:
+  transparency: {disclose: true, label_output: true, label_for: [kr], provenance: true, languages: [ko]}
+  rules:
+    - id: art34-high-impact-oversight
+      on: tool
+      match: {risk: high, tags: [consequential]}
+      effect: require_approval
+      reason: "Korea AI Basic Act Art 34: human oversight of high-impact AI"
+      controls: [C8]
+incidents:
+  personal_data_breach:
+    - {notify: Personal Information Protection Commission, within: 72, basis: "PIPA Art 34 — 72 hours", min_severity: medium}

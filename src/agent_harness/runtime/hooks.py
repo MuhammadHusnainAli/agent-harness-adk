@@ -9,6 +9,12 @@
 
 A `pre_tool` handler can block the call or rewrite its arguments; `post_tool`
 can rewrite the result before the model ever sees it.
+
+`model_egress` fires once per provider actually tried — after the fallback
+chain has picked the backend, so a handler sees where the data is really going
+(provider, model, region). Blocking it skips that backend and moves on to the
+next model in the chain; replacing it swaps the request sent to that backend
+only, leaving the agent's own history untouched.
 """
 
 from __future__ import annotations
@@ -22,13 +28,13 @@ __all__ = ["HookEvent", "HookContext", "HookEngine"]
 
 HookEvent = Literal[
     "run_start", "run_end", "step_start", "step_end",
-    "pre_model", "post_model", "pre_tool", "post_tool",
+    "pre_model", "post_model", "model_egress", "pre_tool", "post_tool",
     "subagent_start", "subagent_end", "memory_write", "error",
 ]
 
 EVENTS: tuple[str, ...] = (
     "run_start", "run_end", "step_start", "step_end", "pre_model", "post_model",
-    "pre_tool", "post_tool", "subagent_start", "subagent_end", "memory_write", "error",
+    "model_egress", "pre_tool", "post_tool", "subagent_start", "subagent_end", "memory_write", "error",
 )
 
 

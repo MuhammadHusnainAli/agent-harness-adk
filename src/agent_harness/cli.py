@@ -214,6 +214,84 @@ def _journal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _governance(args: argparse.Namespace) -> int:
+    import os
+
+    from .governance import Governance, HMACSigner, list_packs, load_pack
+    from .runtime.audit import AuditTrail
+
+    if args.action == "packs":
+        rows = [load_pack(p) for p in list_packs()]
+        if args.json:
+            print(json.dumps([{"id": p.id, "name": p.name, "jurisdiction": p.jurisdiction,
+                               "kind": p.kind, "binding": p.binding, "as_of": p.as_of}
+                              for p in rows], indent=2))
+            return 0
+        for p in rows:
+            kind = p.kind if p.binding else f"{p.kind}, voluntary"
+            print(f"{p.id:<19} {p.jurisdiction:<8} {kind:<22} {p.name}")
+        return 0
+
+    if args.action == "pack":
+        if not args.target:
+            print("usage: agent-harness governance pack <id>", file=sys.stderr)
+            return 2
+        p = load_pack(args.target)
+        print(f"{p.name}\n  {p.jurisdiction} · {p.kind} · "
+              f"{'binding' if p.binding else 'voluntary'} · checked {p.as_of}")
+        print(f"  status   {' '.join(p.status.split())}")
+        print("\nrequirements")
+        for r in p.requirements:
+            where = "manual" if r.manual else ", ".join(r.controls)
+            print(f"  {r.ref:<28} {r.title}  [{where}]")
+        if p.policy.rules:
+            print("\nrules")
+            for rule in p.policy.rules:
+                print(f"  {rule.id}: {rule.effect} on {', '.join(rule.on)} — {rule.reason}")
+        if p.policy.residency and p.policy.residency.transfers:
+            print("\nresidency")
+            for origin, dest in p.policy.residency.transfers.items():
+                print(f"  {origin} → {', '.join(dest)}")
+        if p.incidents:
+            print("\nincident clocks")
+            for kind, clocks in p.incidents.items():
+                for c in clocks:
+                    print(f"  {kind}: {c.get('notify')} within {c.get('within')} h "
+                          f"({c.get('basis', '')})")
+        print("\nsources\n" + "\n".join(f"  {u}" for u in p.sources))
+        return 0
+
+    if args.action == "verify":
+        path = Path(args.target or Path(args.state or ".harness") / "audit.jsonl")
+        if not path.exists():
+            print(f"no audit trail at {path}", file=sys.stderr)
+            return 1
+        signer = None
+        if args.key_env:
+            if not os.environ.get(args.key_env):
+                print(f"${args.key_env} is not set", file=sys.stderr)
+                return 1
+            signer = HMACSigner(os.environ[args.key_env])
+        trail = AuditTrail.load(path, signer=signer)
+        ok, why = trail.verify()
+        signed = "signed, signatures checked" if signer else "signatures not checked"
+        print(f"{path}: {len(trail)} entries, {why} ({signed})")
+        return 0 if ok else 1
+
+    if args.action == "report":
+        if not args.config:
+            print("usage: agent-harness governance report --config governance.yaml",
+                  file=sys.stderr)
+            return 2
+        gov = Governance.from_file(args.config)
+        gov.attach(Harness.testing())
+        report = gov.report(args.pack)
+        print({"json": report.json, "html": report.html}.get(args.format,
+                                                             report.markdown)())
+        return 0
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-harness",
@@ -277,6 +355,21 @@ def build_parser() -> argparse.ArgumentParser:
     journal.add_argument("--state", default=None)
     journal.add_argument("--limit", type=int, default=50)
 
+    gov = sub.add_parser("governance",
+                         help="jurisdiction packs, evidence reports, audit verification")
+    gov.add_argument("action", choices=["packs", "pack", "report", "verify"],
+                     help="packs: list them · pack <id>: one in full · "
+                          "report: evidence for a config · verify: check an audit trail")
+    gov.add_argument("target", nargs="?", default=None,
+                     help="the pack id (pack), or an audit file (verify)")
+    gov.add_argument("--config", default=None, help="a governance.yaml (report)")
+    gov.add_argument("--pack", default=None, help="report on one pack only")
+    gov.add_argument("--format", choices=["md", "json", "html"], default="md")
+    gov.add_argument("--state", default=None, help="the harness directory (verify)")
+    gov.add_argument("--key-env", default=None,
+                     help="environment variable holding the HMAC audit key (verify)")
+    gov.add_argument("--json", action="store_true", help="machine-readable (packs)")
+
     return parser
 
 
@@ -297,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_mcp(args))
         if args.command == "journal":
             return _journal(args)
+        if args.command == "governance":
+            return _governance(args)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130

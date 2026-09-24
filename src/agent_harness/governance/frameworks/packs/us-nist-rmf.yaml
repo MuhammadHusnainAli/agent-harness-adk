@@ -1,0 +1,23 @@
+id: us-nist-rmf
+name: NIST AI Risk Management Framework 1.0 and Generative AI Profile (NIST AI 600-1)
+jurisdiction: us
+kind: framework
+binding: false
+status: voluntary; widely required in US federal and enterprise procurement
+as_of: 2026-09-24
+summary: Four functions — Govern, Map, Measure, Manage — with the GenAI profile's risk list.
+sources:
+  - https://www.nist.gov/itl/ai-risk-management-framework
+  - https://doi.org/10.6028/NIST.AI.600-1
+requirements:
+  - {ref: "GOVERN 1", title: "Policies, processes and practices are in place and transparent", controls: [C3, C16]}
+  - {ref: "GOVERN 2", title: "Accountability structures — roles and responsibilities", controls: [C1]}
+  - {ref: "GOVERN 6", title: "Third-party and supply-chain risks are addressed", controls: [C13]}
+  - {ref: "MAP 1", title: "Context and intended purpose are established", controls: [C1, C7]}
+  - {ref: "MAP 4", title: "Risks and benefits mapped for all components, including third parties", controls: [C13, C12]}
+  - {ref: "MAP 5", title: "Impacts on individuals and groups characterised", controls: [C12]}
+  - {ref: "MEASURE 2", title: "System evaluated for trustworthy characteristics", manual: true, note: "agent_harness.Evaluator"}
+  - {ref: "MEASURE 3", title: "Risks tracked over time", controls: [C14, C10]}
+  - {ref: "MANAGE 2", title: "Mechanisms to supersede, disengage or deactivate the system", controls: [C8]}
+  - {ref: "MANAGE 4", title: "Incidents and errors communicated and responded to", controls: [C15]}
+  - {ref: "AI 600-1", title: "Data privacy, information security and value-chain risks of GenAI", controls: [C4, C5, C13]}

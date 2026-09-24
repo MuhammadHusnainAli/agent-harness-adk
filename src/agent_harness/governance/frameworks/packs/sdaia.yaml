@@ -1,0 +1,27 @@
+id: sdaia
+name: SDAIA AI Ethics Principles, Generative AI Guidelines and AI Adoption Framework
+jurisdiction: sa
+kind: guidance
+binding: false
+status: >-
+  voluntary; Ethics Principles 2023, GenAI Guidelines 2024, AI Adoption Framework
+  Nov 2025 — used in government procurement and maturity assessments
+as_of: 2026-09-24
+summary: >-
+  Saudi Arabia's AI governance guidance. Not binding, but procurement and the AI
+  adoption maturity levels expect evidence against each principle.
+sources:
+  - https://sdaia.gov.sa/en/SDAIA/about/Documents/ai-principles.pdf
+  - https://vision2030.ai/regulation/saudi-arabia-ai-regulation-sdaia/
+requirements:
+  - {ref: "Principle 1", title: "Fairness", manual: true, note: "evaluate outputs across groups with agent_harness.Evaluator"}
+  - {ref: "Principle 2", title: "Privacy and security", controls: [C4, C5, C6]}
+  - {ref: "Principle 3", title: "Humanity — humans stay in control", controls: [C8]}
+  - {ref: "Principle 4", title: "Social and environmental benefits", manual: true}
+  - {ref: "Principle 5", title: "Reliability and safety", controls: [C14]}
+  - {ref: "Principle 6", title: "Transparency and explainability", controls: [C9, C10]}
+  - {ref: "Principle 7", title: "Accountability and responsibility", controls: [C1, C10]}
+  - {ref: "GenAI Guidelines", title: "Disclose generated content and keep humans reviewing it", controls: [C9, C8]}
+  - {ref: "Adoption Framework", title: "Inventory and maturity evidence", controls: [C13, C16]}
+policy:
+  transparency: {disclose: true, provenance: true, languages: [ar, en]}

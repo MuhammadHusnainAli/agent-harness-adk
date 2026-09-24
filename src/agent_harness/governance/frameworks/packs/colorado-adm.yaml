@@ -1,0 +1,23 @@
+id: colorado-adm
+name: Colorado automated decision-making law (SB 24-205 as replaced by SB 26-189)
+jurisdiction: us
+kind: law
+binding: true
+status: >-
+  SB 26-189 signed 14 May 2026; effective 1 January 2027; narrower than SB 24-205 and
+  focused on transparency for automated decisions
+as_of: 2026-09-24
+summary: >-
+  Transparency when an automated system makes, or is a substantial factor in, a
+  consequential decision about a consumer — education, employment, lending, essential
+  government services, health care, housing, insurance, legal services.
+sources:
+  - https://www.skadden.com/insights/publications/2026/06/colorado-repeals-and-replaces-its-ai-act
+  - https://www.consumerfinancemonitor.com/2026/05/12/colorado-rewrites-its-landmark-ai-law-unpacking-sb-26-189-and-what-it-means-for-businesses/
+requirements:
+  - {ref: "Consequential decisions", title: "Identify systems used in consequential decisions", controls: [C12]}
+  - {ref: "Notice", title: "Consumers told an automated system is used", controls: [C9]}
+  - {ref: "Adverse decisions", title: "Explanation and a route to correct data or appeal", controls: [C10, C8]}
+  - {ref: "Records", title: "Keep records to show what the system did", controls: [C10]}
+policy:
+  transparency: {disclose: true}

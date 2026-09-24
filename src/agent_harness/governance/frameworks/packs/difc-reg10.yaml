@@ -1,0 +1,39 @@
+id: difc-reg10
+name: DIFC Data Protection Law 2020 and Regulation 10 (autonomous and semi-autonomous systems)
+jurisdiction: ae-difc
+kind: regulation
+binding: true
+status: Regulation 10 fully enforced since 1 January 2026; certification requirements to follow
+as_of: 2026-09-24
+summary: >-
+  The first AI-specific data-protection rule in the region. Anyone deploying or
+  operating an autonomous or semi-autonomous system that processes personal data in
+  the DIFC must give clear notice of it, keep its purposes human-defined, build it on
+  stated principles, and — for high-risk processing — appoint an Autonomous Systems
+  Officer.
+sources:
+  - https://www.difc.com/business/laws-and-regulations/legal-database/difc-laws/data-protection-law-difc-law-no-5-2020
+  - https://www.mayerbrown.com/en/insights/publications/2026/01/ai-regulation-in-the-difc-personal-data-processed-through-autonomous-and-semi-autonomous-systems
+requirements:
+  - {ref: "Reg 10", title: "Clear notice that an autonomous system processes personal data", controls: [C9]}
+  - {ref: "Reg 10", title: "Purposes defined or approved by humans", controls: [C7, C1]}
+  - {ref: "Reg 10", title: "Designed on ethical, fair, transparent, secure and accountable principles", controls: [C3, C14]}
+  - {ref: "Reg 10", title: "Human oversight of the system's outcomes", controls: [C8]}
+  - {ref: "Reg 10", title: "Autonomous Systems Officer for high-risk processing", manual: true, controls: [C1]}
+  - {ref: "Reg 10", title: "Certification of the system (requirements pending)", manual: true}
+  - {ref: "DP Law — records", title: "Records of processing", controls: [C10, C13]}
+  - {ref: "DP Law — DPIA", title: "DPIA for high-risk processing", controls: [C12]}
+  - {ref: "DP Law Art 26-27", title: "Transfers to adequate jurisdictions or with safeguards", controls: [C6], note: "declare `residency.transfers['ae-difc']` from the Commissioner's adequacy list"}
+  - {ref: "DP Law Art 41", title: "Breach notified to the Commissioner", controls: [C15]}
+policy:
+  transparency: {disclose: true, provenance: true, languages: [en, ar]}
+  rules:
+    - id: reg10-high-risk-oversight
+      on: tool
+      match: {risk: high, jurisdiction: [ae-difc], tags: [consequential, irreversible]}
+      effect: require_approval
+      reason: "DIFC Regulation 10: a person oversees high-risk autonomous processing"
+      controls: [C8]
+incidents:
+  personal_data_breach:
+    - {notify: DIFC Commissioner of Data Protection, within: 0, basis: "Art 41 — as soon as practicable", min_severity: medium}

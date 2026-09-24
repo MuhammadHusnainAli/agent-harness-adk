@@ -1,0 +1,21 @@
+id: adgm
+name: ADGM Data Protection Regulations 2021
+jurisdiction: ae-adgm
+kind: regulation
+binding: true
+status: in force
+as_of: 2026-09-24
+summary: GDPR-aligned regime for entities in Abu Dhabi Global Market.
+sources:
+  - https://www.adgm.com/operating-in-adgm/office-of-data-protection
+requirements:
+  - {ref: "DPR — principles", title: "Data protection principles", controls: [C5, C7]}
+  - {ref: "DPR — rights", title: "Data subject rights including erasure", controls: [C11]}
+  - {ref: "DPR — automated decisions", title: "Automated decisions with significant effect", controls: [C8]}
+  - {ref: "DPR — breach", title: "Breach notified to the Commissioner within 72 hours", controls: [C15]}
+  - {ref: "DPR — DPIA", title: "DPIA for high-risk processing", controls: [C12]}
+  - {ref: "DPR — transfers", title: "Transfers outside ADGM", controls: [C6], note: "declare `residency.transfers['ae-adgm']` from the Commissioner's adequacy list"}
+  - {ref: "DPR — DPO", title: "Data protection officer where required", manual: true}
+incidents:
+  personal_data_breach:
+    - {notify: ADGM Commissioner of Data Protection, within: 72, basis: "DPR 2021 — 72 hours", min_severity: medium}

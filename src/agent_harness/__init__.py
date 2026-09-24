@@ -215,8 +215,10 @@ from .versioning import AgentVersion
 __version__ = "0.1.3"
 
 # MCP pulls in the HTTP stack, and most agents never touch it — so it loads on
-# first use. `from agent_harness import MCPServer` still works.
-_LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp"}
+# first use. `from agent_harness import MCPServer` still works. Governance is
+# the same: only those who turn it on pay for importing it.
+_LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
+         "Governance": "governance", "AgentIdentity": "governance"}
 
 
 def __getattr__(name: str):
@@ -322,6 +324,9 @@ __all__ = [
     "MCPServer",
     "MCPClient",
     "MCPManager",
+    # governance
+    "Governance",
+    "AgentIdentity",
     # evaluation
     "Evaluator",
     "GoldenTask",

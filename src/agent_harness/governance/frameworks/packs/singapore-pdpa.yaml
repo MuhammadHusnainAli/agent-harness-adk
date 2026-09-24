@@ -1,0 +1,26 @@
+id: singapore-pdpa
+name: Singapore Personal Data Protection Act 2012
+jurisdiction: sg
+kind: law
+binding: true
+status: in force; mandatory breach notification since 2021
+as_of: 2026-09-24
+summary: >-
+  Consent, purpose and notification obligations; the Transfer Limitation Obligation
+  requires a comparable standard of protection abroad (usually by contract); notifiable
+  breaches go to the PDPC within 3 calendar days of assessment.
+sources:
+  - https://sso.agc.gov.sg/Act/PDPA2012
+requirements:
+  - {ref: "s 13-17", title: "Consent obligation", manual: true}
+  - {ref: "s 18", title: "Purpose limitation", controls: [C7]}
+  - {ref: "s 20", title: "Notification of purposes", controls: [C9]}
+  - {ref: "s 21-22", title: "Access and correction", controls: [C11]}
+  - {ref: "s 24", title: "Protection obligation", controls: [C5, C10]}
+  - {ref: "s 25", title: "Retention limitation", controls: [C11], note: "set data_retention_days and run gov.sweep()"}
+  - {ref: "s 26", title: "Transfer limitation — comparable protection abroad", controls: [C6], note: "by contract; declare destinations in residency.transfers['sg'] to enforce"}
+  - {ref: "s 26A-26E", title: "Notifiable breaches reported to the PDPC", controls: [C15]}
+  - {ref: "s 11(3)", title: "Data protection officer", manual: true}
+incidents:
+  personal_data_breach:
+    - {notify: Personal Data Protection Commission, within: 72, basis: "s 26D — 3 calendar days after assessing it notifiable", min_severity: medium}

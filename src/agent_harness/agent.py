@@ -153,6 +153,7 @@ class Agent:
         hooks: HookEngine | None = None,
         policy: PolicyGate | None = None,
         guardrails: AgentGuardrails | Iterable[Any] | None = None,
+        identity: Any = None,
         budget: Budget | None = None,
         max_steps: int = 20,
         output_type: type[BaseModel] | None = None,
@@ -195,7 +196,8 @@ class Agent:
             "max_runtime_agents": max_runtime_agents,
             "runtime_agent_tools": runtime_agent_tools, "memory": memory,
             "trace": trace, "harness": harness, "hooks": hooks, "policy": policy,
-            "guardrails": guardrails, "budget": budget, "max_steps": max_steps,
+            "guardrails": guardrails, "identity": identity, "budget": budget,
+            "max_steps": max_steps,
             "output_type": output_type, "workspace": workspace,
             "allow_shell": allow_shell, "tool_choice": tool_choice,
             "max_context_tokens": max_context_tokens, "compact_at": compact_at,
@@ -394,6 +396,16 @@ class Agent:
             summarize=self._summarize,
         )
 
+        # --- governance ---------------------------------------------------
+        #: Who this agent is, who answers for it, and what it may do. A
+        #: `governance.AgentIdentity` (or a dict of its fields); governance
+        #: fills in a default, and reports the gap, when it is left out.
+        self.identity = identity
+        if self.memory is not None:
+            self.memory.on_write = self._memory_write
+        if self.harness.governance is not None:
+            self.harness.governance.register_agent(self)
+
     # ------------------------------------------------------------------
     # configuration
     # ------------------------------------------------------------------
@@ -502,11 +514,23 @@ class Agent:
     async def _summarize(self, prompt: str) -> str:
         """A single cheap model call used for compaction and memory distillation."""
         model, _ = self.harness.router.pick(tier="fast")
+        request = CompletionRequest(
+            model=model if self.provider.name != "fake" else self.model,
+            messages=[Message.user(prompt)], max_tokens=1500,
+        )
+        # The conversation leaves here too, so it passes the same egress check
+        # as the loop's own calls. A refused summary is simply not made.
+        egress = await self.hooks.emit("model_egress", agent=self.name, request=request,
+                                       provider=self.provider, model=request.model,
+                                       purpose="summarize")
+        if egress.blocked:
+            self.harness.audit.record(self.name, "model_egress", target=request.model,
+                                      decision="deny", reason=egress.reason,
+                                      purpose="summarize")
+            return ""
         try:
-            response = await self.provider.complete(CompletionRequest(
-                model=model if self.provider.name != "fake" else self.model,
-                messages=[Message.user(prompt)], max_tokens=1500,
-            ))
+            response = await self.provider.complete(
+                egress.replacement if egress.replaced else request)
         except (ProviderError, HarnessError):
             return ""
         return response.text
@@ -601,8 +625,9 @@ class Agent:
             harness.control.enter(self.name, run_id)
             harness.audit.record(self.name, "run_start", target=task_text[:120],
                                  run_id=run_id, model=model)
-            await self.hooks.emit("run_start", agent=self.name, run_id=run_id,
-                                     task=task_text)
+            started = await self.hooks.emit("run_start", agent=self.name, run_id=run_id,
+                                             task=task_text, trace=self.trace,
+                                             model=model)
             await harness.journal.assignment(self.name, task_text[:500], run_id=run_id,
                                              trace_id=result.trace_id)
             yield StreamEvent(type="run_start", agent=self.name,
@@ -618,6 +643,9 @@ class Agent:
             final_text = ""
 
             try:
+                if started.blocked:
+                    raise PermissionDenied(f"{self.name} may not run: {started.reason}",
+                                           reason=started.reason)
                 for step in range(1, steps_allowed + 1):
                     harness.control.check(f"{self.name} step {step}")
                     guard.step()
@@ -658,7 +686,8 @@ class Agent:
                         request = hook.replacement
 
                     response = None
-                    async for event in self._model_events(request, step, token_stream):
+                    async for event in self._model_events(request, step, token_stream,
+                                                          run_id=run_id):
                         if event.type == "step_end" and "response" in event.data:
                             response = event.data["response"]
                         else:
@@ -848,7 +877,8 @@ class Agent:
     # model + tools
     # ------------------------------------------------------------------
     async def _model_events(self, request: CompletionRequest, step: int,
-                            token_stream: bool) -> AsyncIterator[StreamEvent]:
+                            token_stream: bool, *,
+                            run_id: str = "") -> AsyncIterator[StreamEvent]:
         """One model call. Streams tokens when asked, and ends with the response.
 
         Throughput is paced before the call and health recorded after it, so a
@@ -860,13 +890,30 @@ class Agent:
         await harness.rate.acquire(estimated)
 
         chain = harness.router.chain(request.model)
+        refused: list[str] = []
         for attempt, model in enumerate(chain):
             request.model = model
             provider = (self.provider if model == self.model
                         else self._provider_for(model))
             last = attempt == len(chain) - 1
+            # Fired per backend actually tried, so a handler sees where the data
+            # is really going. A refusal moves on down the chain.
+            egress = await self.hooks.emit("model_egress", agent=self.name,
+                                           run_id=run_id, step=step, request=request,
+                                           provider=provider, model=model)
+            if egress.blocked:
+                refused.append(f"{model}: {egress.reason}")
+                harness.audit.record(self.name, "model_egress", target=model,
+                                     decision="deny", run_id=run_id,
+                                     reason=egress.reason)
+                if last:
+                    raise PermissionDenied(
+                        "no model in the chain may receive this request — "
+                        + "; ".join(refused), tool=model, reason=egress.reason)
+                continue
+            sent = egress.replacement if egress.replaced else request
             try:
-                async for event in self._one_call(request, provider, step,
+                async for event in self._one_call(sent, provider, step,
                                                   token_stream):
                     yield event
                 return
@@ -993,7 +1040,9 @@ class Agent:
 
             args = dict(call.input)
             hook = await self.hooks.emit("pre_tool", agent=self.name, run_id=run_id,
-                                            step=step, tool=call.name, args=args)
+                                            step=step, tool=call.name, args=args,
+                                            tags=sorted(entry.tags),
+                                            permission=entry.permission)
             if hook.blocked:
                 return ToolOutcome(call_id=call.id, name=call.name,
                                    content=f"Blocked: {hook.reason}", is_error=True)
@@ -1237,14 +1286,22 @@ class Agent:
         """
         parent_result: RunResult | None = (ctx.state.get("result") if ctx else None)
         guard: BudgetGuard = (ctx.state.get("guard") if ctx else None) or self.harness.guard
+
+        # Asked before any budget is spent on it: a refused hand-off costs nothing.
+        start = await self.hooks.emit("subagent_start", agent=child.name,
+                                      run_id=ctx.run_id if ctx else "", task=task,
+                                      parent=self.name)
+        if start.blocked:
+            self.harness.audit.record(self.name, "delegate", target=child.name,
+                                      decision="deny",
+                                      run_id=ctx.run_id if ctx else "",
+                                      reason=start.reason)
+            return f"[{child.name} not permitted] {start.reason}"
         guard.subagent()
 
         sub_memory = (self.memory.subagent(task, child.name) if self.memory
                       else None)
         brief = f"{task}\n\n## Context you were given\n{context}" if context else task
-
-        await self.hooks.emit("subagent_start", agent=child.name,
-                              run_id=ctx.run_id if ctx else "", task=task)
 
         with self.harness.tracer.span(f"subagent:{child.name}", kind="subagent") as span:
             child_result = await child.run(
@@ -1359,6 +1416,21 @@ class Agent:
                 f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
             )
             return None, problems
+
+    async def _memory_write(self, text: str, *, scope: str, kind: str) -> str:
+        """Every durable memory write passes the `memory_write` hook first.
+
+        A handler may block it (raises `PermissionDenied`) or rewrite the text —
+        to strip personal data before it is kept, say.
+        """
+        hook = await self.hooks.emit("memory_write", agent=self.name, text=text,
+                                     scope=scope, kind=kind, trace=self.trace)
+        if hook.blocked:
+            self.harness.audit.record(self.name, "memory_write", target=scope,
+                                      decision="deny", reason=hook.reason)
+            raise PermissionDenied(f"memory write refused: {hook.reason}",
+                                   tool="remember", reason=hook.reason)
+        return str(hook.replacement) if hook.replaced else text
 
     async def close_session(self, summary: str | None = None) -> str:
         """Session close → user memory update. Returns the new `user.md`."""

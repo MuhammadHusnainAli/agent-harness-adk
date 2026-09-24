@@ -1,0 +1,25 @@
+id: bahrain-pdpl
+name: Bahrain Personal Data Protection Law (Law No. 30 of 2018)
+jurisdiction: bh
+kind: law
+binding: true
+status: in force since 1 August 2019
+as_of: 2026-09-24
+summary: >-
+  Transfers only to countries on the Authority's adequacy list or with its
+  authorisation; sensitive data needs explicit consent.
+sources:
+  - https://www.pdp.gov.bh/en/
+requirements:
+  - {ref: "Law — principles", title: "Fair and lawful processing for a specified purpose", controls: [C7]}
+  - {ref: "Law — sensitive data", title: "Sensitive personal data only with explicit consent", controls: [C4, C7]}
+  - {ref: "Law — security", title: "Security of processing", controls: [C5, C10]}
+  - {ref: "Art 12-13", title: "Transfers only to adequate or authorised destinations", controls: [C6], note: "add destinations from the Authority's list to `residency.transfers['bh']`"}
+  - {ref: "Law — rights", title: "Rights of access, objection and erasure", controls: [C11]}
+  - {ref: "Law — automated decisions", title: "Right not to be subject to solely automated decisions", controls: [C8]}
+  - {ref: "Law — prior notification", title: "Notification to the Authority before certain processing", manual: true}
+policy:
+  residency:
+    transfers:
+      bh: [bh]
+    applies_to: [personal]

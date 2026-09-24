@@ -1,0 +1,28 @@
+id: ccpa-admt
+name: California CCPA regulations on automated decision-making technology and risk assessments
+jurisdiction: us
+kind: regulation
+binding: true
+status: CPPA regulations approved 2025; ADMT obligations apply from 1 January 2027
+as_of: 2026-09-24
+summary: >-
+  A business using ADMT for significant decisions gives a pre-use notice, offers an
+  opt-out or a human appeal, answers access requests about the ADMT, and performs risk
+  assessments for significant-risk processing.
+sources:
+  - https://cppa.ca.gov/regulations/
+requirements:
+  - {ref: "Pre-use notice", title: "Notice before ADMT is used for a significant decision", controls: [C9]}
+  - {ref: "Opt-out / appeal", title: "Opt-out, or a human appeal of the decision", controls: [C8]}
+  - {ref: "Access", title: "Consumers can learn how ADMT was used about them", controls: [C11, C10]}
+  - {ref: "Risk assessment", title: "Risk assessment for significant-risk processing", controls: [C12]}
+  - {ref: "Deletion", title: "Right to delete", controls: [C11]}
+  - {ref: "Cybersecurity audit", title: "Annual cybersecurity audit where thresholds are met", manual: true}
+policy:
+  rules:
+    - id: significant-decisions-human-appeal
+      on: tool
+      match: {tags: [consequential], jurisdiction: [us-ca]}
+      effect: require_approval
+      reason: "CCPA ADMT: significant decisions offer human review"
+      controls: [C8]
