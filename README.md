@@ -80,6 +80,7 @@ function is called. `await agent.run(...)` is the real implementation;
    └─────────────────────┴─────────────────────────┘
    rails: permissions · budget · hooks · guardrails · tracing · journal ·
           cache · checkpoints · sessions · scheduler · router
+   governance: policy · identity · residency · oversight · evidence
 ```
 
 ---
@@ -690,7 +691,7 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | `PolicyGate` | allow / ask / deny per action, glob rules, conditional on arguments, approver callback |
 | `BudgetGuard` | spend, token, step, tool-call and sub-agent ceilings; child guards roll up to the parent |
 | `RateGuard` | requests- and tokens-per-minute pacing, so you are not rate-limited by the provider |
-| `HookEngine` | 12 events; `pre_tool` can block or rewrite arguments, `post_tool` can rewrite the result |
+| `HookEngine` | 13 events; `pre_tool` can block or rewrite arguments, `post_tool` can rewrite the result, `model_egress` sees the real provider and region of every model call |
 | `Guardrails` | secret redaction, private-key blocking, injection warnings, size caps — on tool output *and* final answers |
 | `StopController` | abort a run and drain the sub-agents; a human is always in charge |
 | `Tracer` | one span per run, step, model call, tool and sub-agent; console and JSONL exporters |
@@ -710,6 +711,159 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 Path safety is enforced, not clamped: a workspace tool given `../../etc/passwd`
 refuses rather than resolving it. `shell` is absent unless the workspace was
 created with `allow_shell=True`, and even then it asks for approval.
+
+## Governance: the laws your agents run under
+
+```python
+import os
+from agent_harness import Agent, Harness
+from agent_harness.governance import Governance, AgentIdentity
+
+gov = Governance.from_packs(
+    ["eu-ai-act", "gdpr", "ksa-pdpl", "owasp-agentic"],
+    policy="governance.yaml",                  # your rules on top of the packs
+    home="eu",
+    regions={"azure": "eu"},                   # where endpoints that do not say, are
+    signing_key=os.environ["AUDIT_KEY"],
+)
+harness = Harness.local(".harness", governance=gov)
+
+support = Agent("support", "Resolve order problems.", harness=harness,
+                tools=[order_status, issue_refund],
+                identity=AgentIdentity(owner="cx-lead@acme.com", purpose="customer_support",
+                                       tools=["order_status", "issue_refund"]))
+
+print(gov.report("eu-ai-act").markdown())      # control → status → evidence
+```
+
+Packs switch on what a law or framework asks for. Your policy adds rules on top.
+Combining them can only make things stricter: the strictest effect wins, so
+adding a pack never loosens anything. Twenty-six packs ship, each dated and
+sourced:
+
+| Region | Packs |
+|---|---|
+| EU & UK | `eu-ai-act` · `gdpr` · `dora` · `nis2` · `uk-gdpr` |
+| Gulf | `uae-pdpl` · `difc-reg10` · `adgm` · `ksa-pdpl` · `sdaia` · `qatar-pdppl` · `bahrain-pdpl` · `oman-pdpl` |
+| Asia-Pacific | `singapore-agentic` · `singapore-pdpa` · `india-dpdp` · `china-genai` · `korea-ai-basic` · `japan-appi` · `vietnam-ai` |
+| Americas | `us-nist-rmf` · `colorado-adm` · `texas-traiga` · `ccpa-admt` |
+| Standards | `iso-42001` · `owasp-agentic` |
+
+What it enforces, in the loop, before anything happens:
+
+- **Residency, per call and per person.** Each model call is checked
+  *after* the fallback chain has picked the backend, so the check sees the real
+  destination: the Bedrock region, the `eu.` inference profile, the Vertex
+  location, the endpoint host. An EU customer's data never reaches a US model.
+  The call moves on to the next model in the chain instead. A Saudi customer
+  on the same harness is held to Saudi rules (`Trace(tags={"jurisdiction": "sa"})`).
+- **Least privilege that survives delegation.** A sub-agent acts under the
+  intersection of its own identity and every identity above it. It can never
+  reach a tool its parent could not.
+- **Purpose limitation and minimisation.** A run carries a purpose. Data classes
+  that purpose does not allow are redacted before the call leaves. They can also
+  be pseudonymised: the model sees `⟨email:3f9a1c0b2d4e⟩`, and the tool gets the
+  real address back.
+- **Exact data classification.** Card numbers are Luhn-checked. National IDs
+  are validated by their own check digits: Emirates ID, Saudi ID and Iqama,
+  Aadhaar (Verhoeff), Singapore NRIC, the Chinese resident ID; EU VAT numbers
+  by country prefix. Special-category data (health, religion and so on) is
+  detected by keyword screens, reported at lower confidence, and labelled as
+  such; redacting it removes the whole sentence that carries it. A data-class
+  name a policy misspells is refused at load time instead of never matching.
+- **Human oversight that fails closed.** `require_approval` rules need a quorum
+  of *distinct* approvers. The person the agent acts for cannot approve their
+  own request. A timeout, an error or a missing approver all count as *no*.
+  Pass an `approver=` callable, or leave it out and answer the queue from your
+  own UI (`gov.oversight.pending()`, `.approve(id, by=...)`); `approval_notify=`
+  tells your team when something is waiting.
+- **Agent-specific threats.** A tool result carrying prompt-injection signals
+  marks the run *untrusted* (the flag spreads to the parent run). After that,
+  payments and other sensitive tools wait for a person, and nothing is written
+  to memory. Loops, tool storms and runaway delegation are stopped, a tool that
+  keeps failing has its breaker opened for the rest of the run, and an incident
+  is opened once per cause.
+- **No way round it.** Context summaries go through the same egress check as
+  the loop's own calls. A sub-agent on a harness without governance cannot be
+  delegated to, and `Agent.as_tool()` nesting obeys the same depth limit. A
+  governance failure refuses the action rather than crashing the run — or
+  letting it through.
+- **Supply chain.** Every tool's schema is fingerprinted. `inventory.pin()`
+  freezes them. A tool that changes afterwards (an MCP server swapping what a
+  tool does) is reported, or refused with `tool_drift: deny`.
+- **Prohibited uses are refused at build time.** Declaring `domains=["social_scoring"]`
+  raises an error instead of producing an agent.
+
+And what it records:
+
+- **Every decision, signed.** Each decision names the policy version (sha256)
+  that made it. `signing_key=` adds HMAC signatures. `Ed25519Signer`
+  (`pip install agent-harness-adk[governance]`) adds public-key signatures, so
+  auditors can verify the trail without being able to write it.
+- **Erasure that keeps the audit intact.** Nothing personal enters the trail
+  in the clear: detected values are tokens under a per-person key, and task
+  text — which can name anyone — is kept only as a token
+  (`audit_args="tokens"` does the same for every tool argument). `await
+  gov.rights.erase(trace)` deletes their memory, sessions, deliverables, journal
+  entries and trace spans, and destroys that key. The chain still verifies, but
+  nothing in it can be linked back to them. You get a signed receipt;
+  `gov.rights.access(trace)` exports everything held about the person.
+- **Transparency.** `result.disclosure` holds the AI notice in the languages the
+  packs need. `result.provenance` is a signed, machine-readable manifest (EU AI
+  Act Art 50, China GB 45438). Visible labels are applied only where the law
+  asks for them.
+- **Incidents with the regulator's deadlines.** Opening one works out every
+  clock that applies: GDPR 72 h, DORA 4 h / 72 h / 1 month, EU AI Act Art 73,
+  NIS2, SDAIA, PDPC and the rest.
+- **Evidence.** `gov.report(pack)` shows each requirement as met, partial,
+  gap or manual. It is worked out from the live configuration and the audit
+  trail, with the next action for every gap. It also produces an AI inventory
+  (`to_cyclonedx()`), a DORA third-party register, and draft DPIA / FRIA text
+  (`gov.impact_assessment(agent)`).
+
+```yaml
+# governance.yaml
+packs: [eu-ai-act, gdpr, owasp-agentic]
+home: eu
+signing_key_env: AUDIT_KEY
+policy:
+  purposes:
+    customer_support: [contact, financial]      # nothing else reaches the model
+  rules:
+    - id: refunds-need-a-human
+      on: tool
+      match: {tags: [payments]}
+      when: "args.amount > 100"                 # a small, safe expression language
+      effect: require_approval
+      approvers: 2
+      timeout: 15m
+```
+
+Runnable end to end with no key: `examples/07_governance.py` (an EU bank also
+serving Saudi customers), `08_governance_saudi_government.py` (in-Kingdom
+residency, four-eyes permits, SDAIA breach clock, DPIA draft) and
+`09_governance_singapore_fintech.py` (monitor-then-enforce rollout, prompt
+injection, inherited authority, tool drift).
+
+`mode="monitor"` makes and records every decision without enforcing any of them.
+That is the way to roll governance out on a live system. Without governance
+attached the loop pays nothing, and `import agent_harness` does not load it.
+
+```bash
+agent-harness governance packs                  # what ships
+agent-harness governance pack ksa-pdpl          # requirements, rules, residency, clocks
+agent-harness governance check --config governance.yaml       # validate, with warnings
+agent-harness governance report --config governance.yaml --pack gdpr
+agent-harness governance inventory --config governance.yaml --agents agents.yaml
+agent-harness governance verify --state .harness --key-env AUDIT_KEY
+agent-harness governance dsar erase --user alice --tenant acme --state .harness \
+    --config governance.yaml
+```
+
+This layer supplies technical controls and the evidence for them. It is not
+legal advice and does not make anyone compliant by itself. The reports say so,
+and list what is left for people: the DPO, the EU database registration, the
+signed DPIA.
 
 ## Providers
 
