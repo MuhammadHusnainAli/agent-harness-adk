@@ -79,8 +79,20 @@ class RiskAssessment:
     agent: str
     tier: str                                   # the strictest across frameworks
     frameworks: dict[str, str] = field(default_factory=dict)
-    obligations: list[str] = field(default_factory=list)
+    #: framework → what it asks of a system in this tier.
+    duties: dict[str, list[str]] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
+
+    @property
+    def obligations(self) -> list[str]:
+        return [duty for duties in self.duties.values() for duty in duties]
+
+    def only(self, frameworks: set[str]) -> RiskAssessment:
+        """The same classification, reported under these frameworks only."""
+        return RiskAssessment(self.agent, self.tier,
+                              {k: v for k, v in self.frameworks.items() if k in frameworks},
+                              {k: v for k, v in self.duties.items() if k in frameworks},
+                              list(self.reasons))
 
     @property
     def prohibited(self) -> bool:
@@ -88,7 +100,7 @@ class RiskAssessment:
 
     def as_dict(self) -> dict[str, Any]:
         return {"agent": self.agent, "tier": self.tier, "frameworks": self.frameworks,
-                "obligations": self.obligations, "reasons": self.reasons}
+                "duties": self.duties, "reasons": self.reasons}
 
 
 def assess(identity: AgentIdentity) -> RiskAssessment:
@@ -114,11 +126,12 @@ def assess(identity: AgentIdentity) -> RiskAssessment:
     if identity.user_facing or "content_generation" in domains:
         tier = "limited"
         result.frameworks["eu-ai-act"] = "limited (Art 50 transparency)"
-        result.obligations.append("disclose AI interaction; mark generated content")
+        result.duties.setdefault("eu-ai-act", []).append(
+            "disclose AI interaction; mark generated content (Art 50)")
     if eu:
         tier = "high"
         result.frameworks["eu-ai-act"] = "high-risk (" + ", ".join(sorted(eu)) + ")"
-        result.obligations += [
+        result.duties["eu-ai-act"] = [
             "risk management system (Art 9)", "data governance (Art 10)",
             "technical documentation (Art 11)", "automatic logging (Art 12)",
             "human oversight (Art 14)", "accuracy & robustness (Art 15)",
@@ -127,14 +140,15 @@ def assess(identity: AgentIdentity) -> RiskAssessment:
     if korea:
         tier = "high"
         result.frameworks["korea-ai-basic"] = "high-impact (" + ", ".join(sorted(korea)) + ")"
-        result.obligations.append("Korea: risk management, impact assessment, "
-                                  "human oversight, explanation, records")
+        result.duties["korea-ai-basic"] = ["risk management, impact assessment, "
+                                           "human oversight, explanation, records"]
     if colorado:
         tier = max(tier, "high", key=RISK_ORDER.__getitem__)
         result.frameworks["colorado-adm"] = ("consequential decision ("
                                              + ", ".join(sorted(colorado)) + ")")
-        result.obligations.append("Colorado/CCPA: pre-use ADMT notice, "
-                                  "explanation of adverse decisions, appeal route")
+        duty = ["pre-use notice, explanation of adverse decisions, appeal route"]
+        result.duties["colorado-adm"] = duty
+        result.duties["ccpa-admt"] = list(duty)
     if identity.risk is not None:
         # A declared tier can only raise the computed one.
         tier = max(tier, identity.risk, key=RISK_ORDER.__getitem__)
@@ -156,7 +170,7 @@ def impact_assessment(identity: AgentIdentity, *, inventory: dict[str, Any] | No
     """A Markdown draft of a DPIA, FRIA or Korean AI impact assessment."""
     risk = assess(identity)
     inv = inventory or {}
-    titles = {"dpia": "Data Protection Impact Assessment (GDPR Art 35)",
+    titles = {"dpia": "Data Protection Impact Assessment",
               "fria": "Fundamental Rights Impact Assessment (EU AI Act Art 27)",
               "korea": "AI Impact Assessment (Korea AI Basic Act)"}
     todo = "_To be completed by the accountable owner._"
@@ -168,6 +182,8 @@ def impact_assessment(identity: AgentIdentity, *, inventory: dict[str, Any] | No
         f"**Purpose:** {identity.purpose or '**missing — state it**'}  ",
         f"**Risk tier:** {risk.tier}  ",
         f"**Autonomy:** {identity.autonomy}  ",
+        f"**Frameworks in force:** "
+        f"{', '.join(getattr(policy, 'packs', []) or []) or 'none declared'}  ",
         "",
         "## 1. Description of the processing",
         f"- Model: {inv.get('model', 'n/a')} via {inv.get('provider', 'n/a')} "

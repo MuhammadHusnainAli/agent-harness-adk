@@ -91,6 +91,7 @@ class AgentEntry(BaseModel):
     trace: dict[str, Any] | str | None = None
     budget: dict[str, Any] | Budget | None = None
     guardrails: str | dict[str, Any] | None = None
+    identity: dict[str, Any] | None = None
     runtime_agents: bool | str | None = None
     max_runtime_agents: int | None = None
     compact_at: int | float | None = None
@@ -243,7 +244,7 @@ class Blueprint(BaseModel):
                       "thinking", "thinking_budget", "top_p", "top_k", "min_p",
                       "frequency_penalty", "presence_penalty", "repetition_penalty",
                       "seed", "max_steps", "runtime_agents", "max_runtime_agents",
-                      "compact_at", "trace", "skills", "allow_shell"):
+                      "compact_at", "trace", "skills", "allow_shell", "identity"):
             value = getattr(entry, field)
             if value is not None:
                 kwargs[field] = value

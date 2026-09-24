@@ -623,11 +623,13 @@ class Agent:
             if messages is None or guard is harness.guard:
                 self._spawned = 0        # a fresh run gets a fresh agent budget
             harness.control.enter(self.name, run_id)
-            harness.audit.record(self.name, "run_start", target=task_text[:120],
-                                 run_id=run_id, model=model)
+            # The hook first: governance learns whose run this is, so the task
+            # text below reaches the audit trail only as that person's tokens.
             started = await self.hooks.emit("run_start", agent=self.name, run_id=run_id,
                                              task=task_text, trace=self.trace,
                                              model=model)
+            harness.audit.record(self.name, "run_start", target=task_text[:120],
+                                 run_id=run_id, model=model)
             await harness.journal.assignment(self.name, task_text[:500], run_id=run_id,
                                              trace_id=result.trace_id)
             yield StreamEvent(type="run_start", agent=self.name,

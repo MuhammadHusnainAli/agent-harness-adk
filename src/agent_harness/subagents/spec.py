@@ -69,6 +69,9 @@ class SubAgentSpec(BaseModel):
     #   {"require_tools": ["lookup"], "must_include": ["source"]}
     guardrails: dict[str, Any] | None = None
     budget: Budget | None = None
+    #: Governance identity (owner, purpose, tools, data, regions, ...), kept as a
+    #: dict so the spec stays serialisable.
+    identity: dict[str, Any] | None = None
     memory: bool = False                     # sub-agents start clean by design
     version: str = "1"
     origin: Literal["bench", "factory"] = "bench"

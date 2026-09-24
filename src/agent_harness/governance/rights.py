@@ -4,10 +4,11 @@
     receipt = await gov.rights.erase(Trace(tenant_id="acme", user_id="alice"))
 
 Erasure covers the memory store (records and `user.md`), every session the
-person's runs were saved in, pseudonym tokens held in memory, and the audit
-trail — by crypto-shredding: the subject's key is destroyed, so the tokens
-standing in for their data in the trail can never be linked back to them,
-while the chain itself still verifies. The receipt says what was removed and
+person's runs were saved in, the deliverables those runs produced, their
+entries in the run journal and the trace export, pseudonym tokens held in
+memory, and the audit trail — by crypto-shredding: the subject's key is
+destroyed, so the tokens standing in for their data in the trail can never be
+linked back to them, while the chain itself still verifies. The receipt says what was removed and
 is signed when governance has a signer. The request and its outcome are
 themselves recorded (without the personal data).
 """
@@ -59,9 +60,14 @@ class SubjectRights:
                              "created": session.created,
                              "messages": [{"role": m.role, "text": m.text}
                                           for m in session.messages]})
-        ref = self.gov.vault.subject_ref(subject)
+        ref = self.gov.vault.subject_ref(subject, create=False)
+        runs = set(self.gov.vault.locations(subject).get("runs", []))
         decisions = [e.model_dump(mode="json") for e in harness.audit.entries
-                     if e.detail.get("subject") == ref] if ref else []
+                     if (ref and e.detail.get("subject") == ref) or e.run_id in runs]
+        deliverables = [{"name": a.name, "version": getattr(a, "version", 1),
+                         "content": a.content}
+                        for run_id in sorted(runs)
+                        for a in harness.deliverables.for_run(run_id)]
         harness.audit.record("governance", "governance.subject_access", decision="ok",
                              subject=ref, records=len(records), sessions=len(sessions))
         return {
@@ -70,6 +76,7 @@ class SubjectRights:
             "profile": await store.read_doc("user.md", trace=user_trace),
             "memory": [r.model_dump(mode="json") for r in records],
             "sessions": sessions,
+            "deliverables": deliverables,
             "decisions": decisions,
         }
 
@@ -80,7 +87,7 @@ class SubjectRights:
         harness = self._harness
         store = harness.memory_store
         user_trace = trace.model_copy(update={"scope": "user"})
-        ref = self.gov.vault.subject_ref(subject)
+        ref = self.gov.vault.subject_ref(subject, create=False)
 
         records = len(await store.all(trace=user_trace))
         await store.clear(trace=user_trace)
@@ -93,13 +100,20 @@ class SubjectRights:
                 deleted_sessions.append(session_id)
             except Exception:
                 continue
+        locations = self.gov.vault.locations(subject)
+        runs = set(locations.get("runs", []))
+        deliverables = harness.deliverables.forget_runs(runs)
+        journal = harness.journal.forget(runs)
+        spans = harness.tracer.forget(set(locations.get("traces", [])))
         tokens = self.gov.pseudonymizer.forget(subject)
         shredded = self.gov.vault.erase(subject)
 
         receipt: dict[str, Any] = {
             "subject": ref, "erased_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "requested_by": requested_by, "memory_records": records,
-            "sessions": deleted_sessions, "pseudonyms_forgotten": tokens,
+            "sessions": deleted_sessions, "deliverables": deliverables,
+            "journal_entries": journal, "trace_spans": spans,
+            "pseudonyms_forgotten": tokens,
             "audit_key_destroyed": shredded["key_destroyed"],
             "audit_chain": harness.audit.verify()[1],
         }

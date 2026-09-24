@@ -118,9 +118,13 @@ class IncidentDesk:
         order = ["low", "medium", "high", "critical"]
         if order.index(severity) >= order.index(self.min_severity):
             for hook in self.notify:
-                result = hook(incident)
-                if inspect.isawaitable(result):
-                    await result
+                # A pager that is down must not take the agent down with it.
+                try:
+                    result = hook(incident)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:
+                    incident.notes.append(f"notify failed: {type(exc).__name__}: {exc}")
         return incident
 
     def open_incidents(self) -> list[Incident]:

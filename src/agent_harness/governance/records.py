@@ -26,6 +26,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from pathlib import Path
@@ -149,8 +150,11 @@ class SubjectVault:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"keys": self._keys, "index": self._index,
-                                   "erased": self._erased}), encoding="utf-8")
+        # The keys in here are what makes erasure work: owner-only.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"keys": self._keys, "index": self._index,
+                       "erased": self._erased}, fh)
         tmp.replace(self.path)
 
     def _key(self, subject: str) -> bytes:
@@ -166,9 +170,16 @@ class SubjectVault:
         digest = hmac.new(self._key(subject), value.encode(), hashlib.sha256).hexdigest()
         return f"⟨{kind}:{digest[:12]}⟩"
 
-    def subject_ref(self, subject: str) -> str:
-        """How a subject is named in records: a keyed hash, never the id itself."""
-        if not subject:
+    def has(self, subject: str) -> bool:
+        return subject in self._keys
+
+    def subject_ref(self, subject: str, *, create: bool = True) -> str:
+        """How a subject is named in records: a keyed hash, never the id itself.
+
+        `create=False` answers "" for someone with no key yet, instead of making
+        one — looking a person up must not register them.
+        """
+        if not subject or (not create and subject not in self._keys):
             return ""
         return "subj:" + hmac.new(self._key(subject), b"subject-ref",
                                   hashlib.sha256).hexdigest()[:16]
@@ -193,6 +204,17 @@ class SubjectVault:
         self._save()
         return {"key_destroyed": had_key, "locations": locations}
 
+    def drop(self, kind: str, refs: set[str]) -> None:
+        """Forget index entries that no longer exist (swept by retention)."""
+        changed = False
+        for locations in self._index.values():
+            if kind in locations:
+                kept = [r for r in locations[kind] if r not in refs]
+                changed |= len(kept) != len(locations[kind])
+                locations[kind] = kept
+        if changed:
+            self._save()
+
     def is_erased(self, subject: str) -> bool:
         return subject in self._erased
 
@@ -212,7 +234,8 @@ class RetentionSweeper:
             return None
         return (now or time.time()) - self.days * 86400
 
-    async def sweep(self, harness: Any, *, now: float | None = None) -> dict[str, Any]:
+    async def sweep(self, harness: Any, *, now: float | None = None,
+                    vault: SubjectVault | None = None) -> dict[str, Any]:
         cutoff = self.cutoff(now)
         report: dict[str, Any] = {"days": self.days, "sessions_deleted": []}
         if cutoff is None:
@@ -222,6 +245,8 @@ class RetentionSweeper:
             if session.updated < cutoff:
                 await harness.sessions.delete(session.id)
                 report["sessions_deleted"].append(session.id)
+        if vault is not None and report["sessions_deleted"]:
+            vault.drop("sessions", set(report["sessions_deleted"]))
         if harness.audit is not None:
             harness.audit.record("governance", "retention_sweep", decision="ok",
                                  deleted=len(report["sessions_deleted"]),

@@ -27,7 +27,7 @@ from fnmatch import fnmatch
 from typing import Any
 from urllib.parse import urlparse
 
-__all__ = ["Region", "RegionResolver", "CLOUD_REGIONS", "HOSTS"]
+__all__ = ["Region", "RegionResolver", "resolve_region", "CLOUD_REGIONS", "HOSTS"]
 
 
 @dataclass(frozen=True)
@@ -166,3 +166,9 @@ def _private(host: str) -> bool:
     except ValueError:
         return False
     return address.is_private or address.is_loopback
+
+
+def resolve_region(provider: Any, model: str = "", *,
+                   overrides: Mapping[str, str] | None = None) -> Region:
+    """Where `provider` would send a call for `model`. See `RegionResolver`."""
+    return RegionResolver(overrides).resolve(provider, model)

@@ -20,7 +20,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["RiskTier", "RISK_ORDER", "Autonomy", "AgentIdentity", "DelegationChain"]
+__all__ = ["RiskTier", "RISK_ORDER", "Autonomy", "AgentIdentity", "Principal",
+           "DelegationChain"]
 
 RiskTier = Literal["minimal", "limited", "high", "prohibited"]
 RISK_ORDER: dict[str, int] = {"minimal": 0, "limited": 1, "high": 2, "prohibited": 3}
@@ -89,6 +90,46 @@ class AgentIdentity(BaseModel):
             elif fnmatch(tool, pattern):
                 return True
         return False
+
+
+class Principal(BaseModel):
+    """The person a run acts for — read from the agent's `Trace`.
+
+    `jurisdiction` decides which residency rules apply to their data;
+    `consents` (from ``tags={"consent": "special_category,marketing"}``) let
+    policies ask ``'special_category' in principal.consents``. Sub-agents act
+    for the same principal as the run that started them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    user: str = ""
+    tenant: str = ""
+    session: str = ""
+    jurisdiction: str | None = None
+    consents: list[str] = Field(default_factory=list)
+    purpose: str = ""
+
+    @property
+    def subject(self) -> str:
+        """The data-subject key erasure and access work on: ``tenant/user``."""
+        return f"{self.tenant}/{self.user}" if self.user else ""
+
+    @classmethod
+    def from_trace(cls, trace: Any, *, home: str | None = None) -> Principal:
+        tags = dict(getattr(trace, "tags", None) or {})
+        return cls(
+            user=getattr(trace, "user_id", None) or "",
+            tenant=getattr(trace, "tenant_id", None) or "",
+            session=getattr(trace, "session_id", None) or "",
+            jurisdiction=tags.get("jurisdiction") or home,
+            consents=[c.strip() for c in tags.get("consent", "").split(",") if c.strip()],
+            purpose=tags.get("purpose", ""),
+        )
+
+    def context(self) -> dict[str, Any]:
+        """The mapping policies see as `principal`."""
+        return {**self.model_dump(), "subject": self.subject}
 
 
 @dataclass(frozen=True)

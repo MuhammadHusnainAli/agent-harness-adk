@@ -15,6 +15,8 @@ not reported as a card and a random twelve digits is not an Aadhaar.
 Special-category data (health, religion, ethnicity, ...) cannot be proven by a
 pattern. Those detectors are keyword screens, report a lower confidence, and
 say so; pair them with an `LLMGuard` if you need judgement rather than recall.
+Redacting such a class removes the *sentence* the keyword sits in — masking
+the word alone ("[health]") would leave the statement about the person intact.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from typing import Any
 from ..guardrails.detectors import PIIDetector, SecretDetector
 
 __all__ = [
-    "DATA_CLASSES", "SPECIAL_CATEGORIES", "PERSONAL", "expand_classes",
+    "DATA_CLASSES", "SPECIAL_CATEGORIES", "PERSONAL", "expand_classes", "known_classes",
     "DataFinding", "Classification", "DataClassifier", "Pseudonymizer",
     "luhn", "verhoeff_valid", "nric_valid", "cn_resident_id_valid",
 ]
@@ -64,6 +66,11 @@ SPECIAL_CATEGORIES: frozenset[str] = frozenset({
 })
 #: Everything that identifies or describes a person.
 PERSONAL: frozenset[str] = frozenset(set(DATA_CLASSES) - {"credentials"})
+
+
+def known_classes(extra: Iterable[str] = ()) -> set[str]:
+    """Every data-class name a policy may use: the taxonomy, the umbrellas, yours."""
+    return set(DATA_CLASSES) | {"personal", "special_category"} | set(extra)
 
 
 def expand_classes(names: Iterable[str]) -> set[str]:
@@ -173,6 +180,26 @@ def _digits(value: str) -> str:
     return re.sub(r"\D", "", value)
 
 
+def _it_vat_valid(value: str) -> bool:
+    """Italian partita IVA: eleven digits, Luhn-style check."""
+    digits = _digits(value)
+    return len(digits) == 11 and luhn(digits)
+
+
+#: EU VAT numbers, always with their country prefix — which is what keeps them
+#: apart from any other run of digits. A sole trader's VAT number is personal data.
+_EU_VAT = re.compile(
+    r"\b(?:ATU\d{8}|BE[01]\d{9}|BG\d{9,10}|CY\d{8}[A-Z]|CZ\d{8,10}|DE\d{9}|DK\d{8}"
+    r"|EE\d{9}|EL\d{9}|ES[A-Z0-9]\d{7}[A-Z0-9]|FI\d{8}|FR[A-HJ-NP-Z0-9]{2}\d{9}"
+    r"|HR\d{11}|HU\d{8}|IE\d{7}[A-W][A-I]?|IE\d[A-Z+*]\d{5}[A-W]|IT\d{11}|LT(?:\d{9}|\d{12})"
+    r"|LU\d{8}|LV\d{11}|MT\d{8}|NL\d{9}B\d{2}|PL\d{10}|PT\d{9}|RO\d{2,10}|SE\d{12}"
+    r"|SI\d{8}|SK\d{10})\b")
+
+
+def _eu_vat_valid(value: str) -> bool:
+    return _it_vat_valid(value) if value.startswith("IT") else True
+
+
 _NATIONAL_IDS: tuple[_IdPattern, ...] = (
     _IdPattern("emirates_id", re.compile(r"\b784[- ]?\d{4}[- ]?\d{7}[- ]?\d\b"),
                lambda v: luhn(_digits(v))),
@@ -182,6 +209,7 @@ _NATIONAL_IDS: tuple[_IdPattern, ...] = (
     _IdPattern("saudi_id", re.compile(r"\b[12]\d{9}\b"), luhn),
     _IdPattern("sg_nric", re.compile(r"\b[STFGstfg]\d{7}[A-Za-z]\b"), nric_valid),
     _IdPattern("kr_rrn", re.compile(r"\b\d{6}-[1-8]\d{6}\b"), _kr_rrn_valid),
+    _IdPattern("eu_vat", _EU_VAT, _eu_vat_valid),
     _IdPattern("uk_nino", re.compile(
         r"\b(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z] ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b"),
         lambda v: True),
@@ -334,32 +362,56 @@ class DataClassifier:
     def redact(self, text: str, classes: Iterable[str], *,
                pseudonymizer: Pseudonymizer | None = None,
                subject: str = "") -> str:
-        """Take the named classes out. Keyword findings are left in place.
+        """Take the named classes out.
 
-        A keyword ("diabetic") is the *signal* that a sentence is about health,
-        not the identifier; masking the word would mangle the text and protect
-        nobody. Redact the identifiers and the sentence stops being about a
-        person.
+        Identifiers (an email, an Emirates ID) are masked, or pseudonymised
+        when a `pseudonymizer` is given. A class found only by keyword — health,
+        religion, the other special categories — has no identifier to mask: the
+        word "diabetic" is the signal, the statement around it is the data. So
+        the whole sentence goes, replaced by ``[health information removed]``.
         """
         wanted = expand_classes(classes)
-        spans = [f for f in self.scan(text).findings
-                 if f.data_class in wanted and f.kind != "keyword"]
-        if not spans:
+        findings = [f for f in self.scan(text).findings if f.data_class in wanted]
+        if not findings:
             return text
+        pieces: list[tuple[int, int, str]] = []
+        for finding in findings:
+            if finding.kind == "keyword":
+                start, end = _sentence(text, finding.span)
+                pieces.append((start, end, f"[{finding.data_class.replace('_', ' ')} "
+                                           "information removed]"))
+            elif pseudonymizer is not None:
+                value = text[finding.span[0]:finding.span[1]]
+                pieces.append((*finding.span,
+                               pseudonymizer.token(value, finding.kind, subject=subject)))
+            else:
+                pieces.append((*finding.span, f"[{finding.kind}]"))
+        # Widest first at each position, so a removed sentence swallows the
+        # identifiers inside it rather than being cut up by them.
+        pieces.sort(key=lambda p: (p[0], -(p[1] - p[0])))
         out, cursor = [], 0
-        for finding in sorted(spans, key=lambda f: f.span[0]):
-            start, end = finding.span
+        for start, end, replacement in pieces:
             if start < cursor:
                 continue
-            out.append(text[cursor:start])
-            value = text[start:end]
-            if pseudonymizer is not None:
-                out.append(pseudonymizer.token(value, finding.kind, subject=subject))
-            else:
-                out.append(f"[{finding.kind}]")
+            out += [text[cursor:start], replacement]
             cursor = end
         out.append(text[cursor:])
         return "".join(out)
+
+
+_SENTENCE_END = re.compile(r"[.!?\n]")
+
+
+def _sentence(text: str, span: tuple[int, int]) -> tuple[int, int]:
+    """The bounds of the sentence containing `span`, trailing punctuation included."""
+    start = span[0]
+    while start > 0 and not _SENTENCE_END.match(text[start - 1]):
+        start -= 1
+    while start < span[0] and text[start] == " ":
+        start += 1
+    match = _SENTENCE_END.search(text, span[1])
+    end = match.end() if match else len(text)
+    return start, end
 
 
 _TOKEN = re.compile(r"⟨([a-z_]+):([0-9a-f]{12})⟩")

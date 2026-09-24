@@ -72,12 +72,16 @@ class AuditTrail:
     """Append-only, hash-chained. In memory by default; give it a path to persist."""
 
     def __init__(self, path: str | Path | None = None, *, redact: bool = True,
-                 signer: Any = None) -> None:
+                 signer: Any = None, scrub: Any = None) -> None:
         self.path = Path(path) if path else None
         self.redact = redact
         #: Anything with ``key_id``, ``sign(bytes) -> str`` and
         #: ``verify(bytes, str) -> bool``.
         self.signer = signer
+        #: ``scrub(action, target, detail) -> (target, detail)``, applied before an
+        #: entry is hashed. Governance uses it to put personal data in the trail
+        #: only as per-person tokens, so erasing a person needs no rewrite.
+        self.scrub = scrub
         self.entries: list[AuditEntry] = []
         self._lock = asyncio.Lock()
         if self.path:
@@ -89,10 +93,15 @@ class AuditTrail:
     def record(self, actor: str, action: str, *, target: str = "",
                decision: str = "ok", run_id: str = "", **detail: Any) -> AuditEntry:
         """Append one record. Synchronous on purpose — an audit write never waits."""
+        # Scrubbed before it is trimmed: trimming first could cut an address in
+        # half, and half an address is still personal data a scrubber misses.
+        if self.scrub is not None:
+            target, detail = self.scrub(action, target, detail)
+        detail = self._clean(detail)
         entry = AuditEntry(
             seq=len(self.entries) + 1,
             actor=actor, action=action, target=target, decision=decision,
-            run_id=run_id, detail=self._clean(detail),
+            run_id=run_id, detail=detail,
             prev_hash=self.entries[-1].hash if self.entries else GENESIS,
         )
         entry.hash = entry.compute_hash()

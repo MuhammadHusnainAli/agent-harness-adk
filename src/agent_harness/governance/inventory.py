@@ -53,6 +53,8 @@ class AIInventory:
                 "permission": getattr(tool, "permission", "allow"),
                 "fingerprint": tool_fingerprint(tool),
             })
+        mcp = sorted({t for tool in agent.tools if "mcp" in (tool.tags or ())
+                      for t in tool.tags if t != "mcp"})
         entry = {
             "name": agent.name,
             "identity": identity.model_dump(mode="json"),
@@ -63,11 +65,26 @@ class AIInventory:
             "tools": tools,
             "skills": sorted(agent.skills.names) if agent.skills else [],
             "subagents": sorted(agent.subagents),
+            "mcp_servers": mcp,
+            "regions_used": [],
             "registered": time.time(),
         }
         self.agents[agent.name] = entry
         self._live[agent.name] = agent
         return entry
+
+    def saw_region(self, agent: str, jurisdiction: str) -> None:
+        """Record where an agent's calls actually went — the register's truth."""
+        entry = self.agents.get(agent)
+        if entry is None:
+            return
+        if jurisdiction not in entry["regions_used"]:
+            entry["regions_used"].append(jurisdiction)
+        if entry["region"] == "unknown":
+            entry["region"] = jurisdiction
+
+    def mcp_servers(self) -> list[str]:
+        return sorted({s for entry in self.agents.values() for s in entry["mcp_servers"]})
 
     # ---- supply chain ---------------------------------------------------------
     def fingerprints(self) -> dict[str, str]:
@@ -127,8 +144,14 @@ class AIInventory:
                                         "models": set(), "agents": set()})
             row["models"].add(entry["model"])
             row["agents"].add(entry["name"])
-        return [{**r, "models": sorted(r["models"]), "agents": sorted(r["agents"])}
+        rows = [{**r, "models": sorted(r["models"]), "agents": sorted(r["agents"])}
                 for r in seen.values()]
+        for server in self.mcp_servers():
+            rows.append({"provider": f"mcp:{server}", "jurisdiction": "declare it",
+                         "models": [], "agents": sorted(
+                             e["name"] for e in self.agents.values()
+                             if server in e["mcp_servers"])})
+        return rows
 
     def to_cyclonedx(self) -> dict[str, Any]:
         """A CycloneDX 1.6 ML-BOM: models as components, providers as services."""
@@ -148,6 +171,9 @@ class AIInventory:
                 "properties": [{"name": "owner", "value": entry["identity"].get("owner", "")},
                                {"name": "jurisdiction", "value": entry["region"]}],
             })
+        for server in self.mcp_servers():
+            services.append({"bom-ref": f"mcp:{server}", "name": server,
+                             "properties": [{"name": "kind", "value": "mcp-server"}]})
         unique = {c["bom-ref"]: c for c in components}
         return {"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
                 "metadata": {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

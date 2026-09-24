@@ -37,14 +37,15 @@ from .data import (
     DataClassifier,
     DataFinding,
     Pseudonymizer,
+    known_classes,
 )
 from .evidence import CONTROLS, ComplianceReport
 from .expr import ExpressionError, compile_expr
-from .identity import AgentIdentity, DelegationChain, RiskTier
+from .identity import AgentIdentity, DelegationChain, Principal, RiskTier
 from .incidents import Deadline, Incident, IncidentDesk
 from .inventory import AIInventory
 from .monitor import RunState, RuntimeMonitor
-from .oversight import ApprovalRequest, ApprovalVote, OversightDesk
+from .oversight import ApprovalRequest, ApprovalVote, Approver, OversightDesk
 from .packs import Pack, Requirement, list_packs, load_pack
 from .policy import (
     Decision,
@@ -56,7 +57,7 @@ from .policy import (
     TransparencyConfig,
 )
 from .records import Ed25519Signer, HMACSigner, RetentionSweeper, SubjectVault
-from .residency import Region, RegionResolver
+from .residency import Region, RegionResolver, resolve_region
 from .risk import RiskAssessment, assess, impact_assessment
 from .transparency import ProvenanceManifest
 
@@ -64,11 +65,11 @@ __all__ = [
     "Governance", "Mode",
     "Policy", "PolicyRule", "Match", "Decision", "PolicyEngine", "ResidencyConfig",
     "TransparencyConfig", "compile_expr", "ExpressionError",
-    "AgentIdentity", "DelegationChain", "RiskTier",
+    "AgentIdentity", "Principal", "DelegationChain", "RiskTier",
     "DataClassifier", "Classification", "DataFinding", "Pseudonymizer",
-    "DATA_CLASSES", "PERSONAL", "SPECIAL_CATEGORIES",
-    "Region", "RegionResolver",
-    "OversightDesk", "ApprovalRequest", "ApprovalVote",
+    "DATA_CLASSES", "PERSONAL", "SPECIAL_CATEGORIES", "known_classes",
+    "Region", "RegionResolver", "resolve_region",
+    "OversightDesk", "ApprovalRequest", "ApprovalVote", "Approver",
     "HMACSigner", "Ed25519Signer", "SubjectVault", "RetentionSweeper",
     "ProvenanceManifest",
     "RiskAssessment", "assess", "impact_assessment",

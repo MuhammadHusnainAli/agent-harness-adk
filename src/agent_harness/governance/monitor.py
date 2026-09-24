@@ -12,7 +12,8 @@ been read, and how often each tool has been called.
   injection signals marks the run `untrusted`; policies can then require a
   human before any sensitive tool runs (``when: "run.untrusted"``).
 * **ASI08 cascading failures / ASI10 rogue agents** — the same call repeated,
-  a tool stormed, delegation fanning out: stopped, and an incident opened.
+  a tool stormed, delegation fanning out, a tool failing again and again (its
+  breaker opens for the rest of the run): stopped, and an incident opened.
 """
 
 from __future__ import annotations
@@ -47,12 +48,14 @@ class RunState:
     untrusted: bool = False
     tool_calls: Counter[str] = field(default_factory=Counter)
     signatures: Counter[str] = field(default_factory=Counter)
+    failures: Counter[str] = field(default_factory=Counter)   # consecutive, per tool
     delegations: int = 0
     denials: int = 0
     models: set[str] = field(default_factory=set)
     providers: set[str] = field(default_factory=set)
     regions: set[str] = field(default_factory=set)
     pseudonymized: bool = False
+    incidents: set[str] = field(default_factory=set)       # causes already reported
 
     @property
     def top_level(self) -> bool:
@@ -82,6 +85,9 @@ class RuntimeMonitor:
     max_calls_per_tool: int | None = 50
     #: Sub-agents started by one run.
     max_delegations: int | None = 25
+    #: Consecutive failures of one tool before its breaker opens for the run —
+    #: so one broken dependency does not cascade through every retry.
+    max_consecutive_failures: int | None = 3
     injection: InjectionDetector = field(default_factory=InjectionDetector)
 
     @staticmethod
@@ -91,6 +97,10 @@ class RuntimeMonitor:
 
     def on_tool(self, state: RunState, tool: str, args: dict[str, Any]) -> str | None:
         """Count the call. Returns why it must be stopped, or None."""
+        if (self.max_consecutive_failures
+                and state.failures[tool] >= self.max_consecutive_failures):
+            return (f"{tool} failed {state.failures[tool]} times in a row — its breaker "
+                    "is open for the rest of this run")
         sig = self.signature(tool, args)
         state.tool_calls[tool] += 1
         state.signatures[sig] += 1
@@ -100,6 +110,15 @@ class RuntimeMonitor:
         if self.max_calls_per_tool and state.tool_calls[tool] > self.max_calls_per_tool:
             return f"{tool} called {state.tool_calls[tool]} times in one run"
         return None
+
+    def on_tool_outcome(self, state: RunState, tool: str, failed: bool) -> bool:
+        """Record success or failure. True when this failure opened the breaker."""
+        if not failed:
+            state.failures[tool] = 0
+            return False
+        state.failures[tool] += 1
+        return bool(self.max_consecutive_failures
+                    and state.failures[tool] == self.max_consecutive_failures)
 
     def on_delegate(self, state: RunState) -> str | None:
         state.delegations += 1

@@ -29,8 +29,15 @@ from typing import Any, Literal
 
 from ..errors import ConfigurationError
 from ..types import ModelResponse, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock
-from .data import PERSONAL, Classification, DataClassifier, Pseudonymizer, expand_classes
-from .identity import AgentIdentity, DelegationChain
+from .data import (
+    PERSONAL,
+    Classification,
+    DataClassifier,
+    Pseudonymizer,
+    expand_classes,
+    known_classes,
+)
+from .identity import AgentIdentity, DelegationChain, Principal
 from .incidents import Incident, IncidentDesk
 from .inventory import AIInventory
 from .monitor import RunState, RuntimeMonitor, current_run
@@ -57,11 +64,13 @@ class Governance:
         packs: Iterable[str | Pack] = (),
         mode: Mode = "enforce",
         home: str | None = None,
+        home_region: str | None = None,
         regions: Mapping[str, str] | None = None,
         signer: Any = None,
         signing_key: bytes | str | None = None,
         approver: Any = None,
         approval_timeout: float = 900.0,
+        approval_notify: Any = None,
         vault: SubjectVault | str | Path | None = None,
         inventory: AIInventory | str | Path | None = None,
         classifier: DataClassifier | None = None,
@@ -69,12 +78,14 @@ class Governance:
         notify: Iterable[Any] = (),
         service_provider: str = "",
         pseudonym_key: bytes | str | None = None,
+        audit_args: Literal["scrubbed", "tokens"] = "scrubbed",
     ) -> None:
         if mode not in ("enforce", "monitor"):
             raise ConfigurationError(f"mode must be 'enforce' or 'monitor', not {mode!r}")
         self.mode: Mode = mode
         self.packs: list[Pack] = [p if isinstance(p, Pack) else load_pack(p) for p in packs]
         merged = Policy.load(policy).merge(*(p.policy for p in self.packs))
+        home = home or home_region
         if home:
             merged.residency = (merged.residency or ResidencyConfig()).model_copy(
                 update={"home": home})
@@ -87,23 +98,39 @@ class Governance:
                 merged.residency.home = restricted[0]
         self.policy = merged
         self.engine = PolicyEngine(merged)
+        self.classifier = classifier or DataClassifier()
+        # A misspelt class in a deny rule would never match — fail open. Refuse it.
+        known = known_classes([*merged.data_classes,
+                               *(cls for cls, _ in self.classifier.extra.values())])
+        unknown = sorted(merged.class_names() - known)
+        if unknown:
+            raise ConfigurationError(
+                f"unknown data classes in the policy: {', '.join(unknown)} — known: "
+                f"{', '.join(sorted(known))}; declare your own under `data_classes:`")
 
         if signer is None and signing_key:
             signer = HMACSigner(signing_key)
         self.signer = signer
         self.resolver = RegionResolver(regions)
-        self.classifier = classifier or DataClassifier()
         self.pseudonymizer = Pseudonymizer(pseudonym_key)
         self.vault = vault if isinstance(vault, SubjectVault) else SubjectVault(vault)
         self.inventory = (inventory if isinstance(inventory, AIInventory)
                           else AIInventory(inventory))
         self.monitor = monitor or RuntimeMonitor()
         self.oversight = OversightDesk(approver, default_timeout=approval_timeout,
-                                       record=self._record_approval)
+                                       record=self._record_approval,
+                                       notify=approval_notify)
         self.incidents = IncidentDesk({p.id: p.incidents for p in self.packs},
                                       notify=notify, record=self._record_incident)
         self.retention = RetentionSweeper(merged.data_retention_days)
         self.service_provider = service_provider
+        #: How tool arguments enter the audit trail: "scrubbed" replaces the
+        #: personal values the classifier can find; "tokens" replaces *every*
+        #: string argument with the person's token — for when arguments may hold
+        #: names or free text no pattern can recognise.
+        if audit_args not in ("scrubbed", "tokens"):
+            raise ConfigurationError("audit_args is 'scrubbed' or 'tokens'")
+        self.audit_args = audit_args
 
         self.harness: Any = None
         self.identities: dict[str, AgentIdentity] = {}
@@ -165,6 +192,9 @@ class Governance:
                     "must be signed from its first entry — start a new audit file")
             harness.audit.signer = harness.audit.signer or self.signer
         self.harness = harness
+        # Personal data reaches the trail only as the current person's tokens —
+        # including what the loop itself records (task text, tool arguments).
+        harness.audit.scrub = self._scrub_entry
         for event, handler in (
             ("run_start", self._on_run_start), ("run_end", self._on_run_end),
             ("model_egress", self._on_egress), ("post_model", self._on_post_model),
@@ -172,11 +202,63 @@ class Governance:
             ("subagent_start", self._on_subagent_start),
             ("memory_write", self._on_memory_write),
         ):
-            harness.hooks.add(event, handler)
+            harness.hooks.add(event, self._guarded(event, handler))
         harness.audit.record("governance", "governance.attach", decision="ok",
                              policy=self.policy.hash[:16], mode=self.mode,
                              packs=[p.id for p in self.packs])
         return self
+
+    def _guarded(self, event: str, handler: Any) -> Any:
+        """A governance failure is a refusal, never a crash and never a pass.
+
+        In enforce mode the action is blocked and the error recorded; in
+        monitor mode it is recorded and the action goes ahead.
+        """
+        async def run(hook: Any) -> None:
+            try:
+                await handler(hook)
+            except Exception as exc:
+                self.stats[("error", event)] += 1
+                self._audit(hook.agent or "governance", "governance.error", event,
+                            "deny" if self.mode == "enforce" else "log",
+                            run_id=hook.run_id, error=f"{type(exc).__name__}: {exc}")
+                if self.mode == "enforce" and event != "run_end":
+                    hook.block(f"governance could not decide ({type(exc).__name__}); "
+                               "refused")
+        run.__name__ = getattr(handler, "__name__", event)
+        return run
+
+    #: Loop records whose target is the task's free text.
+    _FREE_TEXT_TARGETS = frozenset({"run_start", "run_end"})
+
+    def _scrub_entry(self, action: str, target: str,
+                     detail: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """What the audit trail may keep of one entry.
+
+        A task's text can name anyone, and no pattern finds every name, so it
+        enters the immutable trail only as the person's token (the readable
+        text stays in the run journal, which erasure rewrites). Everything else
+        is kept, with the personal values the classifier finds tokenised.
+        """
+        state = current_run.get()
+        subject = (state.principal.get("subject", "") if state else "") or "_anonymous"
+        try:
+            if action in self._FREE_TEXT_TARGETS and target:
+                target = self.vault.token(subject, target, "task")
+            else:
+                target = self._scrub(target, subject)
+            clean: dict[str, Any] = {}
+            for key, value in detail.items():
+                if key == "args" and self.audit_args == "tokens":
+                    clean[key] = _map_strings(value, lambda s: self.vault.token(
+                        subject, s, "arg") if s else s)
+                else:
+                    clean[key] = self._scrub(value, subject)
+            return target, clean
+        except Exception:
+            # Unable to tell what is personal: keep nothing rather than everything.
+            self.stats[("error", "audit_scrub")] += 1
+            return _withhold(target), _withhold(detail)
 
     def register_agent(self, agent: Any) -> AgentIdentity:
         """Called by `Agent.__init__` on a governed harness."""
@@ -188,6 +270,9 @@ class Governance:
             if self.mode == "enforce":
                 raise ConfigurationError(
                     f"{agent.name}: prohibited use — " + "; ".join(assessment.reasons))
+        if self.packs:
+            # Report the classification under the frameworks actually in force.
+            assessment = assessment.only({p.id for p in self.packs})
         if identity.risk is None or identity.risk != assessment.tier:
             identity = identity.model_copy(update={"risk": assessment.tier})
         self.identities[agent.name] = identity
@@ -275,19 +360,9 @@ class Governance:
     def _principal(self, trace: Any, parent: RunState | None) -> dict[str, Any]:
         if parent is not None:
             return parent.principal       # a sub-agent acts for the same person
-        tags = dict(getattr(trace, "tags", None) or {})
         residency = self.policy.residency
-        user = getattr(trace, "user_id", None) or ""
-        tenant = getattr(trace, "tenant_id", None) or ""
-        return {
-            "user": user, "tenant": tenant,
-            "session": getattr(trace, "session_id", None) or "",
-            "jurisdiction": tags.get("jurisdiction") or (residency.home if residency
-                                                         else None),
-            "consents": [c.strip() for c in tags.get("consent", "").split(",") if c.strip()],
-            "purpose": tags.get("purpose", ""),
-            "subject": f"{tenant}/{user}" if user else "",
-        }
+        return Principal.from_trace(trace, home=residency.home if residency else None
+                                    ).context()
 
     def _context(self, state: RunState | None, **extra: Any) -> dict[str, Any]:
         identity = state.chain.head if state else None
@@ -319,8 +394,6 @@ class Governance:
                 result = result | self.classifier.scan(text)
         if state is not None:
             state.taint(result.classes)
-        for cls in result.classes:
-            self.data_seen[cls] += 1
         return result
 
     def _enforce(self, decision: Decision) -> bool:
@@ -349,6 +422,10 @@ class Governance:
         if identity.risk == "prohibited":
             decision.tighten("deny", f"{hook.agent} is a prohibited use", rule="risk",
                              controls=["C12"])
+        if parent is not None:
+            ok, why = parent.chain.may_delegate(self.policy.max_delegation_depth)
+            if not ok:
+                decision.tighten("deny", why, rule="delegation", controls=["C2"])
         if self.policy.purposes and purpose not in self.policy.purposes:
             decision.tighten("deny", f"purpose {purpose or '(none)'!r} is not declared "
                              f"in the policy", rule="purpose", controls=["C7"])
@@ -389,21 +466,28 @@ class Governance:
                 manifest = ProvenanceManifest.for_output(
                     result.output, agent=state.agent, run_id=state.run_id,
                     models=sorted(state.models), providers=sorted(state.providers),
-                    service_provider=self.service_provider, policy=self.policy.hash[:16],
+                    service_provider=self.service_provider, policy=self.engine.hash[:16],
                     labels={"explicit": transparency.label_output,
                             "implicit": True, "languages": transparency.languages})
                 if self.signer is not None:
                     manifest.sign(self.signer)
                 result.provenance = manifest.model_dump(mode="json")
         result.governance = {
-            "policy": self.policy.hash[:16], "mode": self.mode,
+            "policy": self.engine.hash[:16], "mode": self.mode,
             "data_classes": sorted(state.classes), "regions": sorted(state.regions),
             "denials": state.denials, "untrusted": state.untrusted,
             "delegation_depth": state.chain.depth,
         }
+        for cls in state.classes:
+            self.data_seen[cls] += 1
         subject = state.principal.get("subject", "")
-        if subject and getattr(result, "session_id", ""):
-            self.vault.note(subject, "sessions", result.session_id)
+        if subject:
+            # Where this person's data now lives, so erasure can find all of it.
+            if getattr(result, "session_id", ""):
+                self.vault.note(subject, "sessions", result.session_id)
+            self.vault.note(subject, "runs", state.run_id)
+            if getattr(result, "trace_id", ""):
+                self.vault.note(subject, "traces", result.trace_id)
 
     async def _on_egress(self, hook: Any) -> None:
         state = self._state(hook.run_id)
@@ -438,6 +522,7 @@ class Governance:
             state.models.add(model)
             state.providers.add(pname)
             state.regions.add(region.jurisdiction)
+        self.inventory.saw_region(hook.agent, region.jurisdiction)
         if origin and region.jurisdiction not in (origin, "on_prem") and \
                 classes & expand_classes(self._residency.applies_to):
             self._audit(hook.agent, "governance.transfer", region.jurisdiction, "allow",
@@ -554,6 +639,8 @@ class Governance:
         ctx = self._context(state, tool={"name": name, "tags": tags,
                                          "permission": hook.data.get("permission")},
                             args=args)
+        ctx["data"] = self._data_context((state.classes if state else set())
+                                         | found.classes)
         decision = self.decide("tool", ctx, target=name)
 
         if state is not None:
@@ -563,8 +650,9 @@ class Governance:
             loop = self.monitor.on_tool(state, name, args)
             if loop:
                 decision.tighten("deny", loop, rule="monitor", controls=["C14"])
-                await self.incidents.open("runaway", "medium", loop, agent=hook.agent,
-                                          run_id=hook.run_id, tool=name)
+                key = f"breaker:{name}" if "breaker" in loop else f"loop:{name}"
+                await self._incident_once(state, "runaway", key, loop,
+                                          agent=hook.agent, tool=name)
         drift = self._drift(hook.agent, name)
         if drift and self.policy.tool_drift != "allow":
             decision.tighten("deny" if self.policy.tool_drift == "deny" else "log", drift,
@@ -587,7 +675,15 @@ class Governance:
     async def _on_post_tool(self, hook: Any) -> None:
         state = self._state(hook.run_id)
         outcome = hook.data.get("outcome")
-        if outcome is None or outcome.is_error:
+        if outcome is None:
+            return
+        name = hook.data.get("tool", "")
+        if state is not None and self.monitor.on_tool_outcome(state, name, outcome.is_error):
+            await self._incident_once(
+                state, "runaway", f"breaker:{name}",
+                f"{name} failed {state.failures[name]} times in a row; breaker open",
+                agent=hook.agent, tool=name)
+        if outcome.is_error:
             return
         content = str(hook.replacement) if hook.replaced else outcome.content
         declared = [t[5:] for t in hook.data.get("tags", ()) if t.startswith("data:")]
@@ -597,8 +693,9 @@ class Governance:
                         if t.startswith("data:")]
         found = self._classify(state, content, declared=declared)
         score = self.monitor.on_tool_result(state, content) if state else 0.0
-        name = hook.data.get("tool", "")
         ctx = self._context(state, tool={"name": name}, result={"injection": score})
+        ctx["data"] = self._data_context((state.classes if state else set())
+                                         | found.classes)
         decision = self.decide("tool_result", ctx, target=name)
         if state is not None and not self._within_limits(state, found):
             decision.tighten("redact", "tool returned data this run may not use",
@@ -627,7 +724,11 @@ class Governance:
             if storm:
                 decision.tighten("deny", storm, rule="monitor", controls=["C14"])
         child_identity = self.identities.get(child)
-        if child_identity is not None and child_identity.risk == "prohibited":
+        if child_identity is None:
+            decision.tighten("deny", f"{child} is not registered with governance — it was "
+                             "built on a different harness, so its runs would go "
+                             "unchecked", rule="registration", controls=["C1", "C2"])
+        elif child_identity.risk == "prohibited":
             decision.tighten("deny", f"{child} is a prohibited use", rule="risk")
         self._record(decision, state, depth=chain.depth + 1)
         if self._enforce(decision):
@@ -656,13 +757,24 @@ class Governance:
     async def _settle_approval(self, decision: Decision, state: RunState | None,
                                agent: str, args: dict[str, Any]) -> None:
         """Ask the people. A yes clears the gate (other obligations stay); anything
-        else is a deny."""
+        else is a deny. In monitor mode nobody is asked and the decision is
+        recorded as `require_approval` — what would have happened."""
+        if self.mode == "monitor":
+            return
         if await self._approve(decision, state, agent, args):
             decision.effect = "redact" if decision.redact else "log"
             decision.reasons.append("approved")
         else:
             decision.tighten("deny", "approval was not given", rule="oversight",
                              controls=["C8"])
+
+    async def _incident_once(self, state: RunState, kind: str, key: str, title: str,
+                             **detail: Any) -> None:
+        """One incident per cause per run, however often the cause repeats."""
+        if key in state.incidents:
+            return
+        state.incidents.add(key)
+        await self.incidents.open(kind, "medium", title, run_id=state.run_id, **detail)
 
     async def _approve(self, decision: Decision, state: RunState | None, agent: str,
                        args: dict[str, Any]) -> bool:
@@ -707,7 +819,7 @@ class Governance:
         """Apply the data-retention limit now."""
         if self.harness is None:
             raise ConfigurationError("attach governance to a harness first")
-        return await self.retention.sweep(self.harness)
+        return await self.retention.sweep(self.harness, vault=self.vault)
 
     def summary(self) -> dict[str, Any]:
         decisions: dict[str, dict[str, int]] = {}
@@ -715,7 +827,7 @@ class Governance:
             decisions.setdefault(action, {})[effect] = count
         return {
             "policy": f"{self.policy.name}@{self.policy.version}",
-            "policy_hash": self.policy.hash[:16], "mode": self.mode,
+            "policy_hash": self.engine.hash[:16], "mode": self.mode,
             "packs": [p.id for p in self.packs], "agents": len(self.identities),
             "decisions": decisions,
             "approvals_pending": len(self.oversight.pending()),
@@ -739,6 +851,16 @@ def _request_texts(request: Any) -> list[str]:
             elif isinstance(block, ThinkingBlock):
                 continue
     return texts
+
+
+def _withhold(value: Any) -> Any:
+    if isinstance(value, str):
+        return "[withheld]" if value else value
+    if isinstance(value, Mapping):
+        return {k: _withhold(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_withhold(v) for v in value]
+    return value
 
 
 def _map_strings(value: Any, fn: Any) -> Any:

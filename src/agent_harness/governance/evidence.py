@@ -406,6 +406,10 @@ class ComplianceReport:
         lines += ["---", f"_{DISCLAIMER}_", ""]
         return "\n".join(lines)
 
+    def render(self) -> str:
+        """The Markdown report — what a terminal or a pull request shows best."""
+        return self.markdown()
+
     def html(self) -> str:
         body = []
         for p in self.packs:

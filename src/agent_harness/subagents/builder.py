@@ -79,6 +79,7 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
         harness=parent.harness,
         policy=policy,
         guardrails=guardrails,
+        identity=spec.identity,
         budget=spec.budget,
         workspace=workspace,
         allow_shell=spec.allow_shell,

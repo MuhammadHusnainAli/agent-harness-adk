@@ -34,7 +34,7 @@ from typing import Any, Literal
 
 from ..types import new_id
 
-__all__ = ["ApprovalVote", "ApprovalRequest", "OversightDesk"]
+__all__ = ["ApprovalVote", "ApprovalRequest", "Approver", "OversightDesk"]
 
 Status = Literal["pending", "approved", "denied", "expired"]
 
@@ -77,6 +77,8 @@ class ApprovalRequest:
                           for v in self.votes]}
 
 
+#: Anything that answers a request: returns a bool or an `ApprovalVote`,
+#: sync or async. One call per vote still needed.
 Approver = Callable[[ApprovalRequest], Any]
 
 
@@ -85,13 +87,19 @@ class OversightDesk:
 
     def __init__(self, approver: Approver | None = None, *,
                  default_timeout: float = 900.0,
-                 record: Callable[..., Any] | None = None) -> None:
+                 record: Callable[..., Any] | None = None,
+                 notify: Callable[[ApprovalRequest], Any] | None = None) -> None:
         #: Called once per vote still needed. May return a bool or an
         #: `ApprovalVote`; sync or async. Leave it out to answer via
         #: `approve` / `deny` from elsewhere (a web handler, a Slack action).
         self.approver = approver
         self.default_timeout = default_timeout
         self.record = record
+        #: Told about each request as it starts waiting — post it to Slack, a
+        #: ticket queue, a web page — so a person knows there is something to
+        #: answer. A notifier that fails does not stop the request; the timeout
+        #: still applies.
+        self.notify = notify
         self._requests: dict[str, ApprovalRequest] = {}
 
     # ---- the harness side ----------------------------------------------------
@@ -99,6 +107,17 @@ class OversightDesk:
         """Wait for a decision. Returns the request with its final status."""
         self._requests[request.id] = request
         self._note(request, "approval_requested")
+        if self.notify is not None:
+            try:
+                sent = self.notify(request)
+                if inspect.isawaitable(sent):
+                    await sent
+            except Exception as exc:
+                request.votes.append(ApprovalVote(False, "system",
+                                                  f"notify failed: {exc}"))
+                request.status = "denied"
+                self._note(request, "approval_decided")
+                return request
         timeout = request.timeout if request.timeout is not None else self.default_timeout
         try:
             if self.approver is not None:

@@ -56,6 +56,12 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/07_governance.py",
      "Governance: EU and Saudi customers on one harness — residency, approvals, "
      "erasure and the evidence report."),
+    ("examples/08_governance_saudi_government.py",
+     "Governance for a Saudi government service: in-Kingdom residency, four-eyes "
+     "approvals through the queue, SDAIA breach clock, DPIA draft."),
+    ("examples/09_governance_singapore_fintech.py",
+     "Governance under Singapore's agentic framework: monitor then enforce, prompt "
+     "injection, inherited authority, tool drift."),
 ]
 
 

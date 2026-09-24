@@ -204,9 +204,33 @@ class ResidencyConfig(BaseModel):
     personal data may reach; ``"*"`` means anywhere. The subject's jurisdiction
     comes from the run's principal, or `home` when none is set. A jurisdiction
     no pack speaks for is unrestricted.
+
+    The short form also works for a single-jurisdiction deployment:
+
+        residency: {home: eu, allow_transfer_to: [uk, ch], local_providers_are: on_prem}
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _short_form(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        data = dict(data)
+        if "allow_transfer_to" in data:
+            allowed = _listify(data.pop("allow_transfer_to"))
+            home = data.get("home")
+            if not home:
+                raise ValueError("`allow_transfer_to` needs `home` — whose data it limits")
+            data.setdefault("transfers", {})
+            data["transfers"] = {**data["transfers"], home: allowed}
+        if "local_providers_are" in data:
+            value = data.pop("local_providers_are")
+            if value not in ("on_prem", "restricted"):
+                raise ValueError("`local_providers_are` is `on_prem` or `restricted`")
+            data["on_prem_always_allowed"] = value == "on_prem"
+        return data
 
     home: str | None = None
     transfers: dict[str, list[str]] = Field(default_factory=dict)
@@ -290,6 +314,10 @@ class Policy(BaseModel):
     rules: list[PolicyRule] = Field(default_factory=list)
     #: purpose → the data classes a run with that purpose may handle.
     purposes: dict[str, list[str]] = Field(default_factory=dict)
+    #: Your own data-class names (found by `DataClassifier(extra=...)` or declared
+    #: by `data:<class>` tool tags). Anything else a policy names is a typo, and a
+    #: typo in a deny rule would fail open, so it is refused.
+    data_classes: list[str] = Field(default_factory=list)
     residency: ResidencyConfig | None = None
     transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
     #: Minimum days decision records must be kept (the longest any pack asks for).
@@ -307,6 +335,36 @@ class Policy(BaseModel):
     @classmethod
     def _rules(cls, value: Any) -> Any:
         return value or []
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _version(cls, value: Any) -> str:
+        return str(value)          # `version: 3` in YAML is an int
+
+    @model_validator(mode="before")
+    @classmethod
+    def _data_section(cls, data: Any) -> Any:
+        # `data: {purposes: ..., classes: ...}` reads naturally in a file.
+        if isinstance(data, Mapping) and isinstance(data.get("data"), Mapping):
+            data = dict(data)
+            section = dict(data.pop("data"))
+            if "purposes" in section:
+                data["purposes"] = {**section.pop("purposes"), **data.get("purposes", {})}
+            if "classes" in section:
+                data["data_classes"] = [*data.get("data_classes", []),
+                                        *section.pop("classes")]
+            if section:
+                raise ValueError(f"unknown keys under `data`: {', '.join(section)}")
+        return data
+
+    def class_names(self) -> set[str]:
+        """Every data-class name this policy refers to."""
+        names = {c for classes in self.purposes.values() for c in classes}
+        for rule in self.rules:
+            names |= set(rule.match.data) | set(rule.redact)
+        if self.residency is not None:
+            names |= set(self.residency.applies_to)
+        return names
 
     # ---- identity -----------------------------------------------------------
     @property
@@ -363,7 +421,11 @@ class Policy(BaseModel):
             merged.tool_drift = max(merged.tool_drift, other.tool_drift, key=order.index)
             if STRICTNESS[other.defaults.effect] > STRICTNESS[merged.defaults.effect]:
                 merged.defaults.effect = other.defaults.effect
+            if STRICTNESS[other.defaults.on_error] > STRICTNESS[merged.defaults.on_error]:
+                merged.defaults.on_error = other.defaults.on_error
             merged.packs = list(dict.fromkeys([*merged.packs, *other.packs]))
+            merged.data_classes = list(dict.fromkeys([*merged.data_classes,
+                                                      *other.data_classes]))
         return merged
 
 
