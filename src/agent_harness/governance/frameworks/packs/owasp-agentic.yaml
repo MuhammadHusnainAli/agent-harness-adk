@@ -1,0 +1,39 @@
+id: owasp-agentic
+name: OWASP Top 10 for Agentic Applications 2026
+jurisdiction: global
+kind: framework
+binding: false
+status: published 9 December 2025 by the OWASP GenAI Security Project
+as_of: 2026-09-24
+summary: >-
+  The ten highest-impact risks specific to agents that plan, hold memory, call tools
+  and act with delegated authority. This pack adds the runtime defences directly.
+sources:
+  - https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/
+requirements:
+  - {ref: "ASI01", title: "Agent goal hijack", controls: [C14, C8]}
+  - {ref: "ASI02", title: "Tool misuse and exploitation", controls: [C2, C3, C8]}
+  - {ref: "ASI03", title: "Agent identity and privilege abuse", controls: [C1, C2]}
+  - {ref: "ASI04", title: "Agentic supply-chain compromise", controls: [C13]}
+  - {ref: "ASI05", title: "Unexpected code execution", controls: [C2, C8], note: "workspace shell is off unless allow_shell=True and asks every time"}
+  - {ref: "ASI06", title: "Memory and context poisoning", controls: [C14, C5]}
+  - {ref: "ASI07", title: "Insecure inter-agent communication", controls: [C2, C10]}
+  - {ref: "ASI08", title: "Cascading agent failures", controls: [C14]}
+  - {ref: "ASI09", title: "Human-agent trust exploitation", controls: [C9, C8]}
+  - {ref: "ASI10", title: "Rogue agents", controls: [C14, C8, C13]}
+policy:
+  max_delegation_depth: 3
+  rules:
+    - id: asi01-untrusted-context
+      on: tool
+      match: {tags: [irreversible, payments, external_comms, data_export, consequential]}
+      when: "run.untrusted"
+      effect: require_approval
+      reason: "OWASP ASI01/ASI06: the run has read content with injection signals; a person confirms before a sensitive action"
+      controls: [C8, C14]
+    - id: asi06-no-injected-memory
+      on: memory
+      when: "run.untrusted"
+      effect: deny
+      reason: "OWASP ASI06: nothing is written to long-term memory from a run that read suspected injection"
+      controls: [C14]

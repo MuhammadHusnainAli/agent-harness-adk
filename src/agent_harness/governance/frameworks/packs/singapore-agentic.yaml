@@ -1,0 +1,35 @@
+id: singapore-agentic
+name: Singapore Model AI Governance Framework for Agentic AI (IMDA)
+jurisdiction: sg
+kind: framework
+binding: false
+status: launched 22 January 2026; updated 20 May 2026
+as_of: 2026-09-24
+summary: >-
+  The first governance framework written for AI agents. Four dimensions: assess and
+  bound the risks up front; make humans meaningfully accountable; implement technical
+  controls and processes across the lifecycle; enable end-user responsibility.
+sources:
+  - https://www.imda.gov.sg/resources/press-releases-factsheets-and-speeches/press-releases/2026/new-model-ai-governance-framework-for-agentic-ai
+  - https://www.bakermckenzie.com/en/insight/publications/2026/06/singapore-imda-updates-model-ai-governance-framework-for-agentic-ai
+requirements:
+  - {ref: "Dimension 1", title: "Assess risk per use case before deployment", controls: [C12]}
+  - {ref: "Dimension 1", title: "Bound the agent — limit its tools, data and autonomy", controls: [C2, C7]}
+  - {ref: "Dimension 1", title: "Agent identity and permissions traceable to a human", controls: [C1, C2]}
+  - {ref: "Dimension 2", title: "Named humans accountable across the lifecycle", controls: [C1]}
+  - {ref: "Dimension 2", title: "Human checkpoints for significant or irreversible actions", controls: [C8]}
+  - {ref: "Dimension 3", title: "Testing before deployment", manual: true, note: "agent_harness.Evaluator golden tasks"}
+  - {ref: "Dimension 3", title: "Continuous monitoring and logging of agent behaviour", controls: [C14, C10]}
+  - {ref: "Dimension 3", title: "Controls on tools, inter-agent communication and supply chain", controls: [C2, C13]}
+  - {ref: "Dimension 3", title: "Ability to interrupt or shut down an agent", controls: [C8]}
+  - {ref: "Dimension 4", title: "Users know they are dealing with an agent and what it can do", controls: [C9]}
+policy:
+  transparency: {disclose: true}
+  max_delegation_depth: 3
+  rules:
+    - id: irreversible-actions-need-a-human
+      on: tool
+      match: {tags: [irreversible]}
+      effect: require_approval
+      reason: "Singapore agentic framework: human checkpoint before irreversible actions"
+      controls: [C8]

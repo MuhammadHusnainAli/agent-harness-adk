@@ -1,0 +1,36 @@
+id: qatar-pdppl
+name: Qatar Personal Data Privacy Protection Law (Law No. 13 of 2016)
+jurisdiction: qa
+kind: law
+binding: true
+status: in force; NCSA/NCGAA guidelines
+as_of: 2026-09-24
+summary: >-
+  Consent-based regime with a permit requirement for data of a special nature.
+  Article 15 forbids restricting cross-border flows unless processing breaches the law
+  or could harm the individual — so transfers are not residency-restricted by default.
+sources:
+  - https://www.almeezan.qa/LawPage.aspx?id=7121&language=en
+requirements:
+  - {ref: "Art 4", title: "Processing is honest and lawful and within its purpose", controls: [C7]}
+  - {ref: "Art 5-6", title: "Rights including withdrawal and erasure", controls: [C11]}
+  - {ref: "Art 11", title: "Precautions to protect the data", controls: [C5, C10]}
+  - {ref: "Art 14", title: "Breach notified to the competent department and the individual", controls: [C15]}
+  - {ref: "Art 16", title: "Data of a special nature only with a permit", manual: true, controls: [C4]}
+  - {ref: "Art 15", title: "Cross-border flows are not restricted without cause", controls: [C6]}
+policy:
+  residency:
+    transfers:
+      qa: ["*"]
+  rules:
+    - id: special-nature-needs-permit
+      on: egress
+      match: {data: [special_category], jurisdiction: [qa]}
+      when: "'qa_special_permit' not in principal.consents"
+      effect: redact
+      redact: [special_category]
+      reason: "Qatar PDPPL Art 16: data of a special nature is processed only under a permit"
+      controls: [C5]
+incidents:
+  personal_data_breach:
+    - {notify: National Cyber Governance and Assurance Affairs, within: 72, basis: "Art 14 and NCGAA guideline — 72 hours", min_severity: medium}

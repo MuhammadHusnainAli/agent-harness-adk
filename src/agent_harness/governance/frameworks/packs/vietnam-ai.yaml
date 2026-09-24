@@ -1,0 +1,30 @@
+id: vietnam-ai
+name: Vietnam Law on Artificial Intelligence and Personal Data Protection Law
+jurisdiction: vn
+kind: law
+binding: true
+status: >-
+  AI Law in force 1 March 2026, with grace to 1 March 2027 (1 September 2027 for health,
+  education and finance); Personal Data Protection Law in force 1 January 2026
+as_of: 2026-09-24
+summary: >-
+  Risk-based classification of AI systems, disclosure when people interact with AI,
+  labelling of AI-generated content; personal-data impact assessments, cross-border
+  transfer dossiers and 72-hour breach notification.
+sources:
+  - https://www.loc.gov/item/global-legal-monitor/2026-04-03/vietnam-ai-law-takes-effect
+  - https://iapp.org/news/a/vietnam-s-first-standalone-ai-law-an-overview-of-key-provisions-future-implications
+requirements:
+  - {ref: "AI Law — classification", title: "AI system classified by risk", controls: [C12]}
+  - {ref: "AI Law — transparency", title: "People told they are interacting with AI", controls: [C9]}
+  - {ref: "AI Law — labelling", title: "AI-generated content labelled", controls: [C9]}
+  - {ref: "AI Law — high risk", title: "High-risk systems: oversight, records, incident handling", controls: [C8, C10, C15]}
+  - {ref: "PDP Law — impact assessment", title: "Personal data processing impact assessment", controls: [C12]}
+  - {ref: "PDP Law — transfers", title: "Cross-border transfer impact assessment dossier", controls: [C6], manual: true}
+  - {ref: "PDP Law — rights", title: "Access, correction and deletion", controls: [C11]}
+  - {ref: "PDP Law — breach", title: "Breach notified within 72 hours", controls: [C15]}
+policy:
+  transparency: {disclose: true, label_output: true, label_for: [vn], provenance: true, languages: [vi]}
+incidents:
+  personal_data_breach:
+    - {notify: Ministry of Public Security (A05), within: 72, basis: "PDP Law — 72 hours", min_severity: medium}

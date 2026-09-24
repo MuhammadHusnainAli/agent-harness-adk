@@ -271,6 +271,11 @@ class MemoryManager:
         self.orchestrator = OrchestratorMemory(self.store, trace=self.trace)
         self.summarize = summarize
         self.recall_limit = recall_limit
+        #: Called with every durable write before it is stored:
+        #: ``await on_write(text, scope=..., kind=...)`` returns the text to keep
+        #: (possibly rewritten) or raises to refuse it. The agent wires this to
+        #: its `memory_write` hook, which is how governance sees memory.
+        self.on_write: Callable[..., Awaitable[str]] | None = None
 
     # ---- scopes -------------------------------------------------------
     def subagent(self, task: str, agent: str = "") -> SubAgentMemory:
@@ -278,6 +283,8 @@ class MemoryManager:
 
     async def remember(self, text: str, *, kind: str = "fact", scope: str = "user",
                        tags: list[str] | None = None) -> MemoryRecord:
+        if self.on_write is not None:
+            text = await self.on_write(text, scope=scope, kind=kind)
         if scope == "user":
             return await self.user.remember(text, kind=kind, tags=tags)
         record = MemoryRecord(scope=scope, kind=kind, text=text, tags=tags or [])
@@ -327,6 +334,8 @@ class MemoryManager:
     async def close_session(self, summary: str | None = None) -> str:
         """Session close → user memory update. Returns the new `user.md`."""
         text = summary if summary is not None else self.session.digest()
+        if self.on_write is not None:
+            text = await self.on_write(text, scope="user", kind="distill")
         return await self.user.distill(text, summarize=self.summarize)
 
     # ---- tools the agent can call itself -------------------------------

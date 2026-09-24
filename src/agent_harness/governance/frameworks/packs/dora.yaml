@@ -1,0 +1,29 @@
+id: dora
+name: Digital Operational Resilience Act (EU) 2022/2554
+jurisdiction: eu
+kind: regulation
+binding: true
+status: applies since 17 January 2025 (financial entities)
+as_of: 2026-09-24
+summary: >-
+  ICT risk management for EU financial entities. Model providers are ICT third-party
+  service providers: they belong in the register of information, and major ICT
+  incidents are reported on a fixed clock.
+sources:
+  - https://eur-lex.europa.eu/eli/reg/2022/2554/oj
+requirements:
+  - {ref: "Art 6", title: ICT risk management framework, controls: [C3, C14]}
+  - {ref: "Art 8", title: Identification of ICT assets and dependencies, controls: [C13]}
+  - {ref: "Art 12", title: Logging and backup, controls: [C10]}
+  - {ref: "Art 17", title: ICT incident management process, controls: [C15]}
+  - {ref: "Art 19", title: "Major ICT incidents reported (initial, intermediate, final)", controls: [C15]}
+  - {ref: "Art 28(3)", title: Register of information on ICT third-party arrangements, controls: [C13], note: "gov.inventory.third_parties()"}
+  - {ref: "Art 28(4)", title: Due diligence before contracting ICT third parties, manual: true}
+  - {ref: "Art 30", title: Key contractual provisions with ICT providers, manual: true}
+policy:
+  tool_drift: deny
+incidents:
+  ict_incident:
+    - {notify: competent authority (initial), within: 4, basis: "RTS: 4 h after classification as major, at most 24 h after detection", min_severity: high}
+    - {notify: competent authority (intermediate), within: 72, basis: "RTS: 72 h after the initial notification", min_severity: high}
+    - {notify: competent authority (final), within: 720, basis: "RTS: one month", min_severity: high}

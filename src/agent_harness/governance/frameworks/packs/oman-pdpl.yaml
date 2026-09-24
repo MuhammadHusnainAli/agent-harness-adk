@@ -1,0 +1,19 @@
+id: oman-pdpl
+name: Oman Personal Data Protection Law (Royal Decree 6/2022) and Executive Regulations
+jurisdiction: om
+kind: law
+binding: true
+status: in force since 13 February 2023; Executive Regulations 2024
+as_of: 2026-09-24
+summary: Consent-based regime with Ministry permits for sensitive data and breach reporting.
+sources:
+  - https://www.mtcit.gov.om/
+requirements:
+  - {ref: "Law — sensitive data", title: "Sensitive data (health, genetic, biometric, religion...) needs a Ministry permit", manual: true, controls: [C4]}
+  - {ref: "Law — security", title: "Security measures", controls: [C5, C10]}
+  - {ref: "Law — breach", title: "Breach notified to the Ministry and the data subject", controls: [C15]}
+  - {ref: "Law — transfers", title: "Transfers subject to the Executive Regulations' conditions", controls: [C6]}
+  - {ref: "Law — rights", title: "Rights including erasure", controls: [C11]}
+incidents:
+  personal_data_breach:
+    - {notify: Ministry of Transport, Communications and IT, within: 72, basis: "Executive Regulations — 72 hours", min_severity: medium}

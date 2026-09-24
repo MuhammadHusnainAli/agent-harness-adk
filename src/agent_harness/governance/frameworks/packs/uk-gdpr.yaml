@@ -1,0 +1,40 @@
+id: uk-gdpr
+name: UK GDPR, Data Protection Act 2018 and Data (Use and Access) Act 2025
+jurisdiction: uk
+kind: law
+binding: true
+status: in force; DUAA 2025 provisions commencing in stages
+as_of: 2026-09-24
+summary: >-
+  GDPR as retained in UK law, amended by the Data (Use and Access) Act 2025, which
+  relaxes automated decision-making rules while keeping safeguards (notice, human
+  review on request, the right to contest).
+sources:
+  - https://www.legislation.gov.uk/ukpga/2025/18/contents
+  - https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/
+requirements:
+  - {ref: "Art 5", title: Data protection principles, controls: [C5, C7, C10]}
+  - {ref: "Art 15 / 17", title: Rights of access and erasure, controls: [C11]}
+  - {ref: "Art 22A-22D", title: Safeguards on significant automated decisions, controls: [C8, C9]}
+  - {ref: "Art 33", title: Breach reported to the ICO within 72 hours, controls: [C15]}
+  - {ref: "Art 35", title: DPIA for high-risk processing, controls: [C12]}
+  - {ref: "Art 44-49", title: Restricted transfers, controls: [C6]}
+  - {ref: "Art 37", title: DPO where required, manual: true}
+policy:
+  residency:
+    # UK adequacy regulations. The US "data bridge" covers only DPF-certified
+    # organisations — add "us" yourself when it applies.
+    transfers:
+      uk: [uk, eu, ch, jp, kr, ca, il, nz, ar, uy, ad, fo, gg, im, je]
+    applies_to: [personal]
+  rules:
+    - id: art22-significant-decisions
+      on: tool
+      match: {tags: [consequential]}
+      when: "'special_category' in data.classes"
+      effect: require_approval
+      reason: "UK GDPR Art 22B: significant decisions on special-category data need human involvement"
+      controls: [C8]
+incidents:
+  personal_data_breach:
+    - {notify: Information Commissioner's Office, within: 72, basis: "Art 33 — 72 hours", min_severity: medium}

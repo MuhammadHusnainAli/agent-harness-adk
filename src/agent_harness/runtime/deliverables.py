@@ -116,3 +116,30 @@ class DeliverableStore:
 
     def clear(self) -> None:
         self._items.clear()
+
+    def forget_runs(self, run_ids: set[str] | list[str]) -> list[str]:
+        """Delete every version produced by these runs, files and index included.
+
+        Returns the names of what was removed. Used when a person is erased.
+        """
+        doomed = set(run_ids)
+        removed: list[str] = []
+        for name in list(self._items):
+            kept = []
+            for artifact in self._items[name]:
+                if getattr(artifact, "run_id", "") in doomed:
+                    removed.append(name)
+                    if artifact.path:
+                        Path(artifact.path).unlink(missing_ok=True)
+                else:
+                    kept.append(artifact)
+            if kept:
+                self._items[name] = kept
+            else:
+                del self._items[name]
+        if removed and self.root:
+            index = self.root / "index.jsonl"
+            index.write_text("".join(a.model_dump_json() + "\n"
+                                     for versions in self._items.values()
+                                     for a in versions), encoding="utf-8")
+        return sorted(set(removed))

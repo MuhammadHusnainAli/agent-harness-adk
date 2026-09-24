@@ -92,6 +92,7 @@ def jsonl_exporter(path: str | Path) -> Exporter:
         with file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(span.to_dict(), default=str) + "\n")
 
+    export.path = file  # type: ignore[attr-defined]  # so `Tracer.forget` can rewrite it
     return export
 
 
@@ -107,6 +108,30 @@ class Tracer:
 
     def add_exporter(self, exporter: Exporter) -> None:
         self.exporters.append(exporter)
+
+    def forget(self, trace_ids: set[str] | list[str]) -> int:
+        """Drop these traces from memory and from every JSONL export.
+
+        Spans carry the start of each task, so erasing a person includes them.
+        Returns how many spans were dropped from memory.
+        """
+        doomed = set(trace_ids)
+        before = len(self.spans)
+        self.spans = [s for s in self.spans if s.trace_id not in doomed]
+        for exporter in self.exporters:
+            path = getattr(exporter, "path", None)
+            if path is None or not Path(path).exists():
+                continue
+            kept = []
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                try:
+                    if json.loads(line).get("trace_id") in doomed:
+                        continue
+                except json.JSONDecodeError:
+                    pass
+                kept.append(line)
+            Path(path).write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+        return before - len(self.spans)
 
     @contextmanager
     def span(self, name: str, kind: str = "run", **attrs: Any) -> Iterator[Span]:

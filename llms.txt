@@ -42,6 +42,9 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [04_rails](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/04_rails.py): Permissions, budget, hooks, guardrails, tracing and the run journal.
 - [05_orchestrator](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/05_orchestrator.py): The whole pipeline: plan, staff, run in parallel, consolidate, review.
 - [06_assurance](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/06_assurance.py): Stop control, audit trail, health, replay and quality evaluation.
+- [07_governance](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/07_governance.py): Governance: EU and Saudi customers on one harness — residency, approvals, erasure and the evidence report.
+- [08_governance_saudi_government](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/08_governance_saudi_government.py): Governance for a Saudi government service: in-Kingdom residency, four-eyes approvals through the queue, SDAIA breach clock, DPIA draft.
+- [09_governance_singapore_fintech](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/09_governance_singapore_fintech.py): Governance under Singapore's agentic framework: monitor then enforce, prompt injection, inherited authority, tool drift.
 
 ## Optional
 

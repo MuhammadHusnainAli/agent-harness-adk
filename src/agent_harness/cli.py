@@ -214,6 +214,159 @@ def _journal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _governance(args: argparse.Namespace) -> int:
+    import os
+
+    from .governance import Governance, HMACSigner, list_packs, load_pack
+    from .runtime.audit import AuditTrail
+
+    if args.action == "packs":
+        rows = [load_pack(p) for p in list_packs()]
+        if args.json:
+            print(json.dumps([{"id": p.id, "name": p.name, "jurisdiction": p.jurisdiction,
+                               "kind": p.kind, "binding": p.binding, "as_of": p.as_of}
+                              for p in rows], indent=2))
+            return 0
+        for p in rows:
+            kind = p.kind if p.binding else f"{p.kind}, voluntary"
+            print(f"{p.id:<19} {p.jurisdiction:<8} {kind:<22} {p.name}")
+        return 0
+
+    if args.action == "pack":
+        if not args.target:
+            print("usage: agent-harness governance pack <id>", file=sys.stderr)
+            return 2
+        p = load_pack(args.target)
+        print(f"{p.name}\n  {p.jurisdiction} · {p.kind} · "
+              f"{'binding' if p.binding else 'voluntary'} · checked {p.as_of}")
+        print(f"  status   {' '.join(p.status.split())}")
+        print("\nrequirements")
+        for r in p.requirements:
+            where = "manual" if r.manual else ", ".join(r.controls)
+            print(f"  {r.ref:<28} {r.title}  [{where}]")
+        if p.policy.rules:
+            print("\nrules")
+            for rule in p.policy.rules:
+                print(f"  {rule.id}: {rule.effect} on {', '.join(rule.on)} — {rule.reason}")
+        if p.policy.residency and p.policy.residency.transfers:
+            print("\nresidency")
+            for origin, dest in p.policy.residency.transfers.items():
+                print(f"  {origin} → {', '.join(dest)}")
+        if p.incidents:
+            print("\nincident clocks")
+            for kind, clocks in p.incidents.items():
+                for c in clocks:
+                    print(f"  {kind}: {c.get('notify')} within {c.get('within')} h "
+                          f"({c.get('basis', '')})")
+        print("\nsources\n" + "\n".join(f"  {u}" for u in p.sources))
+        return 0
+
+    if args.action == "verify":
+        path = Path(args.target or Path(args.state or ".harness") / "audit.jsonl")
+        if not path.exists():
+            print(f"no audit trail at {path}", file=sys.stderr)
+            return 1
+        signer = None
+        if args.key_env:
+            if not os.environ.get(args.key_env):
+                print(f"${args.key_env} is not set", file=sys.stderr)
+                return 1
+            signer = HMACSigner(os.environ[args.key_env])
+        trail = AuditTrail.load(path, signer=signer)
+        ok, why = trail.verify()
+        signed = "signed, signatures checked" if signer else "signatures not checked"
+        print(f"{path}: {len(trail)} entries, {why} ({signed})")
+        return 0 if ok else 1
+
+    if args.action == "check":
+        if not args.config:
+            print("usage: agent-harness governance check --config governance.yaml",
+                  file=sys.stderr)
+            return 2
+        gov = Governance.from_file(args.config)     # raises on anything invalid
+        policy = gov.policy
+        print(f"ok   {args.config}: policy {policy.name}@{policy.version} "
+              f"sha256:{gov.engine.hash[:16]} · mode {gov.mode}")
+        print(f"     packs: {', '.join(p.id for p in gov.packs) or 'none'}")
+        print(f"     rules: {len(policy.rules)} · purposes: "
+              f"{', '.join(sorted(policy.purposes)) or 'none'}")
+        residency = policy.residency
+        if residency and residency.transfers:
+            print(f"     residency: home {residency.home or '(per principal)'}; "
+                  + "; ".join(f"{o} → {', '.join(d)}"
+                              for o, d in sorted(residency.transfers.items())))
+        warnings = []
+        if residency and residency.home is None and sum(
+                "*" not in d for d in residency.transfers.values()) > 1:
+            warnings.append("no `home:` — a person with no jurisdiction tag is unrestricted")
+        if gov.signer is None:
+            warnings.append("no signing key — the audit trail is hash-chained but unsigned")
+        if gov.vault.path is None:
+            warnings.append("no `vault:` path — the subject index is lost on restart, "
+                            "so erasure cannot find earlier sessions")
+        for warning in warnings:
+            print(f"warn {warning}")
+        return 0
+
+    if args.action in ("inventory", "dsar"):
+        if not args.config:
+            print(f"usage: agent-harness governance {args.action} --config governance.yaml",
+                  file=sys.stderr)
+            return 2
+        gov = Governance.from_file(args.config)
+
+    if args.action == "inventory":
+        if not args.agents:
+            print("inventory needs --agents agents.yaml (a blueprint)", file=sys.stderr)
+            return 2
+        from .blueprint import Blueprint
+
+        harness = Harness.testing(governance=gov)
+        Blueprint.from_file(args.agents).build_all(harness=harness)
+        if args.format == "json":
+            print(json.dumps(gov.inventory.to_cyclonedx(), indent=2))
+            return 0
+        for entry in gov.inventory.agents.values():
+            identity = entry["identity"]
+            print(f"{entry['name']}  model={entry['model']}  provider={entry['provider']}"
+                  f"  risk={identity.get('risk')}  owner={identity.get('owner') or '-'}")
+            for tool_row in entry["tools"]:
+                print(f"    {tool_row['name']:<24} {tool_row['fingerprint'][:12]}  "
+                      f"{','.join(tool_row['tags'])}")
+            if entry["mcp_servers"]:
+                print(f"    mcp: {', '.join(entry['mcp_servers'])}")
+        return 0
+
+    if args.action == "dsar":
+        if args.target not in ("access", "erase") or not args.user:
+            print("usage: agent-harness governance dsar access|erase --user ID "
+                  "[--tenant ID] --state DIR --config governance.yaml", file=sys.stderr)
+            return 2
+        from .memory.trace import Trace
+
+        harness = Harness.local(args.state or ".harness", trace=False, governance=gov)
+        trace = Trace(user_id=args.user, tenant_id=args.tenant)
+        if args.target == "access":
+            result = asyncio.run(gov.rights.access(trace))
+        else:
+            result = asyncio.run(gov.rights.erase(trace, requested_by=args.requested_by))
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    if args.action == "report":
+        if not args.config:
+            print("usage: agent-harness governance report --config governance.yaml",
+                  file=sys.stderr)
+            return 2
+        gov = Governance.from_file(args.config)
+        gov.attach(Harness.testing())
+        report = gov.report(args.pack)
+        print({"json": report.json, "html": report.html}.get(args.format,
+                                                             report.markdown)())
+        return 0
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-harness",
@@ -277,6 +430,30 @@ def build_parser() -> argparse.ArgumentParser:
     journal.add_argument("--state", default=None)
     journal.add_argument("--limit", type=int, default=50)
 
+    gov = sub.add_parser("governance",
+                         help="jurisdiction packs, evidence reports, audit verification")
+    gov.add_argument("action",
+                     choices=["packs", "pack", "check", "report", "inventory", "verify",
+                              "dsar"],
+                     help="packs: list them · pack <id>: one in full · check: validate a "
+                          "config · report: evidence for a config · inventory: the AI "
+                          "inventory of a blueprint · verify: check an audit trail · "
+                          "dsar access|erase: a data-subject request")
+    gov.add_argument("target", nargs="?", default=None,
+                     help="the pack id (pack), an audit file (verify), or access|erase (dsar)")
+    gov.add_argument("--agents", default=None, help="a blueprint agents.yaml (inventory)")
+    gov.add_argument("--user", default=None, help="the data subject's user id (dsar)")
+    gov.add_argument("--tenant", default=None, help="the data subject's tenant id (dsar)")
+    gov.add_argument("--requested-by", default="data subject",
+                     help="who asked for the erasure, for the record (dsar)")
+    gov.add_argument("--config", default=None, help="a governance.yaml (report)")
+    gov.add_argument("--pack", default=None, help="report on one pack only")
+    gov.add_argument("--format", choices=["md", "json", "html"], default="md")
+    gov.add_argument("--state", default=None, help="the harness directory (verify, dsar)")
+    gov.add_argument("--key-env", default=None,
+                     help="environment variable holding the HMAC audit key (verify)")
+    gov.add_argument("--json", action="store_true", help="machine-readable (packs)")
+
     return parser
 
 
@@ -297,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_mcp(args))
         if args.command == "journal":
             return _journal(args)
+        if args.command == "governance":
+            return _governance(args)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130

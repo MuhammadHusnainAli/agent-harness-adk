@@ -9,41 +9,7 @@ failing test stops the release before anything is published.
 
 ## One-time setup
 
-Do these once, **before the first tag is pushed**. The release workflow will
-fail at the publish step otherwise.
-
-### 1. Create the PyPI Trusted Publisher
-
-Trusted Publishing lets GitHub Actions prove its identity to PyPI over OIDC, so
-no API token is stored anywhere. Because `agent-harness-adk` does not exist on
-PyPI yet, register it as a *pending* publisher:
-
-1. Sign in at <https://pypi.org> and go to
-   <https://pypi.org/manage/account/publishing/>.
-2. Under **Add a new pending publisher**, fill in exactly:
-
-   | Field | Value |
-   |---|---|
-   | PyPI Project Name | `agent-harness-adk` |
-   | Owner | `MuhammadHusnainAli` |
-   | Repository name | `agent-harness-adk` |
-   | Workflow name | `pipeline.yml` |
-   | Environment name | `pypi` |
-
-3. Save. The project is created on PyPI the first time the workflow publishes.
-
-The environment name must be `pypi` and the workflow name must be
-`pipeline.yml` — those are what the workflow declares. If you change either,
-change it in both places.
-
-### 2. Create the GitHub environment
-
-In the repository: **Settings → Environments → New environment → `pypi`**.
-
-Optional but worth it: add yourself under **Required reviewers**, so every
-publish waits for you to click approve. Nothing reaches PyPI until you do.
-
-### 3. Check Actions permissions
+### 1. Check Actions permissions
 
 **Settings → Actions → General → Workflow permissions** must allow
 `GITHUB_TOKEN` to write contents, or the GitHub Release step cannot create the

@@ -1,0 +1,44 @@
+id: uae-pdpl
+name: UAE Personal Data Protection Law (Federal Decree-Law No. 45 of 2021)
+jurisdiction: ae
+kind: law
+binding: true
+status: in force; check the status of its executive regulations and Data Office adequacy list
+as_of: 2026-09-24
+summary: >-
+  The federal data-protection law for the UAE mainland (DIFC and ADGM have their own).
+  Consent or another basis, transfers only to adequate or safeguarded destinations,
+  immediate breach notification. Health data is also subject to Federal Law No. 2 of
+  2019, which keeps it in the UAE unless an exception applies.
+sources:
+  - https://uaelegislation.gov.ae/en/legislations/1972
+  - https://millennial.ae/uae-gcc-ai-regulation-2026/
+requirements:
+  - {ref: "Art 4-5", title: "Lawful processing, consent and its conditions", manual: true}
+  - {ref: "Art 5", title: "Processing limited to the specified purpose", controls: [C7]}
+  - {ref: "Art 7", title: "Controller keeps a record of processing", controls: [C13, C10]}
+  - {ref: "Art 9", title: "Breaches notified to the Data Office", controls: [C15]}
+  - {ref: "Art 13-15", title: "Rights of access, correction and erasure", controls: [C11]}
+  - {ref: "Art 18", title: "Objection to automated processing", controls: [C8]}
+  - {ref: "Art 20", title: "Security and confidentiality of data", controls: [C5, C10]}
+  - {ref: "Art 21", title: "Data protection impact assessment for high-risk processing", controls: [C12]}
+  - {ref: "Art 22-23", title: "Cross-border transfers only to adequate or safeguarded destinations", controls: [C6]}
+  - {ref: "Federal Law 2/2019 Art 13", title: "Health data stored and processed inside the UAE", controls: [C6]}
+policy:
+  residency:
+    # Until the Data Office publishes its adequacy list, keep UAE personal data in
+    # the UAE; add destinations once you have a contractual or adequacy basis.
+    transfers:
+      ae: [ae]
+    applies_to: [personal]
+  rules:
+    - id: health-data-stays-in-uae
+      on: egress
+      match: {data: [health], jurisdiction: [ae]}
+      when: "provider.region not in ['ae', 'on_prem']"
+      effect: reroute
+      reason: "UAE Federal Law 2/2019: health data is processed inside the UAE"
+      controls: [C6]
+incidents:
+  personal_data_breach:
+    - {notify: UAE Data Office, within: 0, basis: "Art 9 — immediately upon becoming aware", min_severity: medium}

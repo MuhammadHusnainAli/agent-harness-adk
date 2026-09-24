@@ -1,0 +1,20 @@
+id: nis2
+name: NIS2 Directive (EU) 2022/2555
+jurisdiction: eu
+kind: law
+binding: true
+status: transposition deadline 17 Oct 2024; national laws in force or pending by member state
+as_of: 2026-09-24
+summary: Cyber-security risk management and incident reporting for essential and important entities.
+sources:
+  - https://eur-lex.europa.eu/eli/dir/2022/2555/oj
+requirements:
+  - {ref: "Art 21", title: Cyber-security risk-management measures, controls: [C3, C13, C14]}
+  - {ref: "Art 21(2)(d)", title: Supply-chain security, controls: [C13]}
+  - {ref: "Art 23", title: Significant incidents reported on the NIS2 clock, controls: [C15]}
+  - {ref: "Art 20", title: Management body approves and oversees measures, manual: true}
+incidents:
+  security_incident:
+    - {notify: CSIRT or competent authority (early warning), within: 24, basis: "Art 23(4)(a) — 24 hours", min_severity: high}
+    - {notify: CSIRT or competent authority (notification), within: 72, basis: "Art 23(4)(b) — 72 hours", min_severity: high}
+    - {notify: CSIRT or competent authority (final report), within: 720, basis: "Art 23(4)(d) — one month", min_severity: high}

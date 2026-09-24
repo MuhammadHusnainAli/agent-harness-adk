@@ -1,0 +1,25 @@
+id: iso-42001
+name: ISO/IEC 42001:2023 — AI management system
+jurisdiction: global
+kind: standard
+binding: false
+status: certifiable international standard
+as_of: 2026-09-24
+summary: >-
+  The management-system standard for AI. Annex A controls are where a runtime can
+  supply evidence; the clauses on leadership, planning and review are organisational.
+sources:
+  - https://www.iso.org/standard/81230.html
+requirements:
+  - {ref: "Clause 5", title: "Leadership, AI policy and roles", manual: true}
+  - {ref: "Clause 6.1", title: "AI risk assessment and treatment", controls: [C12]}
+  - {ref: "Clause 9", title: "Monitoring, internal audit and management review", manual: true, controls: [C16]}
+  - {ref: "A.2", title: "Policies related to AI", controls: [C3]}
+  - {ref: "A.3", title: "Internal organisation — roles and responsibilities", controls: [C1]}
+  - {ref: "A.4", title: "Resources for AI systems documented", controls: [C13]}
+  - {ref: "A.5", title: "Assessing impacts of AI systems", controls: [C12]}
+  - {ref: "A.6", title: "AI system life cycle — including event logs", controls: [C10, C14]}
+  - {ref: "A.7", title: "Data for AI systems — quality, provenance, preparation", controls: [C4, C5]}
+  - {ref: "A.8", title: "Information for interested parties", controls: [C9]}
+  - {ref: "A.9", title: "Use of AI systems — intended use, human oversight", controls: [C7, C8]}
+  - {ref: "A.10", title: "Third-party and customer relationships", controls: [C13]}

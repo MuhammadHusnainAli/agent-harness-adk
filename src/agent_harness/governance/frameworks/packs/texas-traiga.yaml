@@ -1,0 +1,19 @@
+id: texas-traiga
+name: Texas Responsible Artificial Intelligence Governance Act (HB 149)
+jurisdiction: us
+kind: law
+binding: true
+status: in force since 1 January 2026; enforced by the Texas Attorney General
+as_of: 2026-09-24
+summary: >-
+  Prohibits developing or deploying AI with intent to incite self-harm, harm or crime,
+  to discriminate unlawfully, or to produce certain deepfakes and CSAM; government
+  agencies and health-care providers disclose AI use to consumers.
+sources:
+  - https://www.bakerbotts.com/thought-leadership/publications/2025/july/texas-enacts-responsible-ai-governance-act-what-companies-need-to-know
+requirements:
+  - {ref: "Prohibited practices", title: "No manipulation to self-harm, harm or crime", controls: [C12]}
+  - {ref: "Prohibited practices", title: "No intent to discriminate against a protected class", manual: true}
+  - {ref: "Prohibited practices", title: "No unlawful deepfakes or CSAM", controls: [C12]}
+  - {ref: "Disclosure", title: "Government and health-care deployers disclose AI interaction", controls: [C9]}
+  - {ref: "AG inquiries", title: "Be able to produce documentation on request", controls: [C13, C16]}

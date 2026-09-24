@@ -1,0 +1,30 @@
+id: japan-appi
+name: Japan Act on the Protection of Personal Information and AI Promotion Act
+jurisdiction: jp
+kind: law
+binding: true
+status: APPI (amended 2022) in force; AI Promotion Act enacted May 2025 (soft law, with AI Basic Plan)
+as_of: 2026-09-24
+summary: >-
+  Overseas transfers need consent unless the destination has an equivalent system (the
+  EU and UK are recognised) or the recipient keeps equivalent standards. Serious
+  breaches get a prompt preliminary report and a final report to the PPC.
+sources:
+  - https://www.ppc.go.jp/en/legal/
+requirements:
+  - {ref: "APPI Art 17-18", title: "Use limited to the specified purpose", controls: [C7]}
+  - {ref: "APPI Art 20(2)", title: "Special care-required personal information needs consent", controls: [C4, C7]}
+  - {ref: "APPI Art 23", title: "Security control measures", controls: [C5, C10]}
+  - {ref: "APPI Art 26", title: "Serious breaches reported to the PPC and individuals", controls: [C15]}
+  - {ref: "APPI Art 28", title: "Overseas transfers — consent, equivalent country or equivalent standards", controls: [C6]}
+  - {ref: "APPI Art 33-35", title: "Disclosure, correction and cessation of use", controls: [C11]}
+  - {ref: "AI Promotion Act", title: "Cooperate with the government's AI measures and guidelines", manual: true}
+policy:
+  residency:
+    transfers:
+      jp: [jp, eu, uk]
+    applies_to: [personal]
+incidents:
+  personal_data_breach:
+    - {notify: Personal Information Protection Commission (preliminary), within: 120, basis: "Art 26 — promptly (about 3-5 days)", min_severity: medium}
+    - {notify: Personal Information Protection Commission (final), within: 720, basis: "Art 26 — within 30 days (60 if malicious)", min_severity: medium}

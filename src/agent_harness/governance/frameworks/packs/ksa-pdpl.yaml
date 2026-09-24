@@ -1,0 +1,35 @@
+id: ksa-pdpl
+name: Saudi Personal Data Protection Law and Transfer Regulation
+jurisdiction: sa
+kind: law
+binding: true
+status: enforced since 14 September 2024; Transfer Regulation amended September 2024
+as_of: 2026-09-24
+summary: >-
+  The strictest residency posture in the GCC. Personal data stays in the Kingdom unless
+  the destination is adequate or safeguards apply (standard contractual clauses, binding
+  common rules, certification), with a documented risk assessment and a record of each
+  transfer. Breaches go to SDAIA within 72 hours.
+sources:
+  - https://sdaia.gov.sa/en/SDAIA/about/Documents/Personal%20Data%20English%20V2-23April2023-%20Reviewed-.pdf
+  - https://www.kslaw.com/news-and-insights/international-personal-data-transfers-under-saudi-arabias-data-protection-law
+requirements:
+  - {ref: "Art 10-11", title: "Collection limited to what the purpose needs", controls: [C5, C7]}
+  - {ref: "Art 4", title: "Rights of access, correction and destruction", controls: [C11]}
+  - {ref: "Art 18", title: "Destruction once the purpose is fulfilled", controls: [C11]}
+  - {ref: "Art 19", title: "Organisational and technical safeguards", controls: [C5, C10, C14]}
+  - {ref: "Art 20", title: "Breaches notified to SDAIA", controls: [C15]}
+  - {ref: "Art 22", title: "Impact assessment of processing", controls: [C12]}
+  - {ref: "Art 29 + Transfer Regulation", title: "Transfers outside the Kingdom only on an approved basis", controls: [C6]}
+  - {ref: "Transfer Regulation", title: "Risk assessment and records for each transfer", controls: [C6, C10]}
+  - {ref: "Implementing Regulation — DPO", title: "Personal data protection officer where required", manual: true}
+  - {ref: "Implementing Regulation — records", title: "Record of processing activities", controls: [C13, C10]}
+policy:
+  residency:
+    transfers:
+      sa: [sa]
+    applies_to: [personal]
+incidents:
+  personal_data_breach:
+    - {notify: SDAIA (National Data Governance Platform), within: 72, basis: "Implementing Regulation — 72 hours", min_severity: medium}
+    - {notify: affected data subjects, within: 72, basis: "Implementing Regulation — without undue delay where harm is likely", min_severity: high}

@@ -62,6 +62,27 @@ class RunJournal:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(entry.model_dump_json() + "\n")
 
+    def forget(self, run_ids: set[str] | list[str]) -> int:
+        """Drop every entry for these runs, on disk too. Returns how many went.
+
+        The journal is a debugging record, not an immutable one, so erasing a
+        person's runs from it is a rewrite.
+        """
+        doomed = set(run_ids)
+        before = len(self.entries)
+        self.entries = [e for e in self.entries if e.run_id not in doomed]
+        if self.path and self.path.exists():
+            kept = []
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                try:
+                    if json.loads(line).get("run_id") in doomed:
+                        continue
+                except json.JSONDecodeError:
+                    pass
+                kept.append(line)
+            self.path.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+        return before - len(self.entries)
+
     async def assignment(self, agent: str, task: str, **data: Any) -> JournalEntry:
         return await self.write("assignment", task, agent=agent, **data)
 

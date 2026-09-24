@@ -6,7 +6,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+**Governance — `agent_harness.governance`**
+- `Governance`, attached with `Harness(governance=...)`: policy, agent identity,
+  data classification, residency, human oversight, transparency, signed records,
+  data-subject rights, risk classification, AI inventory, runtime monitoring,
+  incidents and evidence reports — enforced through the loop's own hook points.
+- 26 jurisdiction and framework packs, each dated and sourced: EU AI Act, GDPR,
+  DORA, NIS2, UK GDPR; UAE PDPL, DIFC Regulation 10, ADGM, Saudi PDPL, SDAIA,
+  Qatar, Bahrain, Oman; Singapore (agentic framework and PDPA), India DPDP,
+  China, Korea AI Basic Act, Japan APPI, Vietnam AI law; NIST AI RMF, Colorado,
+  Texas TRAIGA, CCPA ADMT; ISO/IEC 42001 and the OWASP Top 10 for Agentic
+  Applications.
+- Policy as code: YAML rules with a safe expression language, strictest-effect
+  combination, fail-closed evaluation, and a sha256 on every decision.
+- Residency per model call and per data subject, with rerouting down the model
+  chain; purpose-based redaction and reversible pseudonymisation.
+- National-ID detection validated by check digit: Emirates ID, Saudi ID/Iqama,
+  Aadhaar, Singapore NRIC/FIN, Chinese resident ID, Korean RRN, UK NINO.
+- Approvals with quorum, separation of duties and fail-closed timeouts.
+- `AuditTrail(signer=...)`: HMAC (stdlib) or Ed25519 signatures; erasure by
+  crypto-shredding keeps the chain verifiable.
+- Erasure covers memory, sessions, deliverables, run-journal entries and trace
+  spans; the audit trail holds task text and (optionally, `audit_args="tokens"`)
+  tool arguments only as per-person tokens.
+- A breaker for tools that keep failing, one incident per cause, approval
+  notifications (`approval_notify=`), and fail-closed handling of governance's
+  own errors.
+- `agent-harness governance packs | pack | check | report | inventory | verify | dsar`.
+- Optional extra `governance` (`cryptography`) for Ed25519 signing.
+- `examples/07_governance.py`, `08_governance_saudi_government.py`,
+  `09_governance_singapore_fintech.py`.
+
+### Changed
+
+- New hook event `model_egress`, fired per backend actually tried, with the
+  provider and model; blocking it moves on to the next model in the chain.
+- `subagent_start` and `run_start` hooks can now block; `memory_write` is now
+  emitted (it was declared but never fired); `pre_tool` carries the tool's
+  `tags` and declared `permission`.
+- `Agent(identity=...)`, and `identity:` in blueprints and `SubAgentSpec`.
+- `AuditTrail(signer=..., scrub=...)`; `RunJournal.forget`, `Tracer.forget` and
+  `DeliverableStore.forget_runs` remove a person's runs.
+- The audit trail records `run_start` after the hook, and scrubs before it trims.
 
 ## [0.1.3] — 2026-09-24
 

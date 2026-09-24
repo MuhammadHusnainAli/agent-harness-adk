@@ -1,0 +1,44 @@
+id: india-dpdp
+name: India Digital Personal Data Protection Act 2023 and DPDP Rules 2025
+jurisdiction: in
+kind: law
+binding: true
+status: >-
+  Rules notified 13 Nov 2025; consent-manager framework operative 13 Nov 2026; main
+  processing, rights and penalty provisions from 13 May 2027
+as_of: 2026-09-24
+summary: >-
+  Notice and consent, purpose-bound processing, verifiable parental consent for
+  children, erasure when the purpose ends, breach intimation to the Board and every
+  affected person. Transfers are allowed except to countries the government restricts.
+sources:
+  - https://www.meity.gov.in/data-protection-framework
+  - https://www.india-briefing.com/news/india-dpdp-compliance-timeline-enforcement-2026-27-44740.html/
+requirements:
+  - {ref: "s 5", title: "Notice to the data principal", controls: [C9]}
+  - {ref: "s 6", title: "Consent — free, specific, informed; withdrawable", manual: true}
+  - {ref: "s 6(7)-(9)", title: "Consent managers (registered from 13 Nov 2026)", manual: true}
+  - {ref: "s 8(5)", title: "Reasonable security safeguards", controls: [C5, C10]}
+  - {ref: "s 8(6) + Rule 7", title: "Breach intimated to the Board and affected principals", controls: [C15]}
+  - {ref: "s 8(7)", title: "Erasure once the purpose is served", controls: [C11]}
+  - {ref: "s 9", title: "Verifiable parental consent; no tracking or targeting of children", controls: [C4, C7]}
+  - {ref: "s 10", title: "Significant data fiduciaries — DPIA, audit, DPO", controls: [C12], manual: true}
+  - {ref: "s 11-12", title: "Rights to access, correction and erasure", controls: [C11]}
+  - {ref: "s 16", title: "Transfers except to restricted countries", controls: [C6]}
+policy:
+  residency:
+    transfers:
+      in: ["*"]
+  rules:
+    - id: s9-children
+      on: [memory, egress]
+      match: {data: [children], jurisdiction: [in]}
+      when: "'parental' not in principal.consents"
+      effect: deny
+      reason: "DPDP s 9: a child's data needs verifiable parental consent"
+      controls: [C7]
+incidents:
+  personal_data_breach:
+    - {notify: Data Protection Board (intimation), within: 0, basis: "Rule 7 — without delay", min_severity: medium}
+    - {notify: Data Protection Board (detailed report), within: 72, basis: "Rule 7 — within 72 hours", min_severity: medium}
+    - {notify: affected data principals, within: 0, basis: "s 8(6) — without delay", min_severity: medium}

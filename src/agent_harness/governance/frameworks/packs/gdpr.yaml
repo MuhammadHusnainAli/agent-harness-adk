@@ -1,0 +1,59 @@
+id: gdpr
+name: General Data Protection Regulation (EU) 2016/679
+jurisdiction: eu
+kind: regulation
+binding: true
+status: in force since 25 May 2018
+as_of: 2026-09-24
+summary: >-
+  Personal data of people in the EU/EEA: lawful basis and purpose limitation,
+  minimisation, transfers only to adequate or safeguarded destinations, rights of
+  access and erasure, safeguards on solely automated decisions, 72-hour breach notice.
+sources:
+  - https://eur-lex.europa.eu/eli/reg/2016/679/oj
+  - https://commission.europa.eu/law/law-topic/data-protection/international-dimension-data-protection/adequacy-decisions_en
+requirements:
+  - {ref: "Art 5(1)(b)", title: Purpose limitation, controls: [C7]}
+  - {ref: "Art 5(1)(c)", title: Data minimisation, controls: [C5, C4]}
+  - {ref: "Art 5(1)(e)", title: Storage limitation, controls: [C11], note: "set data_retention_days and run gov.sweep()"}
+  - {ref: "Art 5(2)", title: Accountability — be able to demonstrate compliance, controls: [C10, C16]}
+  - {ref: "Art 6", title: Lawful basis for each processing purpose, manual: true}
+  - {ref: "Art 9", title: Special-category data only with an Art 9(2) condition, controls: [C4, C7]}
+  - {ref: "Art 13-14", title: Information given to data subjects, controls: [C9]}
+  - {ref: "Art 15", title: Right of access, controls: [C11]}
+  - {ref: "Art 17", title: Right to erasure, controls: [C11]}
+  - {ref: "Art 22", title: Safeguards for solely automated decisions with legal effect, controls: [C8]}
+  - {ref: "Art 25", title: Data protection by design and by default, controls: [C5, C3]}
+  - {ref: "Art 28", title: Processor contracts with model providers, manual: true}
+  - {ref: "Art 30", title: Records of processing activities, controls: [C13, C10]}
+  - {ref: "Art 32", title: Security of processing, controls: [C5, C10, C14]}
+  - {ref: "Art 33", title: Breach notified to the supervisory authority within 72 hours, controls: [C15]}
+  - {ref: "Art 35", title: Data protection impact assessment, controls: [C12], note: "gov.impact_assessment(agent) drafts it"}
+  - {ref: "Art 37", title: Data protection officer where required, manual: true}
+  - {ref: "Art 44-49", title: Transfers only to adequate countries or with safeguards, controls: [C6]}
+policy:
+  residency:
+    # Adequacy decisions. The EEA is "eu". The US is adequate only for organisations
+    # certified under the EU-US Data Privacy Framework — add "us" yourself if your
+    # model provider is certified (or you rely on SCCs plus a transfer assessment).
+    transfers:
+      eu: [eu, uk, ch, jp, kr, ca, il, nz, ar, uy, ad, fo, gg, im, je]
+    applies_to: [personal]
+  rules:
+    - id: art22-human-review
+      on: tool
+      match: {tags: [consequential]}
+      effect: require_approval
+      reason: "GDPR Art 22: a decision with legal or similarly significant effect gets human involvement"
+      controls: [C8]
+    - id: art9-special-category-memory
+      on: memory
+      match: {data: [special_category]}
+      when: "'special_category' not in principal.consents"
+      effect: deny
+      reason: "GDPR Art 9: special-category data is not kept without explicit consent"
+      controls: [C7]
+incidents:
+  personal_data_breach:
+    - {notify: supervisory authority, within: 72, basis: "Art 33 — 72 hours", min_severity: medium}
+    - {notify: affected data subjects, within: 72, basis: "Art 34 — without undue delay when high risk", min_severity: high}
