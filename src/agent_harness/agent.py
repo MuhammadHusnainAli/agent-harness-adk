@@ -21,25 +21,28 @@ from pydantic import BaseModel, ValidationError
 
 from .context import ContextAssembler, ContextCompactor
 from .errors import (
+    AuthenticationError,
     BudgetExceeded,
     ConfigurationError,
     GuardrailTripped,
     HarnessError,
+    InvalidRequestError,
     MaxStepsExceeded,
     OutputContractError,
     PermissionDenied,
     ProviderError,
+    QuotaExceededError,
     StopRequested,
     ToolNotFound,
 )
 from .guardrails import AgentGuardrails
 from .guardrails.checks import CompletionContext
 from .harness import Harness
+from .llm_providers import resolve_provider
+from .llm_providers.base import CompletionRequest, Provider
 from .memory.manager import MemoryManager
 from .memory.trace import Trace
 from .prompts import Prompt
-from .providers import resolve_provider
-from .providers.base import CompletionRequest, Provider
 from .runtime.budget import Budget, BudgetGuard
 from .runtime.checkpoints import Checkpoint
 from .runtime.hooks import HookEngine
@@ -408,7 +411,7 @@ class Agent:
         return self.harness.guardrails
 
     def _default_window(self) -> int:
-        from .providers.base import model_info
+        from .llm_providers.base import model_info
 
         info = model_info(self.model)
         # Leave a third of the window for the answer and the next tool result.
@@ -1340,9 +1343,14 @@ _REACHABILITY = (408, 429, 500, 502, 503, 504, 529)
 def _is_reachability_problem(exc: Exception) -> bool:
     if isinstance(exc, OSError):
         return True
+    # The provider layer has already decided: a timeout, an open circuit, a 5xx
+    # or a rate limit it gave up waiting on. An exhausted quota is not retryable
+    # here, but another vendor's model has its own quota — so it still moves on.
+    if getattr(exc, "retryable", False) or isinstance(exc, QuotaExceededError):
+        return True
     status = getattr(exc, "status", None)
     if status is None:
-        return True                     # a connection error carries no status
+        return not isinstance(exc, (AuthenticationError, InvalidRequestError))
     return status in _REACHABILITY
 
 

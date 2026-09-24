@@ -7,7 +7,7 @@ import pytest
 
 from agent_harness import AnthropicProvider, GeminiProvider, OpenAIProvider
 from agent_harness.errors import ProviderError, RateLimitError
-from agent_harness.providers.base import (
+from agent_harness.llm_providers.base import (
     CompletionRequest,
     ToolSchema,
     estimate_cost,

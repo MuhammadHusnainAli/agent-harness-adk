@@ -30,7 +30,7 @@ from typing import Any, Literal, get_type_hints
 from pydantic import BaseModel, ValidationError, create_model
 
 from .errors import ToolError, ToolNotFound
-from .providers.base import ToolSchema
+from .llm_providers.base import ToolSchema
 from .types import ToolOutcome
 
 __all__ = [

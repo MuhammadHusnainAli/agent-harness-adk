@@ -345,13 +345,13 @@ def test_every_public_export_appears_in_the_full_docs():
 # --- the package layout the library presents ----------------------------------
 
 def test_the_feature_areas_are_packages_with_a_clear_shape():
-    """mcp/, providers/, memory/, runtime/, toolkits/, subagents/, guardrails/."""
+    """mcp/, llm_providers/, memory/, runtime/, toolkits/, subagents/, guardrails/."""
     import importlib
     from pathlib import Path
 
     root = Path(ah.__file__).parent
     for package, members in {
-        "providers": ["Provider", "AnthropicProvider", "FakeProvider"],
+        "llm_providers": ["Provider", "AnthropicProvider", "FakeProvider"],
         "mcp": ["MCPServer", "MCPClient", "MCPManager"],
         "memory": ["MemoryManager", "SemanticMemory"],
         "runtime": ["Budget", "PolicyGate", "Tracer"],

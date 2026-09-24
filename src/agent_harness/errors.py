@@ -12,18 +12,82 @@ class ConfigurationError(HarnessError):
 
 
 class ProviderError(HarnessError):
-    """A model provider returned something we could not use."""
+    """A model provider returned something we could not use.
+
+    Every provider failure is one of these, so one `except ProviderError` covers
+    them all. The subclasses say *what kind* of failure it was, which is what
+    decides whether it is worth trying again:
+
+    ``retryable``    the same request may well succeed later (429, 5xx, timeout)
+    ``retry_after``  seconds the provider asked us to wait, when it said
+    ``request_id``   the vendor's id for the request — quote it to their support
+    ``attempts``     how many times it was tried before giving up
+    """
+
+    #: The class default; an instance can override it (a 429 whose quota is
+    #: exhausted is a rate limit that will not clear by waiting).
+    retryable: bool = False
 
     def __init__(self, message: str, *, provider: str = "", status: int | None = None,
-                 body: str | None = None) -> None:
+                 body: str | None = None, retryable: bool | None = None,
+                 retry_after: float | None = None, request_id: str | None = None,
+                 code: str | None = None, attempts: int = 1) -> None:
         super().__init__(message)
         self.provider = provider
         self.status = status
         self.body = body
+        if retryable is not None:
+            self.retryable = retryable
+        self.retry_after = retry_after
+        self.request_id = request_id
+        self.code = code
+        self.attempts = attempts
 
 
 class RateLimitError(ProviderError):
-    """The provider asked us to slow down."""
+    """The provider asked us to slow down (HTTP 429, or a throttling exception)."""
+
+    retryable = True
+
+
+class QuotaExceededError(RateLimitError):
+    """The account is out of credit or quota. Waiting will not fix it."""
+
+    retryable = False
+
+
+class AuthenticationError(ProviderError):
+    """The key, token or signature was refused (HTTP 401/403)."""
+
+
+class InvalidRequestError(ProviderError):
+    """The request itself is wrong (HTTP 400/404/422). Sending it again won't help."""
+
+
+class ModelNotFoundError(InvalidRequestError):
+    """The model id does not exist, or this account cannot use it."""
+
+
+class ContextWindowExceededError(InvalidRequestError):
+    """The prompt is longer than the model can read. Compact it, or pick a bigger model."""
+
+
+class ProviderTimeoutError(ProviderError):
+    """The provider did not answer in time."""
+
+    retryable = True
+
+
+class ProviderConnectionError(ProviderError):
+    """The provider could not be reached at all: DNS, TLS, a dropped connection."""
+
+    retryable = True
+
+
+class ProviderUnavailableError(ProviderError):
+    """The provider is overloaded or failing (HTTP 5xx, 529), or its circuit is open."""
+
+    retryable = True
 
 
 class ToolError(HarnessError):

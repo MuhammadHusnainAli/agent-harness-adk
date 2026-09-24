@@ -9,7 +9,9 @@ providers and only the URL and the auth change.
 
 Auth is a Google access token: `google-auth` if it is installed (which covers
 application default credentials, service accounts and workload identity), else
-`gcloud auth print-access-token`, else one you pass in.
+`gcloud auth print-access-token`, else one you pass in. A 401 drops the cached
+token and fetches a new one, once. Completion and streaming both go through the
+shared retrying transport.
 """
 
 from __future__ import annotations
@@ -21,9 +23,8 @@ import time
 from typing import Any, ClassVar
 
 from ..errors import ProviderError
-from ..types import ModelResponse
 from .anthropic import AnthropicProvider
-from .base import CompletionRequest
+from .base import CompletionRequest, ProviderField
 from .gemini import GeminiProvider
 
 __all__ = ["VertexProvider", "VertexGeminiProvider", "GoogleAuth"]
@@ -44,13 +45,25 @@ class GoogleAuth:
         self._credentials = credentials
         self._token = ""
         self._expires = 0.0
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: Any = None
+
+    @property
+    def refreshable(self) -> bool:
+        return not self._static
+
+    def invalidate(self) -> None:
+        """Forget the cached token, so the next call fetches a fresh one."""
+        self._token, self._expires = "", 0.0
 
     async def token(self) -> str:
         if self._static:
             return self._static
         if self._token and time.time() < self._expires - 60:
             return self._token
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock, self._lock_loop = asyncio.Lock(), loop
         async with self._lock:
             if self._token and time.time() < self._expires - 60:
                 return self._token
@@ -95,16 +108,35 @@ class GoogleAuth:
         return result.stdout.strip(), time.time() + 3000
 
 
+_VERTEX_FIELDS: tuple[ProviderField, ...] = (
+    ProviderField(name="project", required=True, env=("GOOGLE_CLOUD_PROJECT",),
+                  example="my-project", description="The Google Cloud project id."),
+    ProviderField(name="region", env=("GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"),
+                  default="us-central1", example="europe-west1",
+                  description="The Vertex region, or 'global'."),
+    ProviderField(name="access_token", type="secret", one_of="google",
+                  env=("GOOGLE_ACCESS_TOKEN",),
+                  description="A ready-made OAuth token. Otherwise google-auth "
+                              "(ADC, service accounts) or gcloud is used."),
+    ProviderField(name="credentials", type="object", one_of="google",
+                  description="A google.auth credentials object."),
+)
+
+
 class _VertexMixin:
     """The URL shape and auth both Vertex providers share."""
 
     publisher: ClassVar[str] = ""
     action: ClassVar[str] = "rawPredict"
+    stream_action: ClassVar[str] = "streamRawPredict"
+    auth_type: ClassVar[str] = "google-oauth"
+    fields: ClassVar[tuple[ProviderField, ...]] = _VERTEX_FIELDS
 
     def _setup(self, project: str, region: str, access_token: str | None,
                credentials: Any) -> None:
         self.project = project or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-        self.region = region or os.environ.get("GOOGLE_CLOUD_REGION", "us-central1")
+        self.region = (region or os.environ.get("GOOGLE_CLOUD_REGION")
+                       or os.environ.get("CLOUD_ML_REGION") or "us-central1")
         if not self.project:
             raise ProviderError(
                 "Vertex needs a project — pass project=... or set "
@@ -118,19 +150,22 @@ class _VertexMixin:
         return f"https://{host}/v1/projects/{self.project}/locations/{self.region}"
 
     def _model_url(self, model: str, action: str | None = None) -> str:
+        name = model.split("/")[-1]
         return (f"{self.endpoint}/publishers/{self.publisher}/models/"
-                f"{model}:{action or self.action}")
+                f"{name}:{action or self.action}")
 
-    async def _vertex_post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        token = await self.auth.token()
-        headers = {"content-type": "application/json",
-                   "authorization": f"Bearer {token}", **self.extra_headers}
-        resp = await self.http.post(url, json=payload, headers=headers)
-        if resp.status_code >= 300:
-            raise ProviderError(f"vertex returned {resp.status_code}: "
-                                f"{resp.text[:1000]}", provider=self.name,
-                                status=resp.status_code, body=resp.text[:2000])
-        return resp.json()
+    def _auth_headers(self) -> dict[str, str]:
+        return {}
+
+    async def _prepare_headers(self, method: str, url: str, body: bytes,
+                               headers: dict[str, str]) -> dict[str, str]:
+        return {**headers, "authorization": f"Bearer {await self.auth.token()}"}
+
+    async def _refresh_auth(self) -> bool:
+        if not self.auth.refreshable:
+            return False
+        self.auth.invalidate()
+        return True
 
 
 class VertexProvider(_VertexMixin, AnthropicProvider):
@@ -142,6 +177,12 @@ class VertexProvider(_VertexMixin, AnthropicProvider):
     publisher: ClassVar[str] = "anthropic"
     BASE_URL: ClassVar[str] = "https://aiplatform.googleapis.com"
 
+    display_name: ClassVar[str] = "Google Vertex AI (Claude)"
+    description: ClassVar[str] = "Claude served from your Google Cloud project on Vertex AI."
+    docs_url: ClassVar[str] = "https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude"
+    capabilities: ClassVar[frozenset[str]] = frozenset({
+        "streaming", "tools", "vision", "thinking", "json_schema", "prompt_caching"})
+
     def __init__(self, *, project: str = "", region: str = "",
                  access_token: str | None = None, credentials: Any = None,
                  **kw: Any) -> None:
@@ -152,24 +193,16 @@ class VertexProvider(_VertexMixin, AnthropicProvider):
         payload = super()._payload(req, stream=stream)
         # The model is in the URL, and the API version moves into the body.
         payload.pop("model", None)
-        payload.pop("stream", None)
         payload["anthropic_version"] = VERTEX_VERSION
+        if not stream:
+            payload.pop("stream", None)
         return payload
 
-    async def complete(self, req: CompletionRequest) -> ModelResponse:
-        started = time.perf_counter()
-        raw = await self._vertex_post(self._model_url(req.model), self._payload(req))
-        from ..types import Message, TextBlock
-        from .anthropic import _STOP_MAP
+    def _messages_path(self, req: CompletionRequest, stream: bool) -> str:
+        return self._model_url(req.model, self.stream_action if stream else self.action)
 
-        blocks = self._decode_blocks(raw.get("content") or [])
-        stop = _STOP_MAP.get(raw.get("stop_reason") or "end_turn", "end_turn")
-        if stop == "error":
-            blocks.append(TextBlock(text="[refused]"))
-        return self._finish(message=Message(role="assistant", content=blocks),
-                            stop_reason=stop, usage=self._usage(raw),
-                            model=req.model, raw=raw,
-                            latency_ms=(time.perf_counter() - started) * 1000)
+    async def list_models(self) -> list[str]:
+        raise NotImplementedError("Vertex lists partner models in Model Garden")
 
 
 class VertexGeminiProvider(_VertexMixin, GeminiProvider):
@@ -180,7 +213,14 @@ class VertexGeminiProvider(_VertexMixin, GeminiProvider):
     default_model: ClassVar[str] = "gemini-2.5-pro"
     publisher: ClassVar[str] = "google"
     action: ClassVar[str] = "generateContent"
+    stream_action: ClassVar[str] = "streamGenerateContent"
     BASE_URL: ClassVar[str] = "https://aiplatform.googleapis.com"
+
+    display_name: ClassVar[str] = "Google Vertex AI (Gemini)"
+    description: ClassVar[str] = "Gemini served from your Google Cloud project on Vertex AI."
+    docs_url: ClassVar[str] = "https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference"
+    capabilities: ClassVar[frozenset[str]] = frozenset({
+        "streaming", "tools", "vision", "thinking", "json_schema", "embeddings"})
 
     def __init__(self, *, project: str = "", region: str = "",
                  access_token: str | None = None, credentials: Any = None,
@@ -188,21 +228,14 @@ class VertexGeminiProvider(_VertexMixin, GeminiProvider):
         super().__init__(api_key="vertex", **kw)
         self._setup(project, region, access_token, credentials)
 
-    async def complete(self, req: CompletionRequest) -> ModelResponse:
-        started = time.perf_counter()
-        raw = await self._vertex_post(self._model_url(req.model), self._payload(req))
-        from ..types import Message, ToolUseBlock
-        from .gemini import _STOP_MAP
+    def _model_path(self, model: str, stream: bool) -> str:
+        return self._model_url(model, self.stream_action if stream else self.action)
 
-        candidates = raw.get("candidates") or []
-        if not candidates:
-            raise ProviderError("vertex returned no candidates", provider=self.name)
-        cand = candidates[0]
-        blocks = self._decode_parts((cand.get("content") or {}).get("parts") or [])
-        stop = _STOP_MAP.get(cand.get("finishReason") or "STOP", "end_turn")
-        if any(isinstance(b, ToolUseBlock) for b in blocks):
-            stop = "tool_use"
-        return self._finish(message=Message(role="assistant", content=blocks),
-                            stop_reason=stop, usage=self._usage(raw),
-                            model=req.model, raw=raw,
-                            latency_ms=(time.perf_counter() - started) * 1000)
+    async def embed(self, texts: list[str], model: str | None = None) -> list[list[float]]:
+        url = self._model_url(model or self.embedding_model, "predict")
+        raw = await self._post(url, {"instances": [{"content": t} for t in texts]})
+        return [(p.get("embeddings") or {}).get("values", [])
+                for p in raw.get("predictions") or []]
+
+    async def list_models(self) -> list[str]:
+        raise NotImplementedError("Vertex lists models in Model Garden")

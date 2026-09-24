@@ -27,6 +27,11 @@ class FakeProvider(Provider):
     default_model: ClassVar[str] = "fake-1"
     BASE_URL: ClassVar[str] = "http://fake.invalid"
 
+    display_name: ClassVar[str] = "Fake (scripted)"
+    description: ClassVar[str] = "A scripted provider for tests: no network, no key, no cost."
+    auth_type: ClassVar[str] = "none"
+    capabilities: ClassVar[frozenset[str]] = frozenset({"streaming", "tools", "embeddings"})
+
     def __init__(self, responses: list[Script] | None = None, *,
                  default: str = "done", loop: bool = False, **kw: Any) -> None:
         super().__init__(api_key="fake", **kw)

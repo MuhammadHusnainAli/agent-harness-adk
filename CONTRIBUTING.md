@@ -81,7 +81,14 @@ agent = Agent("support", provider=provider, harness=Harness.testing(provider),
 Script it with strings, tool calls, whole `Message` objects, exceptions, or a
 callable that inspects the request and answers accordingly. For provider wire
 formats, use `httpx.MockTransport` and assert on the request body — see
-`tests/test_providers.py`.
+`tests/test_providers.py`. Retry, back-off and streaming-recovery tests patch
+`Provider._pause` so they record each wait instead of sleeping — see
+`tests/test_llm_providers_resilience.py`.
+
+A new backend goes in `src/agent_harness/llm_providers/`: subclass the closest
+adapter, declare its `fields`, `description` and `capabilities` so it shows up
+in `list_llm_providers()`, send through `_post` / `_stream_lines` so it inherits
+the retry path, and register it in `catalog.PROVIDERS`.
 
 Name tests after the behaviour, not the function:
 `test_compaction_never_orphans_a_tool_result`, not `test_compact_2`.

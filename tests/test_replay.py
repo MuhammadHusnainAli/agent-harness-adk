@@ -16,7 +16,7 @@ from agent_harness import (
     tool_call,
 )
 from agent_harness.errors import ConfigurationError, ProviderError
-from agent_harness.providers.base import CompletionRequest
+from agent_harness.llm_providers.base import CompletionRequest
 from agent_harness.runtime.replay import request_key
 from agent_harness.types import Message
 

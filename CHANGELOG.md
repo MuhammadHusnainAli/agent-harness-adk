@@ -6,7 +6,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed — breaking
+
+- **`agent_harness.providers` is now `agent_harness.llm_providers`.** Imports
+  from the package root (`from agent_harness import AnthropicProvider`) are
+  unchanged; only code importing the submodule directly needs the new path.
+- A missing key raises `AuthenticationError` (still a `ProviderError`).
+- `max_retries` now defaults to 3, from 2.
+
+### Added
+
+**Know what a provider needs before connecting**
+- `list_llm_providers()` — every supported provider as a `ProviderSpec`: its
+  fields (required, secret, either-or, and the environment variables each is
+  read from), capabilities, known models, and whether it is configured now.
+  Filter with `configured_only=True` or `capability="embeddings"`.
+- `describe_llm_provider(name)` — one provider in full, with `.render()` and a
+  ready-made `.example()` line.
+- `check_llm_provider(name, **settings)` — an offline `ProviderCheck`: what is
+  missing, where each setting was found (never its value), unknown arguments.
+- `ping_llm_provider(name)` and `Provider.ping()` — a live credentials check
+  that returns a result instead of raising. `Provider.list_models()` for
+  Anthropic, OpenAI, Gemini and every OpenAI-compatible preset.
+- `agent-harness providers [name] [--ping] [--ready] [--json]`.
+- `get_provider` with a misspelt setting names the settings it accepts.
+
+**Twelve more providers**
+- OpenAI-compatible presets: `OpenRouterProvider`, `GroqProvider`,
+  `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`,
+  `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`,
+  `VLLMProvider`, and `OpenAICompatibleProvider(base_url=...)` for anything else.
+  `deepseek-*`, `grok-*` and Mistral model ids route to their vendor.
+- Bedrock API keys (`AWS_BEARER_TOKEN_BEDROCK`) as an alternative to SigV4.
+- OpenAI `organization` / `project`; reasoning returned by DeepSeek, vLLM and
+  OpenRouter is kept as thinking.
+
+**Resilience, for every provider alike**
+- `RetryPolicy`: back-off, jitter, a retry count, a wall-clock ceiling, and
+  `max_retry_after` — a server asking for a longer wait fails the call at once
+  so a fallback model takes over.
+- Retries on 408/409/425/429/5xx/529, timeouts and dropped connections. Every
+  hint is honoured: `Retry-After` (seconds or HTTP date), `retry-after-ms`,
+  `x-ratelimit-reset-*`, Gemini's `RetryInfo`, and `x-should-retry`.
+- A shared cool-down: a rate limit on one call holds back its siblings.
+- `CircuitBreaker` (on by default: 5 failures, 30 s), `max_concurrency`,
+  `connect_timeout`, `on_retry` callbacks with a `RetryEvent`, and
+  `provider.stats` / `provider.health()`.
+- Typed errors: `QuotaExceededError`, `AuthenticationError`,
+  `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`,
+  `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`.
+  Each carries `retryable`, `retry_after`, `attempts` and the vendor `request_id`.
+  Model fallback now follows `retryable`, and moves on from an exhausted quota.
+- Streams are restarted if they fail before the first token.
+- A 401 refreshes Vertex and Entra ID tokens, and chain-sourced AWS
+  credentials, once.
+
+### Fixed
+
+- Streaming never retried — not even a 429 on connect.
+- Vertex never retried anything.
+- Bedrock and Vertex streaming posted to `api.anthropic.com`'s path on the
+  wrong host; Azure streaming ignored the deployment URL and Entra ID. All
+  three now stream properly — Bedrock by decoding its binary event stream.
+- Bedrock retried with the signature from the first attempt, did not retry
+  network errors, and did not escape `:` and `/` in ARN model ids.
+- `CompletionRequest.timeout` was accepted and ignored.
+- Streamed Anthropic thinking lost its signature, so the next turn of a tool
+  loop with thinking on was rejected; redacted thinking was dropped; streamed
+  output tokens were double-counted.
+- Thinking from another vendor was sent to Anthropic unsigned (a 400).
+- Gemini thought signatures were dropped; images given by URL were dropped.
+- OpenAI-compatible servers that omit tool-call ids, or send arguments already
+  parsed, or say `stop` after a tool call, are handled.
+- An Azure/Vertex token lock created at construction could fail when a cached
+  provider was reused under a new event loop.
 
 ## [0.1.2] — 2026-09-23
 

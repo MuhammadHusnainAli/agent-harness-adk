@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..errors import ConfigurationError, ProviderError
-from ..providers.base import CompletionRequest, Provider
+from ..llm_providers.base import CompletionRequest, Provider
 from ..types import Message, ModelResponse, RunResult, StreamEvent
 from .checkpoints import Checkpoint, Checkpointer
 

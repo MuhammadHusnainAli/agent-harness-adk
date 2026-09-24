@@ -9,7 +9,7 @@ A fast, lightweight harness for building production AI agents in Python.
 
 Agents, sub-agents, skills, prompts, tools, MCP servers, memory — and the runtime
 rails underneath them: permissions, budgets, hooks, guardrails, tracing,
-checkpoints and isolated workspaces. Three model providers, one loop, no
+checkpoints and isolated workspaces. Twenty LLM providers, one loop, no
 framework lock-in.
 
 ```bash
@@ -22,7 +22,7 @@ import agent_harness              # installed as agent-harness-adk, imported as 
 
 Python 3.10 – 3.14. Three dependencies (`pydantic`, `httpx`, `pyyaml`), ~100 ms
 to import, and no vendor SDKs — the provider adapters speak HTTP directly so
-Anthropic, OpenAI and Gemini all travel the same retry, cost and tracing path.
+every backend travels the same retry, circuit-breaker, cost and tracing path.
 
 ---
 
@@ -717,13 +717,121 @@ created with `allow_shell=True`, and even then it asks for approval.
 Agent("a", model="claude-opus-5")      # → Anthropic
 Agent("b", model="gpt-4.1")            # → OpenAI
 Agent("c", model="gemini-2.5-pro")     # → Gemini
-Agent("d", provider=OpenAIProvider(base_url="http://localhost:11434/v1"))
+Agent("d", model="grok-4")             # → xAI
+Agent("e", model="llama3.2", provider="ollama")
 ```
 
-The provider is inferred from the model id. Keys come from `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `GEMINI_API_KEY`. Anything that speaks the OpenAI wire format
-(Groq, Together, Ollama, vLLM) works through `OpenAIProvider(base_url=...)`,
-and `register_provider("name", MyProvider)` adds your own.
+The provider is inferred from the model id, or named. They live in
+`agent_harness.llm_providers`: the three direct APIs, Bedrock, Vertex (Claude
+and Gemini), Azure OpenAI and Azure AI Foundry, and every OpenAI-compatible
+vendor as a preset — `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`,
+`DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`,
+`CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider` — plus
+`OpenAICompatibleProvider(base_url=...)` for any gateway or proxy.
+`register_provider("name", MyProvider)` adds your own.
+
+### What does each provider need?
+
+```python
+from agent_harness import list_llm_providers, describe_llm_provider, check_llm_provider
+
+for spec in list_llm_providers():                 # every provider, one ProviderSpec each
+    print(spec.name, spec.configured, [f.name for f in spec.required_fields])
+
+print(describe_llm_provider("azure").render())
+```
+
+```
+Azure OpenAI — provider='azure' (aliases: azure-openai)
+  OpenAI models deployed in your own Azure OpenAI resource.
+  status   needs setup — missing endpoint (or set $AZURE_OPENAI_ENDPOINT), one of: api_key ($AZURE_OPENAI_API_KEY) | credential
+  auth     api_key or Entra ID
+  can      embeddings, json_schema, streaming, thinking, tools, vision
+  fields
+    endpoint         required           url     ← $AZURE_OPENAI_ENDPOINT
+                     The resource endpoint from the Azure portal.
+    deployment       optional           str     ← $AZURE_OPENAI_DEPLOYMENT
+                     The deployment name. Defaults to the model id.
+    ...
+  example  get_provider('azure', endpoint='https://my-resource.openai.azure.com', deployment='gpt-4.1-prod')
+```
+
+Every provider declares its connection fields as `ProviderField`s — which are
+required, which are secret, which are alternatives to each other, and which
+environment variables they are read from — so you can see what a backend needs
+before you touch it. `list_llm_providers(configured_only=True)` shows what is
+ready to use now; `capability="embeddings"` filters by what a provider can do.
+
+`check_llm_provider("bedrock", region="eu-west-1")` answers "would this
+connect?" offline, as a `ProviderCheck`: what is missing, where each setting
+was found (`argument` or `$ENV_VAR` — never the value), and any argument that is
+not a setting at all. `await ping_llm_provider("openai")` connects for real,
+using the free model-listing endpoint where there is one, and returns a result
+rather than raising. From a terminal:
+
+```bash
+agent-harness providers                 # the table: status and what each needs
+agent-harness providers bedrock         # every field, env var, capability, an example
+agent-harness providers openai --ping   # are these credentials any good?
+```
+
+### When a call fails
+
+Every provider sends through one transport, so every one gets the same
+behaviour:
+
+- **Retries** on 408, 409, 425, 429, 5xx and Anthropic's 529, on timeouts, and
+  on dropped connections — exponential back-off with jitter, so a hundred
+  throttled sub-agents do not retry in lockstep.
+- **Every Retry-After hint is honoured**: `Retry-After` in seconds or as a date,
+  `retry-after-ms`, OpenAI's `x-ratelimit-reset-*`, Gemini's `RetryInfo`, and
+  the `x-should-retry` verdict OpenAI and Anthropic send. A server asking for
+  longer than `max_retry_after` fails the call at once, so a fallback model can
+  take over instead of the run sleeping for ten minutes.
+- **A shared cool-down**: when one call is told to wait, the calls running
+  alongside it on the same provider wait too.
+- **Streams recover** — a stream that fails before its first token (Anthropic's
+  mid-stream `overloaded_error`, a throttled Bedrock stream) is restarted; one
+  that fails after is raised, because replaying it would repeat text you have
+  already shown.
+- **A circuit breaker**: after five consecutive failures a provider is not
+  called for 30 seconds — calls fail at once with `ProviderUnavailableError`,
+  and the model router moves to the next model immediately. A 400 is the
+  caller's fault and does not count.
+- **Stale credentials are refreshed** once on a 401 — Vertex and Entra ID tokens,
+  and Bedrock credentials from the AWS chain — and every Bedrock retry is
+  signed afresh.
+
+```python
+from agent_harness import AnthropicProvider, RetryPolicy, CircuitBreaker
+
+provider = AnthropicProvider(
+    retry=RetryPolicy(max_retries=5, initial_delay=1.0, max_delay=30,
+                      max_retry_after=60, max_elapsed=180),
+    circuit_breaker=CircuitBreaker(failure_threshold=3, reset_timeout=60),
+    max_concurrency=16,               # cap on in-flight requests
+    timeout=120, connect_timeout=5,   # per attempt; CompletionRequest.timeout per call
+    on_retry=lambda e: print(f"{e.provider} retry {e.attempt} in {e.delay:.1f}s: {e.reason}"),
+)
+provider.health()   # requests, retries, rate_limited, timeouts, last_request_id, circuit state
+```
+
+`on_retry` receives a `RetryEvent`; retries are also logged on the
+`agent_harness.llm_providers` logger. What finally fails is typed, so you can
+handle the cases differently — all are `ProviderError`s, and each carries
+`status`, `retryable`, `retry_after`, `attempts` and the vendor's `request_id`:
+
+| Error | Meaning | Retried |
+|---|---|---|
+| `RateLimitError` | 429 or throttling | yes |
+| `QuotaExceededError` | out of credit or quota — waiting won't help | no (falls back) |
+| `ProviderTimeoutError` | no answer in time | yes |
+| `ProviderConnectionError` | DNS, TLS, a dropped connection | yes |
+| `ProviderUnavailableError` | 5xx, 529 overloaded, or the circuit is open | yes |
+| `AuthenticationError` | key, token or signature refused | no |
+| `ContextWindowExceededError` | the prompt is longer than the model reads | no |
+| `ModelNotFoundError` | no such model for this account | no |
+| `InvalidRequestError` | anything else the request got wrong | no |
 
 ### The same models, on your cloud
 
@@ -750,8 +858,8 @@ Agent("support", provider=AzureFoundryProvider(
 ```
 
 Credentials follow each platform's own conventions: `AWS_*` environment
-variables or the botocore chain (instance roles, SSO) if boto3 happens to be
-installed; `google-auth` or `gcloud auth print-access-token`; an `api-key` or
+variables, a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`), or the botocore chain
+(instance roles, SSO) if boto3 happens to be installed; `google-auth` or `gcloud auth print-access-token`; an `api-key` or
 `credential=` from `azure-identity` for Entra ID. None of those libraries are
 required — SigV4 is implemented against AWS's published test vectors using only
 the standard library.
@@ -790,7 +898,11 @@ would change what you asked for. Two places where the mapping does real work:
 beta headers, new fields, a provider feature that shipped this morning.
 
 Adapters normalise everything the loop depends on: tool calls, tool results,
-thinking blocks, cache tokens, stop reasons and refusals. Cost is computed per
+thinking blocks (with their signatures, so extended thinking survives a tool
+loop — including Gemini's thought signatures and Anthropic's redacted
+thinking), cache tokens, stop reasons and refusals. All of them stream,
+including Bedrock (its binary event stream is decoded and CRC-checked) and
+Vertex. Cost is computed per
 call from a built-in price table (`register_model` to extend it), so
 `result.cost_usd` is real money, not an estimate.
 

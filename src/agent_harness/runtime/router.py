@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Literal
 
-from ..providers.base import MODELS, model_info
+from ..llm_providers.base import MODELS, model_info
 
 __all__ = ["Effort", "RouteRule", "ModelRouter"]
 

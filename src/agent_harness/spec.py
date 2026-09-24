@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .context import ContextAssembler
-from .providers.base import CompletionRequest, ToolSchema, model_info
+from .llm_providers.base import CompletionRequest, ToolSchema, model_info
 from .runtime.router import ModelRouter
 from .tools import ToolRegistry
 from .types import Message

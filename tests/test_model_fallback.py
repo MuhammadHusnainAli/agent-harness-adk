@@ -5,8 +5,16 @@ from __future__ import annotations
 import pytest
 
 from agent_harness import Agent, FakeProvider, Harness, ModelRouter
-from agent_harness.errors import ProviderError, RateLimitError
-from agent_harness.providers.base import CompletionRequest, Provider
+from agent_harness.errors import (
+    AuthenticationError,
+    ContextWindowExceededError,
+    ProviderError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+    QuotaExceededError,
+    RateLimitError,
+)
+from agent_harness.llm_providers.base import CompletionRequest, Provider
 from agent_harness.types import Message, ModelResponse, Usage
 
 MODEL = "claude-sonnet-5"
@@ -122,6 +130,10 @@ async def test_the_fallback_is_recorded_so_you_know_it_happened():
     RateLimitError("slow down", provider="x", status=429),
     ProviderError("server error", provider="x", status=503),
     OSError("network is unreachable"),
+    ProviderUnavailableError("circuit is open", provider="x"),
+    ProviderTimeoutError("timed out", provider="x"),
+    QuotaExceededError("out of credit", provider="x", status=429),
+    RateLimitError("wait ten minutes", provider="x", status=429, retry_after=600),
 ])
 async def test_the_failures_worth_retrying_elsewhere(error):
     broken = Unreachable(error)
@@ -152,10 +164,14 @@ async def test_the_failures_worth_retrying_elsewhere(error):
     assert calls["n"] == 2
 
 
-async def test_a_bad_request_is_not_retried_on_another_model():
+@pytest.mark.parametrize("error", [
+    ProviderError("invalid tool schema", provider="x", status=400),
+    AuthenticationError("invalid tool schema: bad key", provider="x"),
+    ContextWindowExceededError("invalid tool schema: too long", provider="x", status=400),
+])
+async def test_a_bad_request_is_not_retried_on_another_model(error):
     """A 400 means the request is wrong; the next model will reject it too."""
-    provider = Unreachable(ProviderError("invalid tool schema", provider="x",
-                                         status=400))
+    provider = Unreachable(error)
     harness = Harness.testing(provider)
     harness.router = ModelRouter(fallbacks=["gpt-4.1", "gemini-2.5-pro"])
     agent = Agent("resilient", provider=provider, model="claude-opus-5",

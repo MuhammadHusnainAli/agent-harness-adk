@@ -12,7 +12,7 @@ from typing import Any
 from . import __version__
 from .agent import Agent
 from .harness import Harness
-from .providers.base import MODELS
+from .llm_providers.base import MODELS
 from .runtime.permissions import console_approver
 from .runtime.tracing import console_exporter
 
@@ -128,6 +128,47 @@ def _models(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _providers(args: argparse.Namespace) -> int:
+    from .llm_providers import (
+        describe_llm_provider,
+        list_llm_providers,
+        ping_llm_provider,
+    )
+
+    if args.name:
+        spec = describe_llm_provider(args.name)
+        result = await ping_llm_provider(args.name) if args.ping else None
+        if args.json:
+            print(json.dumps({**spec.model_dump(mode="json"),
+                              **({"ping": result} if result else {})}, indent=2))
+        else:
+            print(spec.render())
+            if result:
+                state = "ok" if result["ok"] else f"failed — {result.get('error')}"
+                print(f"  ping     {state} ({result.get('latency_ms', 0)} ms)")
+        return 0 if result is None or result["ok"] else 1
+
+    specs = list_llm_providers(configured_only=args.ready)
+    if args.json:
+        print(json.dumps([s.model_dump(mode="json") for s in specs], indent=2))
+        return 0
+    print(f"{'provider':<18} {'status':<12} needs")
+    for spec in specs:
+        needs = []
+        groups: dict[str, list[str]] = {}
+        for field in spec.required_fields:
+            if field.one_of:
+                groups.setdefault(field.one_of, []).append(field.name)
+            else:
+                needs.append(field.name)
+        needs += [" | ".join(names) for names in groups.values()]
+        status = "ready" if spec.configured else "needs setup"
+        print(f"{spec.name:<18} {status:<12} {', '.join(needs) or '—'}")
+    print("\nagent-harness providers <name> for every field; --ping to test the "
+          "credentials.")
+    return 0
+
+
 async def _sessions(args: argparse.Namespace) -> int:
     harness = Harness.local(args.state or ".harness")
     rows = await harness.sessions.list(limit=args.limit)
@@ -185,7 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--name", default="assistant", help="what to call the agent")
         p.add_argument("--model", default=None, help="model id (routed by default)")
         p.add_argument("--provider", default=None,
-                       help="anthropic | openai | gemini (inferred from the model)")
+                       help="any name from `agent-harness providers` "
+                            "(inferred from the model)")
         p.add_argument("--instructions", default="", help="the agent's instructions")
         p.add_argument("--skills", default=None, help="a directory of skills to load")
         p.add_argument("--tools", action="store_true",
@@ -210,6 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
     common(chat)
 
     sub.add_parser("models", help="list the models the harness knows and their prices")
+
+    providers = sub.add_parser(
+        "providers", help="list the LLM providers and what each needs to connect")
+    providers.add_argument("name", nargs="?", default=None,
+                           help="describe one provider in full")
+    providers.add_argument("--ping", action="store_true",
+                           help="with a name: connect and check the credentials work")
+    providers.add_argument("--ready", action="store_true",
+                           help="only the providers already configured")
+    providers.add_argument("--json", action="store_true", help="machine-readable output")
 
     sessions = sub.add_parser("sessions", help="list or show stored sessions")
     sessions.add_argument("--state", default=None)
@@ -237,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_chat(args))
         if args.command == "models":
             return _models(args)
+        if args.command == "providers":
+            return asyncio.run(_providers(args))
         if args.command == "sessions":
             return asyncio.run(_sessions(args))
         if args.command == "mcp":

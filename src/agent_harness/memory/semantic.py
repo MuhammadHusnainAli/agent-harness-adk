@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ..providers.fake import hash_embedding
+from ..llm_providers.fake import hash_embedding
 from .base import MemoryRecord, MemoryStore
 from .trace import Trace
 

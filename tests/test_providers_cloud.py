@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from agent_harness.errors import ProviderError
-from agent_harness.providers import (
+from agent_harness.llm_providers import (
     AzureFoundryProvider,
     AzureOpenAIProvider,
     BedrockProvider,
@@ -23,8 +23,8 @@ from agent_harness.providers import (
     VertexProvider,
     get_provider,
 )
-from agent_harness.providers._sigv4 import AWSCredentials, sign, signing_key
-from agent_harness.providers.base import (
+from agent_harness.llm_providers._sigv4 import AWSCredentials, sign, signing_key
+from agent_harness.llm_providers.base import (
     CompletionRequest,
     estimate_cost,
     model_info,
@@ -138,7 +138,7 @@ async def test_bedrock_without_credentials_says_what_to_do():
 
 
 async def test_bedrock_tools_survive_the_round_trip():
-    from agent_harness.providers.base import ToolSchema
+    from agent_harness.llm_providers.base import ToolSchema
 
     seen, client = capture({"content": [], "stop_reason": "end_turn", "usage": {}})
     provider = BedrockProvider(region="us-east-1", client=client, credentials=CREDS)
@@ -320,7 +320,7 @@ def test_a_platform_prefixed_model_costs_the_same():
 def test_the_platforms_are_in_the_registry():
     for name in ("bedrock", "aws", "vertex", "gcp", "vertex-gemini",
                  "azure", "azure-openai", "azure-foundry", "foundry"):
-        assert name in __import__("agent_harness.providers", fromlist=["PROVIDERS"]
+        assert name in __import__("agent_harness.llm_providers", fromlist=["PROVIDERS"]
                                   ).PROVIDERS, name
 
 

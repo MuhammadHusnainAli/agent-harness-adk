@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 
 from .agent import Agent, _agent_count
 from .harness import Harness
+from .llm_providers.base import model_info
 from .prompts import Prompt
-from .providers.base import model_info
 from .runtime.budget import Budget
 from .subagents import Bench, SubAgentFactory, SubAgentSpec, build_agent
 from .tools import Tool

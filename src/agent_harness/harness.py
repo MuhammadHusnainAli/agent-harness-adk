@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .guardrails import Guardrails
+from .llm_providers.base import Provider
 from .memory.base import InMemoryStore, MemoryStore
-from .providers.base import Provider
 from .runtime.audit import AuditTrail
 from .runtime.budget import Budget, BudgetGuard, RateGuard, RateLimit
 from .runtime.cache import ResultCache
@@ -123,7 +123,7 @@ class Harness:
     @classmethod
     def testing(cls, provider: Provider | None = None, **kwargs: Any) -> Harness:
         """No disk, no network, no tracing noise."""
-        from .providers.fake import FakeProvider
+        from .llm_providers.fake import FakeProvider
 
         return cls(provider=provider or FakeProvider(), tracer=Tracer(enabled=False),
                    **kwargs)
@@ -145,7 +145,7 @@ class Harness:
         }
 
     async def aclose(self) -> None:
-        from .providers import close_all
+        from .llm_providers import close_all
 
         if isinstance(self.provider, Provider):
             await self.provider.aclose()

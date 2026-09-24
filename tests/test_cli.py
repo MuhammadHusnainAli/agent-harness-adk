@@ -5,8 +5,8 @@ import json
 import pytest
 
 from agent_harness import cli
-from agent_harness.providers import PROVIDERS
-from agent_harness.providers.fake import FakeProvider
+from agent_harness.llm_providers import PROVIDERS
+from agent_harness.llm_providers.fake import FakeProvider
 
 
 @pytest.fixture

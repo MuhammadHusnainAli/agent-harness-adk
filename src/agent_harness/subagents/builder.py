@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..guardrails import AgentGuardrails
-from ..providers.base import Provider
+from ..llm_providers.base import Provider
 from ..runtime.permissions import PolicyGate
 from ..types import new_id
 from .spec import SubAgentSpec

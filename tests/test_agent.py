@@ -293,7 +293,7 @@ async def test_streaming_emits_events_and_ends_with_the_result():
 
 
 async def test_streaming_passes_the_model_tokens_through():
-    from agent_harness.providers.base import CompletionRequest, Provider
+    from agent_harness.llm_providers.base import CompletionRequest, Provider
     from agent_harness.types import Message as M
     from agent_harness.types import ModelResponse, StreamEvent, Usage
 
