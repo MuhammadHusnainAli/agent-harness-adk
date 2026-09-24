@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.3] — 2026-09-24
+
 ### Changed — breaking
 
 - **`agent_harness.providers` is now `agent_harness.llm_providers`.** Imports
@@ -391,7 +395,8 @@ The first release. Published as `agent-harness-adk`, imported as `agent_harness`
 - Typed (`py.typed`), three runtime dependencies, ~100 ms import.
 - 150 tests, green on Python 3.10 through 3.14.
 
-[Unreleased]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/MuhammadHusnainAli/agent-harness-adk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MuhammadHusnainAli/agent-harness-adk/releases/tag/v0.1.0
