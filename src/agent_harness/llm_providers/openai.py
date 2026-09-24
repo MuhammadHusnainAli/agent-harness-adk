@@ -25,6 +25,7 @@ from ..types import (
     Usage,
 )
 from .base import CompletionRequest, Provider, ProviderField, sse_events
+from .parameters import SAMPLING_PARAMETERS, ParameterPlan, nearest_effort
 from .resilience import classify
 
 _STOP_MAP = {
@@ -35,8 +36,16 @@ _STOP_MAP = {
     "content_filter": "error",
 }
 
-# Reasoning models reject `temperature` and want `max_completion_tokens`.
+# Reasoning models reject sampling and `stop`, and want `max_completion_tokens`.
 _REASONING = ("o1", "o3", "o4", "gpt-5")
+
+#: The reasoning levels each OpenAI model family takes.
+_OPENAI_EFFORTS: dict[str, tuple[str, ...]] = {
+    "gpt-5": ("minimal", "low", "medium", "high"),
+    "o1": ("low", "medium", "high"),
+    "o3": ("low", "medium", "high"),
+    "o4": ("low", "medium", "high"),
+}
 
 
 class OpenAIProvider(Provider):
@@ -70,6 +79,13 @@ class OpenAIProvider(Provider):
     stream_usage: ClassVar[bool] = True
     #: Models that take `max_completion_tokens` and `reasoning_effort`.
     reasoning_prefixes: ClassVar[tuple[str, ...]] = _REASONING
+    #: How `effort` reaches the wire: "reasoning_effort", "openrouter", or "" for never.
+    effort_style: ClassVar[str] = "reasoning_effort"
+    #: Model-family prefix → the reasoning levels it takes. Matched against the id
+    #: and against its last path segment, so "openai/gpt-oss-120b" finds "gpt-oss".
+    effort_families: ClassVar[dict[str, tuple[str, ...]]] = _OPENAI_EFFORTS
+    parameters: ClassVar[frozenset[str]] = frozenset({
+        "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed"})
     #: Payload keys this server does not accept, dropped before sending.
     drop_params: ClassVar[frozenset[str]] = frozenset()
     #: Payload keys this server spells differently: {"seed": "random_seed"}.
@@ -84,6 +100,76 @@ class OpenAIProvider(Provider):
             os.environ.get("OPENAI_ORG_ID", "") if type(self).name == "openai" else "")
         self.project = project or (
             os.environ.get("OPENAI_PROJECT_ID", "") if type(self).name == "openai" else "")
+
+    # ---- generation parameters ------------------------------------------------
+    def _effort_levels(self, model: str) -> tuple[str, ...] | None:
+        """The reasoning levels this model takes, or None if it takes none."""
+        names = (model, model.rsplit("/", 1)[-1])
+        best: tuple[str, tuple[str, ...]] | None = None
+        for prefix, levels in self.effort_families.items():
+            if any(n.startswith(prefix) for n in names) and (
+                    best is None or len(prefix) > len(best[0])):
+                best = (prefix, levels)
+        return best[1] if best else None
+
+    def _plan(self, req: CompletionRequest, plan: ParameterPlan) -> None:
+        model = req.model
+        if model.startswith(self.reasoning_prefixes):
+            for name in ("temperature", "top_p", "frequency_penalty", "presence_penalty",
+                         "seed", "top_k", "min_p", "repetition_penalty"):
+                plan.drop(name, f"{model} is a reasoning model and rejects sampling "
+                                "settings")
+            plan.drop("stop", f"{model} is a reasoning model and rejects stop sequences")
+
+        effort, thinking = plan.get("effort"), plan.get("thinking")
+        if self.effort_style == "openrouter":
+            levels: tuple[str, ...] | None = ("minimal", "low", "medium", "high")
+            if thinking is False and effort is None:
+                plan.set("effort", "none")
+            elif effort not in (None, "none"):
+                mapped = nearest_effort(effort, levels)
+                if mapped != effort:
+                    plan.adjust("effort", mapped, f"OpenRouter's levels are "
+                                                  f"{', '.join(levels)}")
+            if "thinking_budget" in plan and plan.get("effort") not in (None, "none"):
+                plan.drop("effort", "thinking_budget was given — OpenRouter takes one "
+                                    "or the other")
+            plan.values.pop("thinking", None)
+            return
+
+        levels = self._effort_levels(model) if self.effort_style else None
+        if levels is None:
+            plan.drop("effort", f"{model} has no reasoning effort setting")
+            if thinking:
+                plan.drop("thinking", f"{model} has no thinking switch")
+            plan.values.pop("thinking", None)
+            plan.drop("thinking_budget", f"{model} has no thinking budget")
+            return
+        if effort is None and thinking is False:
+            plan.set("effort", levels[0])
+            plan.adjusted["effort"] = (f"thinking=False → {levels[0]!r}, the least "
+                                       f"reasoning {model} allows")
+        elif effort is not None:
+            mapped = nearest_effort(effort, levels)
+            if mapped != effort:
+                plan.adjust("effort", mapped, f"{model} takes {', '.join(levels)}")
+        plan.values.pop("thinking", None)       # expressed through the effort
+        plan.drop("thinking_budget", f"{model} takes an effort level, not a token budget")
+
+    def _reasoning_payload(self, plan: ParameterPlan, payload: dict[str, Any]) -> None:
+        effort = plan.get("effort")
+        if self.effort_style == "openrouter":
+            reasoning: dict[str, Any] = {}
+            if effort == "none":
+                reasoning["enabled"] = False
+            elif effort:
+                reasoning["effort"] = effort
+            if "thinking_budget" in plan and effort != "none":
+                reasoning["max_tokens"] = plan.get("thinking_budget")
+            if reasoning:
+                payload["reasoning"] = reasoning
+        elif self.effort_style == "reasoning_effort" and effort:
+            payload["reasoning_effort"] = effort
 
     def _auth_headers(self) -> dict[str, str]:
         if not self.api_key and not self.key_required:
@@ -153,7 +239,9 @@ class OpenAIProvider(Provider):
             "model": req.model,
             "messages": self._encode_messages(req),
         }
-        payload["max_completion_tokens" if reasoning else "max_tokens"] = req.max_tokens
+        plan = self.plan_parameters(req)
+        payload["max_completion_tokens" if reasoning else "max_tokens"] = plan.get(
+            "max_tokens", req.max_tokens)
         if req.tools:
             payload["tools"] = [
                 {"type": "function",
@@ -169,24 +257,16 @@ class OpenAIProvider(Provider):
                 payload["tool_choice"] = {
                     "type": "function", "function": {"name": req.tool_choice["name"]}
                 }
-        if not reasoning:
-            for field in ("temperature", "top_p", "frequency_penalty",
-                          "presence_penalty", "seed"):
-                value = getattr(req, field)
-                if value is not None:
-                    payload[field] = value
-        elif req.effort:
-            # OpenAI's reasoning models take low/medium/high; the two levels
-            # above that map to the highest they have rather than erroring.
-            payload["reasoning_effort"] = {"xhigh": "high", "max": "high"}.get(
-                req.effort, req.effort
-            )
+        for name in SAMPLING_PARAMETERS:
+            if name in plan:
+                payload[name] = plan.get(name)
+        self._reasoning_payload(plan, payload)
         if req.parallel_tool_calls is not None and req.tools:
             payload["parallel_tool_calls"] = req.parallel_tool_calls
         if req.user:
             payload["user"] = req.user
-        if req.stop:
-            payload["stop"] = req.stop
+        if plan.get("stop"):
+            payload["stop"] = plan.get("stop")
         if req.response_schema:
             payload["response_format"] = {
                 "type": "json_schema",

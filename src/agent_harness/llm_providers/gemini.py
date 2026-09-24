@@ -23,7 +23,8 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import CompletionRequest, Provider, ProviderField, sse_events
+from .base import CompletionRequest, Provider, ProviderField, normalise_model, sse_events
+from .parameters import ParameterPlan, nearest_effort
 from .resilience import classify
 
 _STOP_MAP = {
@@ -48,6 +49,20 @@ _RPC_STATUS = {"RESOURCE_EXHAUSTED": 429, "UNAVAILABLE": 503, "INTERNAL": 500,
 _SCHEMA_DROP = {"$schema", "additionalProperties", "definitions", "$defs", "title",
                 "default", "examples", "exclusiveMinimum", "exclusiveMaximum",
                 "const", "allOf", "oneOf", "not", "patternProperties"}
+
+
+#: Effort as a Gemini 2.5 thinking budget, in tokens.
+_EFFORT_BUDGET = {"none": 0, "minimal": 512, "low": 1024, "medium": 8192, "high": 16384,
+                  "xhigh": 24576, "max": 32768}
+
+
+def _budget_range(model: str) -> tuple[int, int, bool]:
+    """(lowest, highest, can switch off) for a Gemini 2.5 model's thinking budget."""
+    if "pro" in model:
+        return 128, 32768, False
+    if "lite" in model:
+        return 512, 24576, True
+    return 1, 24576, True
 
 
 def _clean_schema(schema: Any) -> Any:
@@ -82,6 +97,65 @@ class GeminiProvider(Provider):
     capabilities: ClassVar[frozenset[str]] = frozenset({
         "streaming", "tools", "vision", "thinking", "json_schema", "embeddings",
         "list_models"})
+
+    parameters: ClassVar[frozenset[str]] = frozenset({
+        "temperature", "top_p", "top_k", "seed", "frequency_penalty", "presence_penalty"})
+
+    def _plan(self, req: CompletionRequest, plan: ParameterPlan) -> None:
+        """Gemini 2.5 thinks in token budgets, Gemini 3 in levels, earlier models not
+        at all — `effort` and `thinking` become whichever this model takes."""
+        model = normalise_model(req.model).split("/")[-1]
+        effort, thinking = plan.get("effort"), plan.get("thinking")
+        budget = plan.get("thinking_budget")
+        if effort == "none" and thinking:
+            plan.drop("thinking", "effort='none' switches thinking off")
+            thinking = None
+
+        if model.startswith("gemini-3"):
+            levels = (("low", "high") if "pro" in model
+                      else ("minimal", "low", "medium", "high"))
+            if budget is not None:
+                plan.drop("effort", "thinking_budget was given; Gemini takes one or the "
+                                    "other")
+            elif effort is not None or thinking is False:
+                wanted = effort or "none"
+                level = nearest_effort(wanted, levels)
+                plan.values.pop("effort", None)
+                plan.set("thinking_level", level)
+                why = (f"{model} cannot switch thinking off; its lowest level is "
+                       f"{level!r}" if wanted == "none" else f"{model} takes "
+                       f"{', '.join(levels)}")
+                plan.adjusted["effort"] = f"{wanted!r} → thinkingLevel {level!r}" + (
+                    f": {why}" if level != wanted else "")
+            return
+
+        if not model.startswith("gemini-2.5"):
+            for name in ("effort", "thinking_budget"):
+                plan.drop(name, f"{model} does not think")
+            if thinking:
+                plan.drop("thinking", f"{model} does not think")
+            return
+
+        lowest, highest, can_disable = _budget_range(model)
+        if budget is None:
+            if effort is not None:
+                budget = _EFFORT_BUDGET[effort]
+                plan.values.pop("effort")
+                plan.adjusted["effort"] = f"{effort!r} → thinkingBudget {budget}"
+            elif thinking is False:
+                budget = 0
+            if budget is not None:
+                plan.set("thinking_budget", budget)
+        elif effort is not None:
+            plan.drop("effort", "thinking_budget was given; Gemini takes one or the other")
+        if budget is None or budget == -1:           # -1: let the model decide
+            return
+        if budget == 0 and not can_disable:
+            plan.adjust("thinking_budget", lowest,
+                        f"{model} cannot switch thinking off; {lowest} is its minimum")
+        elif budget != 0 and not lowest <= budget <= highest:
+            plan.adjust("thinking_budget", min(max(budget, lowest), highest),
+                        f"{model} takes a thinking budget of {lowest}–{highest}")
 
     def __init__(self, api_key: str | None = None, **kw: Any) -> None:
         super().__init__(api_key, **kw)
@@ -149,32 +223,28 @@ class GeminiProvider(Provider):
     def _payload(self, req: CompletionRequest, *, stream: bool = False) -> dict[str, Any]:
         contents, inline_systems = self._encode_contents(req)
         system_parts = [p for p in ([req.system] + inline_systems) if p]
-        gen: dict[str, Any] = {"maxOutputTokens": req.max_tokens}
+        plan = self.plan_parameters(req)
+        gen: dict[str, Any] = {"maxOutputTokens": plan.get("max_tokens", req.max_tokens)}
         for field, key in (("temperature", "temperature"), ("top_p", "topP"),
                            ("top_k", "topK"), ("seed", "seed"),
                            ("frequency_penalty", "frequencyPenalty"),
                            ("presence_penalty", "presencePenalty")):
-            value = getattr(req, field)
-            if value is not None:
-                gen[key] = value
-        if req.stop:
-            gen["stopSequences"] = req.stop
+            if field in plan:
+                gen[key] = plan.get(field)
+        if plan.get("stop"):
+            gen["stopSequences"] = plan.get("stop")
         if req.response_mime_type:
             gen["responseMimeType"] = req.response_mime_type
         if req.response_schema:
             gen["responseMimeType"] = "application/json"
             gen["responseSchema"] = _clean_schema(req.response_schema)
-        if req.thinking is not None or req.effort or req.thinking_budget:
-            budget = req.thinking_budget
-            if budget is None and req.effort:
-                # Gemini takes a token budget, not a level, so the levels are
-                # mapped to budgets rather than being dropped.
-                budget = {"low": 1024, "medium": 8192, "high": 16384,
-                          "xhigh": 24576, "max": 32768}[req.effort]
-            gen["thinkingConfig"] = {
-                "includeThoughts": bool(req.thinking),
-                **({"thinkingBudget": budget} if budget is not None else {}),
-            }
+        if "thinking_budget" in plan or "thinking_level" in plan or plan.get("thinking"):
+            config: dict[str, Any] = {"includeThoughts": bool(plan.get("thinking"))}
+            if "thinking_level" in plan:
+                config["thinkingLevel"] = plan.get("thinking_level")
+            elif "thinking_budget" in plan:
+                config["thinkingBudget"] = plan.get("thinking_budget")
+            gen["thinkingConfig"] = config
 
         payload: dict[str, Any] = {"contents": contents, "generationConfig": gen}
         if req.safety_settings:

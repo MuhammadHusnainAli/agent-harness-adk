@@ -113,6 +113,7 @@ from .llm_providers import (
     OpenAICompatibleProvider,
     OpenAIProvider,
     OpenRouterProvider,
+    ParameterPlan,
     Provider,
     ProviderCheck,
     ProviderField,
@@ -133,6 +134,7 @@ from .llm_providers import (
     register_model,
     register_provider,
     tool_call,
+    validate_parameters,
 )
 from .memory import (
     Embedder,
@@ -311,6 +313,8 @@ __all__ = [
     "ProviderSpec",
     "ProviderField",
     "ProviderCheck",
+    "ParameterPlan",
+    "validate_parameters",
     "RetryPolicy",
     "RetryEvent",
     "CircuitBreaker",

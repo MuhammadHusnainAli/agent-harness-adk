@@ -44,6 +44,14 @@ class CompiledSpec(BaseModel):
     temperature: float | None = None
     effort: str | None = None
     thinking: bool | None = None
+    thinking_budget: int | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
+    seed: int | None = None
     response_schema: dict[str, Any] | None = None
     max_steps: int = 12
     workspace: str = "none"
@@ -65,6 +73,14 @@ class CompiledSpec(BaseModel):
             temperature=self.temperature,
             effort=self.effort,  # type: ignore[arg-type]
             thinking=self.thinking,
+            thinking_budget=self.thinking_budget,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            repetition_penalty=self.repetition_penalty,
+            seed=self.seed,
             response_schema=self.response_schema,
         )
         for key, value in overrides.items():
@@ -149,6 +165,9 @@ class SpecCompiler:
             max_tokens=getattr(spec, "max_tokens", 8192),
             temperature=getattr(spec, "temperature", None),
             effort=effort,
+            **{name: getattr(spec, name, None) for name in (
+                "thinking", "thinking_budget", "top_p", "top_k", "min_p",
+                "frequency_penalty", "presence_penalty", "repetition_penalty", "seed")},
             response_schema=schema,
             max_steps=getattr(spec, "max_steps", 12),
             workspace=getattr(spec, "workspace", "none"),

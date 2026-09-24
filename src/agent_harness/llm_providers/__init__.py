@@ -58,6 +58,15 @@ from .compatible import (
 from .fake import FakeProvider, hash_embedding, tool_call
 from .gemini import GeminiProvider
 from .openai import OpenAIProvider
+from .parameters import (
+    EFFORT_LEVELS,
+    GENERATION_PARAMETERS,
+    SAMPLING_PARAMETERS,
+    Effort,
+    ParameterPlan,
+    nearest_effort,
+    validate_parameters,
+)
 from .resilience import CircuitBreaker, ProviderStats, RetryEvent, RetryPolicy
 from .vertex import GoogleAuth, VertexGeminiProvider, VertexProvider
 
@@ -96,6 +105,14 @@ __all__ = [
     "FakeProvider",
     "tool_call",
     "hash_embedding",
+    # generation parameters
+    "Effort",
+    "EFFORT_LEVELS",
+    "SAMPLING_PARAMETERS",
+    "GENERATION_PARAMETERS",
+    "ParameterPlan",
+    "validate_parameters",
+    "nearest_effort",
     # resilience
     "RetryPolicy",
     "RetryEvent",

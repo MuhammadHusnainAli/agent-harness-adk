@@ -74,6 +74,15 @@ class AgentEntry(BaseModel):
     effort: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    thinking: bool | None = None
+    thinking_budget: int | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
+    seed: int | None = None
     max_steps: int | None = None
     tools: list[str] | None = None
     skills: str | list[str] | None = None
@@ -231,7 +240,9 @@ class Blueprint(BaseModel):
             "subagents": [self._subagent(n) for n in entry.subagents],
         }
         for field in ("model", "tier", "effort", "temperature", "max_tokens",
-                      "max_steps", "runtime_agents", "max_runtime_agents",
+                      "thinking", "thinking_budget", "top_p", "top_k", "min_p",
+                      "frequency_penalty", "presence_penalty", "repetition_penalty",
+                      "seed", "max_steps", "runtime_agents", "max_runtime_agents",
                       "compact_at", "trace", "skills", "allow_shell"):
             value = getattr(entry, field)
             if value is not None:

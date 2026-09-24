@@ -17,8 +17,9 @@ import os
 from typing import Any, ClassVar
 
 from ..errors import ProviderError
-from .base import ProviderField
+from .base import CompletionRequest, ProviderField
 from .openai import OpenAIProvider
+from .parameters import SAMPLING_PARAMETERS, ParameterPlan
 
 __all__ = [
     "OpenAICompatibleProvider",
@@ -37,6 +38,13 @@ __all__ = [
 ]
 
 _CAPS = frozenset({"streaming", "tools", "json_schema", "list_models"})
+
+#: What each host accepts, so an unsupported knob is dropped rather than 400-ing.
+_ALL = frozenset(SAMPLING_PARAMETERS)
+_OPENAI_LIKE = frozenset({"temperature", "top_p", "frequency_penalty", "presence_penalty",
+                          "seed"})
+#: Open-weight reasoning models that take `reasoning_effort`, wherever they're hosted.
+_OPEN_REASONING: dict[str, tuple[str, ...]] = {"gpt-oss": ("low", "medium", "high")}
 
 
 def _key(env: str, example: str = "", *, required: bool = True,
@@ -69,6 +77,9 @@ class OpenAICompatibleProvider(OpenAIProvider):
     #: Only OpenAI's own models take `max_completion_tokens`.
     reasoning_prefixes: ClassVar[tuple[str, ...]] = ("o1", "o3", "o4", "gpt-5")
     embedding_model: ClassVar[str] = ""
+    #: Your own server: everything you set is sent.
+    parameters: ClassVar[frozenset[str]] = _ALL
+    effort_families: ClassVar[dict[str, tuple[str, ...]]] = _OPEN_REASONING
 
     display_name: ClassVar[str] = "OpenAI-compatible"
     description: ClassVar[str] = ("Any endpoint that speaks the OpenAI Chat Completions "
@@ -109,6 +120,10 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         ProviderField(name="app_name", description="Your app's name, sent as X-Title."),
     )
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"vision", "thinking"}
+    parameters: ClassVar[frozenset[str]] = _ALL
+    #: `reasoning: {effort | max_tokens | enabled}`, which OpenRouter maps per model.
+    effort_style: ClassVar[str] = "openrouter"
+    reasoning_prefixes: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, api_key: str | None = None, *, app_url: str | None = None,
                  app_name: str | None = None, **kw: Any) -> None:
@@ -131,6 +146,7 @@ class GroqProvider(OpenAICompatibleProvider):
     description: ClassVar[str] = "Open-weight models on Groq's LPUs — very low latency."
     docs_url: ClassVar[str] = "https://console.groq.com/docs/api-reference"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("GROQ_API_KEY", "gsk_..."),)
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE
 
 
 class TogetherProvider(OpenAICompatibleProvider):
@@ -144,6 +160,7 @@ class TogetherProvider(OpenAICompatibleProvider):
     description: ClassVar[str] = "Open-weight models hosted by Together AI."
     docs_url: ClassVar[str] = "https://docs.together.ai/reference/chat-completions-1"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("TOGETHER_API_KEY"),)
+    parameters: ClassVar[frozenset[str]] = _ALL
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"embeddings"}
 
 
@@ -158,6 +175,9 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     description: ClassVar[str] = "DeepSeek's chat and reasoner models."
     docs_url: ClassVar[str] = "https://api-docs.deepseek.com/"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("DEEPSEEK_API_KEY", "sk-..."),)
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE - {"seed"}
+    #: deepseek-reasoner always reasons; there is no level to set.
+    effort_families: ClassVar[dict[str, tuple[str, ...]]] = {}
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"thinking"}
 
 
@@ -174,6 +194,8 @@ class MistralProvider(OpenAICompatibleProvider):
     docs_url: ClassVar[str] = "https://docs.mistral.ai/api/"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("MISTRAL_API_KEY"),)
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"vision", "embeddings"}
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE
+    effort_families: ClassVar[dict[str, tuple[str, ...]]] = {}
     # Mistral names the seed differently and rejects fields it does not know.
     rename_params: ClassVar[dict[str, str]] = {"seed": "random_seed"}
     drop_params: ClassVar[frozenset[str]] = frozenset({"user", "stream_options"})
@@ -192,6 +214,16 @@ class XAIProvider(OpenAICompatibleProvider):
     docs_url: ClassVar[str] = "https://docs.x.ai/docs/api-reference"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("XAI_API_KEY", "xai-..."),)
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"vision", "thinking"}
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE
+    effort_families: ClassVar[dict[str, tuple[str, ...]]] = {"grok-3-mini": ("low", "high")}
+    #: Grok's reasoning models, which reject penalties and stop sequences.
+    reasoning_models: ClassVar[tuple[str, ...]] = ("grok-4", "grok-3-mini", "grok-code")
+
+    def _plan(self, req: CompletionRequest, plan: ParameterPlan) -> None:
+        super()._plan(req, plan)
+        if req.model.startswith(self.reasoning_models):
+            for name in ("frequency_penalty", "presence_penalty", "stop"):
+                plan.drop(name, f"{req.model} is a reasoning model and rejects {name}")
 
 
 class FireworksProvider(OpenAICompatibleProvider):
@@ -205,6 +237,7 @@ class FireworksProvider(OpenAICompatibleProvider):
     description: ClassVar[str] = "Open-weight models hosted by Fireworks AI."
     docs_url: ClassVar[str] = "https://docs.fireworks.ai/api-reference"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("FIREWORKS_API_KEY", "fw_..."),)
+    parameters: ClassVar[frozenset[str]] = _ALL
 
 
 class CerebrasProvider(OpenAICompatibleProvider):
@@ -218,6 +251,7 @@ class CerebrasProvider(OpenAICompatibleProvider):
     description: ClassVar[str] = "Open-weight models on Cerebras wafer-scale hardware."
     docs_url: ClassVar[str] = "https://inference-docs.cerebras.ai/api-reference"
     fields: ClassVar[tuple[ProviderField, ...]] = (_key("CEREBRAS_API_KEY", "csk-..."),)
+    parameters: ClassVar[frozenset[str]] = frozenset({"temperature", "top_p", "seed"})
 
 
 class OllamaProvider(OpenAICompatibleProvider):
@@ -236,6 +270,7 @@ class OllamaProvider(OpenAICompatibleProvider):
     )
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"vision", "embeddings"}
     embedding_model: ClassVar[str] = "nomic-embed-text"
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE
 
     def __init__(self, api_key: str | None = None, *, base_url: str | None = None,
                  **kw: Any) -> None:
@@ -258,6 +293,7 @@ class LMStudioProvider(OpenAICompatibleProvider):
         _url("http://localhost:1234/v1", "LMSTUDIO_BASE_URL"),
     )
     capabilities: ClassVar[frozenset[str]] = _CAPS | {"embeddings"}
+    parameters: ClassVar[frozenset[str]] = _OPENAI_LIKE | {"top_k"}
 
 
 class VLLMProvider(OpenAICompatibleProvider):

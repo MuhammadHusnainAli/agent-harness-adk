@@ -35,6 +35,7 @@ from ..errors import (
     RateLimitError,
 )
 from ..types import Message, ModelResponse, StreamEvent, Usage
+from .parameters import SAMPLING_PARAMETERS, Effort, ParameterPlan
 from .resilience import (
     CircuitBreaker,
     ProviderStats,
@@ -211,9 +212,6 @@ def estimate_cost(model: str, usage: Usage) -> float:
     return round(cost, 8)
 
 
-Effort = Literal["low", "medium", "high", "xhigh", "max"]
-
-
 class CompletionRequest(BaseModel):
     """Everything one model call needs, in a form every adapter accepts.
 
@@ -233,24 +231,27 @@ class CompletionRequest(BaseModel):
     tool_choice: str | dict[str, Any] | None = None  # auto | any | none | {"name": ...}
 
     # --- how much ------------------------------------------------------------
-    max_tokens: int = 8192
+    max_tokens: int = Field(8192, ge=1)
 
     # --- how it should think --------------------------------------------------
-    #: Reasoning depth. `low` for mechanical work, `high` for judgement, `max`
-    #: when correctness matters more than cost.
+    #: Reasoning depth: none · minimal · low · medium · high · xhigh · max.
+    #: `low` for mechanical work, `high` for judgement, `max` when correctness
+    #: matters more than cost, `none` to switch reasoning off where it can be.
     effort: Effort | None = None
     thinking: bool | None = None
     #: An explicit thinking-token ceiling, for models that take one instead of
-    #: an effort level.
-    thinking_budget: int | None = None
+    #: an effort level. Setting it asks for thinking. -1 lets Gemini decide.
+    thinking_budget: int | None = Field(None, ge=-1)
 
-    # --- sampling --------------------------------------------------------------
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None                    # Anthropic, Gemini
-    seed: int | None = None                     # OpenAI, Gemini
-    frequency_penalty: float | None = None      # OpenAI, Gemini
-    presence_penalty: float | None = None       # OpenAI, Gemini
+    # --- sampling (see Provider.parameters for who takes which) -------------------
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    top_p: float | None = Field(None, ge=0.0, le=1.0)
+    top_k: int | None = Field(None, ge=1)                  # Anthropic, Gemini, open models
+    min_p: float | None = Field(None, ge=0.0, le=1.0)      # vLLM, Together, OpenRouter
+    frequency_penalty: float | None = Field(None, ge=-2.0, le=2.0)
+    presence_penalty: float | None = Field(None, ge=-2.0, le=2.0)
+    repetition_penalty: float | None = Field(None, gt=0.0)  # vLLM, Together, OpenRouter
+    seed: int | None = None                     # OpenAI, Gemini, most open-model hosts
     stop: list[str] = Field(default_factory=list)
 
     # --- shape of the answer -----------------------------------------------------
@@ -354,6 +355,8 @@ class Provider(ABC):
     fields: ClassVar[tuple[ProviderField, ...]] = ()
     #: streaming · tools · vision · thinking · json_schema · embeddings · list_models
     capabilities: ClassVar[frozenset[str]] = frozenset()
+    #: The sampling parameters this backend accepts. Anything else is dropped.
+    parameters: ClassVar[frozenset[str]] = frozenset(SAMPLING_PARAMETERS)
 
     def __init__(
         self,
@@ -716,6 +719,39 @@ class Provider(ABC):
 
         return release
 
+    # ---- generation parameters -----------------------------------------------
+    def plan_parameters(self, req: CompletionRequest) -> ParameterPlan:
+        """Decide what this provider sends for the request's generation parameters.
+
+        Sampling knobs the backend lacks are dropped; values a model would reject
+        are fitted; `effort` and `thinking` become whatever this model takes.
+        Every decision is recorded on the plan with its reason.
+        """
+        plan = ParameterPlan.of(self.name, req)
+        label = self.display_name or self.name
+        for name in SAMPLING_PARAMETERS:
+            if name in plan and name not in self.parameters:
+                plan.drop(name, f"{label} has no {name}")
+        self._plan(req, plan)
+        _report(plan)
+        return plan
+
+    def _plan(self, req: CompletionRequest, plan: ParameterPlan) -> None:
+        """Model-specific rules. Adapters override this."""
+        return None
+
+    def explain(self, req: CompletionRequest) -> dict[str, Any]:
+        """What would be sent for this request — without sending it.
+
+        ``sent``/``dropped``/``adjusted`` from the parameter plan, and the exact
+        ``payload`` that would go on the wire.
+        """
+        out = self.plan_parameters(req).as_dict()
+        payload = getattr(self, "_payload", None)
+        if payload is not None:
+            out["payload"] = payload(req)
+        return out
+
     # ---- the contract -------------------------------------------------
     @abstractmethod
     async def complete(self, req: CompletionRequest) -> ModelResponse:
@@ -821,6 +857,22 @@ class Provider(ABC):
 
 def _noop() -> None:
     return None
+
+
+_REPORTED: set[tuple[str, str, str, str]] = set()
+
+
+def _report(plan: ParameterPlan) -> None:
+    """Log each drop or adjustment once per provider, model and parameter."""
+    for kind, notes in (("dropped", plan.dropped), ("adjusted", plan.adjusted)):
+        for name, why in notes.items():
+            key = (plan.provider, plan.model, name, kind)
+            if key in _REPORTED:
+                continue
+            if len(_REPORTED) > 10_000:
+                _REPORTED.clear()
+            _REPORTED.add(key)
+            logger.info("%s/%s: %s %s — %s", plan.provider, plan.model, kind, name, why)
 
 
 def _events_from(resp: ModelResponse) -> list[StreamEvent]:

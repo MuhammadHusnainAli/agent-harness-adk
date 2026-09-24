@@ -869,30 +869,66 @@ Platform model ids are normalised, so `anthropic.claude-opus-5` on Bedrock,
 on Vertex are all recognised as the same model and **priced the same** — cost
 attribution keeps working wherever a model is served from.
 
-### Every connection parameter
+### Every generation parameter
 
 ```python
 Agent("deep",
       model="claude-opus-5",
-      effort="max",              # low · medium · high · xhigh · max
+      effort="high",             # none · minimal · low · medium · high · xhigh · max
       thinking=True,
       thinking_budget=16_000,    # for models that take a budget, not a level
-      temperature=0.2, top_p=0.9, top_k=40, seed=7,
+      temperature=0.2, top_p=0.9, top_k=40, min_p=0.05,
+      frequency_penalty=0.3, presence_penalty=0.1, repetition_penalty=1.05,
+      seed=7, max_tokens=4096, stop=["</answer>"],
       cache=True,                # prompt caching where the provider has it
       user="customer-42",        # for abuse tracing
       model_options={"speed": "fast", "safety_settings": [...]})
 ```
 
-A parameter a provider does not have is **dropped, not translated**: Anthropic
-has no `seed`, OpenAI has no `top_k`, and quietly substituting something else
-would change what you asked for. Two places where the mapping does real work:
+The same names work on `AgentVersion`, `SubAgentSpec`, blueprint YAML and
+`CompletionRequest`. They are **validated when the agent is built** —
+`temperature=5` or `top_p=1.5` raises a `ConfigurationError` naming every bad
+value and its allowed range, instead of a 400 halfway through a run.
+`validate_parameters(...)` runs the same check on its own.
 
-- **Sampling is withheld from thinking-only models**, which reject it outright —
-  so `temperature` on `claude-opus-5` with thinking on is omitted rather than
-  400-ing your run.
-- **`effort` travels everywhere.** OpenAI's reasoning models take three levels,
-  so `xhigh` and `max` map to `high`; Gemini takes a token budget, so the five
-  levels map to budgets. You write one thing and it means the same thing.
+Each provider then turns them into what *it* accepts:
+
+- **A parameter a provider does not have is dropped, not translated.** Anthropic
+  has no `seed` or penalties; OpenAI has no `top_k`; `min_p` and
+  `repetition_penalty` reach only the hosts that take them (vLLM, Together,
+  Fireworks, OpenRouter). `describe_llm_provider(name).parameters` lists them.
+- **A value a model would reject is fitted, not sent to fail.** Claude takes
+  `temperature` 0–1 and one of `temperature`/`top_p`; with extended thinking it
+  refuses `temperature` and `top_k` and needs `top_p` ≥ 0.95, a budget of at
+  least 1024, and `max_tokens` above the budget. Thinking-only models (Opus 5,
+  Sonnet 5 — under any Bedrock or Vertex id) get no sampling at all. OpenAI's
+  reasoning models refuse sampling and `stop`. Grok's reasoning models refuse
+  penalties and `stop`. Gemini 2.5 Pro cannot switch thinking off.
+- **`effort` is the portable way to ask for reasoning**, mapped to the nearest
+  level each model has:
+
+| Provider | `effort` becomes |
+|---|---|
+| Anthropic, Bedrock, Vertex | `output_config.effort` (low–max); `none` switches thinking off |
+| OpenAI o-series / GPT-5 | `reasoning_effort` (low–high; GPT-5 also `minimal`) |
+| Gemini 2.5 | a thinking budget: 0 / 512 / 1024 / 8192 / 16384 / 24576 / 32768, fitted to the model's range |
+| Gemini 3 | `thinkingLevel` (Pro: low, high; Flash: minimal–high) |
+| OpenRouter | `reasoning.effort`, or `reasoning.max_tokens` for a budget |
+| gpt-oss on Groq, Together, Fireworks, Cerebras, Ollama, vLLM | `reasoning_effort` |
+| grok-3-mini | `reasoning_effort` (low, high) |
+
+Nothing is dropped or changed silently. Every decision is recorded in a
+`ParameterPlan`, logged once on `agent_harness.llm_providers`, and shown by
+`explain` — without sending anything:
+
+```python
+OpenAIProvider().explain(CompletionRequest(model="o3", messages=[...],
+                                           temperature=0.3, effort="max"))
+# {"sent":     {"effort": "high", "max_tokens": 8192},
+#  "dropped":  {"temperature": "o3 is a reasoning model and rejects sampling settings"},
+#  "adjusted": {"effort": "'max' → 'high': o3 takes low, medium, high"},
+#  "payload":  {...exactly what would go on the wire...}}
+```
 
 `extra={...}` is merged into the payload verbatim for anything not covered —
 beta headers, new fields, a provider feature that shipped this morning.

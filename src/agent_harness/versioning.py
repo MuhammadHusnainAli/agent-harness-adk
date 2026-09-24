@@ -39,7 +39,9 @@ __all__ = ["AgentVersion"]
 #: every version so switching one is cheap and comparable.
 OVERRIDABLE = {
     "instructions", "description", "model", "tier", "effort", "temperature",
-    "max_tokens", "thinking", "max_steps", "tool_choice", "stop",
+    "max_tokens", "thinking", "thinking_budget", "top_p", "top_k", "min_p",
+    "frequency_penalty", "presence_penalty", "repetition_penalty", "seed",
+    "max_steps", "tool_choice", "stop",
     "compact_at", "compact_keep_last", "compact_target",
     "runtime_agents", "max_runtime_agents", "contract_retries",
 }
@@ -63,6 +65,14 @@ class AgentVersion(BaseModel):
     max_tokens: int | None = None
     max_steps: int | None = None
     thinking: bool | None = None
+    thinking_budget: int | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
+    seed: int | None = None
     #: Tool names, selected from the tools the agent was given. `None` keeps
     #: them all; `[]` takes them all away.
     tools: list[str] | None = None

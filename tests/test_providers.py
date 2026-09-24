@@ -303,10 +303,13 @@ async def test_anthropic_maps_what_it_supports_and_drops_what_it_does_not():
         model="claude-haiku-4-5", messages=[Message.user("x")], tools=TOOLS, **FULL))
 
     body = seen["body"]
-    assert body["max_tokens"] == 4096
     assert body["output_config"]["effort"] == "max"
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
-    assert body["temperature"] == 0.3 and body["top_p"] == 0.9 and body["top_k"] == 40
+    # The budget must be below max_tokens, so max_tokens is raised to fit it.
+    assert body["max_tokens"] == 8192 + 1024
+    # Extended thinking rejects temperature and top_k, and takes top_p ≥ 0.95.
+    assert "temperature" not in body and "top_k" not in body
+    assert body["top_p"] == 0.95
     assert body["stop_sequences"] == ["END"]
     assert body["tool_choice"]["disable_parallel_tool_use"] is True
     assert body["cache_control"] == {"type": "ephemeral"}
@@ -314,6 +317,16 @@ async def test_anthropic_maps_what_it_supports_and_drops_what_it_does_not():
     # Anthropic has no seed or penalties, so they are dropped rather than invented.
     for absent in ("seed", "frequency_penalty", "presence_penalty"):
         assert absent not in body
+
+
+async def test_anthropic_without_thinking_sends_sampling_within_its_range():
+    seen, client = capture({"content": [], "stop_reason": "end_turn", "usage": {}})
+    provider = AnthropicProvider(api_key="k", client=client)
+    await provider.complete(CompletionRequest(
+        model="claude-haiku-4-5", messages=[Message.user("x")], temperature=0.3,
+        top_k=40))
+    assert seen["body"]["temperature"] == 0.3 and seen["body"]["top_k"] == 40
+    assert "thinking" not in seen["body"]
 
 
 async def test_a_thinking_model_is_not_sent_sampling_it_would_reject():

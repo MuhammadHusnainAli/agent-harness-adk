@@ -41,6 +41,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - OpenAI `organization` / `project`; reasoning returned by DeepSeek, vLLM and
   OpenRouter is kept as thinking.
 
+**Generation parameters, configured properly everywhere**
+- `min_p`, `frequency_penalty`, `presence_penalty` and `repetition_penalty` join
+  `temperature`, `top_p`, `top_k`, `seed`, `effort`, `thinking` and
+  `thinking_budget` as first-class settings on `Agent`, `AgentVersion`,
+  `SubAgentSpec`, blueprints and `CompiledSpec`.
+- Values are range-checked when the agent is built (`validate_parameters`);
+  `CompletionRequest` enforces the same ranges.
+- `effort` gains `none` and `minimal`, and is mapped per model: Claude's
+  `output_config.effort`, OpenAI's `reasoning_effort`, Gemini 2.5 budgets fitted
+  to each model's range, Gemini 3 `thinkingLevel`, OpenRouter's `reasoning`
+  object, and `reasoning_effort` for gpt-oss and grok-3-mini on every host.
+- Each provider declares the sampling `parameters` it accepts (shown in the
+  catalog). A `ParameterPlan` records what is sent, dropped and adjusted, and
+  why; `provider.explain(request)` shows it with the exact payload, and each
+  decision is logged once.
+
 **Resilience, for every provider alike**
 - `RetryPolicy`: back-off, jitter, a retry count, a wall-clock ceiling, and
   `max_retry_after` — a server asking for a longer wait fails the call at once
@@ -63,6 +79,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Claude requests the API rejects are no longer sent: `temperature`/`top_k`
+  with extended thinking, `top_p` below 0.95 with thinking, `temperature` above
+  1, both `temperature` and `top_p`, a thinking budget at or above
+  `max_tokens` or below 1024, thinking with a forced `tool_choice`.
+- Thinking-only Claude models were not recognised under Bedrock/Vertex ids
+  (`us.anthropic.claude-opus-5`), so they were sent budgets and sampling.
+- OpenAI reasoning models were sent `stop`; Grok reasoning models were sent
+  penalties and `stop`.
+- Gemini 2.5 Pro was asked to switch thinking off; budgets outside a model's
+  range were sent unchanged; Gemini 3 was sent a budget instead of a level;
+  Gemini 2.0 was sent a thinking config.
 - Streaming never retried — not even a 429 on connect.
 - Vertex never retried anything.
 - Bedrock and Vertex streaming posted to `api.anthropic.com`'s path on the

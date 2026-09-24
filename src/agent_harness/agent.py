@@ -40,6 +40,7 @@ from .guardrails.checks import CompletionContext
 from .harness import Harness
 from .llm_providers import resolve_provider
 from .llm_providers.base import CompletionRequest, Provider
+from .llm_providers.parameters import GENERATION_PARAMETERS, validate_parameters
 from .memory.manager import MemoryManager
 from .memory.trace import Trace
 from .prompts import Prompt
@@ -132,6 +133,10 @@ class Agent:
         thinking_budget: int | None = None,
         top_p: float | None = None,
         top_k: int | None = None,
+        min_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
         seed: int | None = None,
         cache: bool | None = None,
         user: str | None = None,
@@ -181,7 +186,9 @@ class Agent:
             "model": model, "provider": provider, "tier": tier, "effort": effort,
             "temperature": temperature, "max_tokens": max_tokens,
             "thinking": thinking, "thinking_budget": thinking_budget,
-            "top_p": top_p, "top_k": top_k, "seed": seed, "cache": cache,
+            "top_p": top_p, "top_k": top_k, "min_p": min_p,
+            "frequency_penalty": frequency_penalty, "presence_penalty": presence_penalty,
+            "repetition_penalty": repetition_penalty, "seed": seed, "cache": cache,
             "user": user, "model_options": model_options,
             "tools": list(tools), "skills": skills,
             "subagents": list(subagents), "runtime_agents": runtime_agents,
@@ -215,6 +222,21 @@ class Agent:
             max_tokens = active.max_tokens or max_tokens
             max_steps = active.max_steps or max_steps
             thinking = active.thinking if active.thinking is not None else thinking
+            # The rest of the sampling vocabulary: a version sets what it names.
+            sampling = {"thinking_budget": thinking_budget, "top_p": top_p,
+                        "top_k": top_k, "min_p": min_p,
+                        "frequency_penalty": frequency_penalty,
+                        "presence_penalty": presence_penalty,
+                        "repetition_penalty": repetition_penalty, "seed": seed}
+            for key in sampling:
+                if getattr(active, key, None) is not None:
+                    sampling[key] = getattr(active, key)
+            thinking_budget, top_p, top_k, min_p = (
+                sampling["thinking_budget"], sampling["top_p"], sampling["top_k"],
+                sampling["min_p"])
+            frequency_penalty, presence_penalty = (sampling["frequency_penalty"],
+                                                   sampling["presence_penalty"])
+            repetition_penalty, seed = sampling["repetition_penalty"], sampling["seed"]
             compact_at = (active.compact_at if active.compact_at is not None
                           else compact_at)
             contract_retries = (active.contract_retries
@@ -240,6 +262,16 @@ class Agent:
         self.instructions = (instructions.render() if isinstance(instructions, Prompt)
                              else instructions)
         self.harness = harness or Harness()
+        # Checked now, so a bad value fails when the agent is built — not mid-run.
+        options = model_options or {}
+        validate_parameters(**{
+            "effort": effort, "temperature": temperature, "max_tokens": max_tokens,
+            "thinking": thinking, "thinking_budget": thinking_budget, "top_p": top_p,
+            "top_k": top_k, "min_p": min_p, "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "repetition_penalty": repetition_penalty, "seed": seed, "stop": list(stop),
+            **{k: v for k, v in options.items() if k in GENERATION_PARAMETERS},
+        })
         self.model, routed_effort = self.harness.router.pick(
             model=model, tier=tier, task=f"{name} {description}"
         )
@@ -252,8 +284,11 @@ class Agent:
         # hatch for anything these do not name.
         self.model_options: dict[str, Any] = {
             "thinking_budget": thinking_budget, "top_p": top_p, "top_k": top_k,
+            "min_p": min_p, "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "repetition_penalty": repetition_penalty,
             "seed": seed, "cache": cache, "user": user,
-            **(model_options or {}),
+            **options,
         }
         self.model_options = {k: v for k, v in self.model_options.items()
                               if v is not None}

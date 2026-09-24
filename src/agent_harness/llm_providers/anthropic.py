@@ -24,7 +24,8 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import CompletionRequest, Provider, ProviderField, sse_events
+from .base import CompletionRequest, Provider, ProviderField, normalise_model, sse_events
+from .parameters import ParameterPlan, nearest_effort
 from .resilience import classify
 
 # These take `thinking: {"type": "adaptive"}`; older ones still want budget_tokens.
@@ -47,6 +48,15 @@ _STREAM_ERROR_STATUS = {
     "timeout_error": 504, "authentication_error": 401, "permission_error": 403,
     "not_found_error": 404, "request_too_large": 413, "invalid_request_error": 400,
 }
+
+
+def _adaptive(model: str) -> bool:
+    """Models that size their own thinking — on any platform's spelling of the id."""
+    return normalise_model(model).startswith(_ADAPTIVE_THINKING)
+
+
+#: Claude's effort levels. `none` is handled by switching thinking off.
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 class AnthropicStream:
@@ -157,6 +167,67 @@ class AnthropicProvider(Provider):
     capabilities: ClassVar[frozenset[str]] = frozenset({
         "streaming", "tools", "vision", "thinking", "json_schema", "prompt_caching",
         "list_models"})
+    parameters: ClassVar[frozenset[str]] = frozenset({"temperature", "top_p", "top_k"})
+
+    def _plan(self, req: CompletionRequest, plan: ParameterPlan) -> None:
+        """Claude's rules, which the API enforces with a 400 if broken."""
+        model = normalise_model(req.model)
+        adaptive = _adaptive(req.model)
+
+        effort = plan.get("effort")
+        if effort == "none":
+            plan.drop("effort", "'none' means no thinking, and Claude's lowest effort "
+                                "is 'low'")
+            if plan.get("thinking"):
+                plan.drop("thinking", "effort='none' switches thinking off")
+        elif effort is not None and effort not in _EFFORTS:
+            plan.adjust("effort", nearest_effort(effort, _EFFORTS),
+                        f"Claude's effort levels are {', '.join(_EFFORTS)}")
+
+        # A budget on its own is a request to think.
+        if "thinking_budget" in plan and plan.get("thinking") is None \
+                and "effort" not in plan.dropped:
+            plan.set("thinking", True)
+        forced = req.tool_choice == "any" or isinstance(req.tool_choice, dict)
+        if plan.get("thinking") and forced:
+            plan.drop("thinking", "Claude cannot think when tool_choice forces a tool")
+        if plan.get("thinking") is False:
+            plan.values.pop("thinking")          # off is the default: nothing to send
+        thinking = bool(plan.get("thinking"))
+
+        if thinking and adaptive:
+            plan.drop("thinking_budget", f"{model} sizes its own thinking — use effort")
+        elif thinking:
+            max_tokens = plan.get("max_tokens", req.max_tokens)
+            budget = plan.get("thinking_budget")
+            if budget is None:
+                plan.set("thinking_budget", max(1024, min(max_tokens - 1, max_tokens // 2)))
+            elif budget < 1024:
+                plan.adjust("thinking_budget", 1024, "Claude's minimum thinking budget "
+                                                     "is 1024")
+            budget = plan.get("thinking_budget")
+            if budget >= max_tokens:
+                plan.adjust("max_tokens", budget + 1024,
+                            "max_tokens must exceed the thinking budget")
+        else:
+            plan.drop("thinking_budget", "thinking is off")
+
+        if adaptive:
+            for name in ("temperature", "top_p", "top_k"):
+                plan.drop(name, f"{model} rejects sampling settings")
+        elif thinking:
+            plan.drop("temperature", "not allowed with extended thinking")
+            plan.drop("top_k", "not allowed with extended thinking")
+            top_p = plan.get("top_p")
+            if top_p is not None and top_p < 0.95:
+                plan.adjust("top_p", 0.95, "with extended thinking top_p must be 0.95–1")
+        else:
+            temperature = plan.get("temperature")
+            if temperature is not None and temperature > 1.0:
+                plan.adjust("temperature", 1.0, "Claude's temperature range is 0–1")
+            if "temperature" in plan and "top_p" in plan:
+                plan.drop("top_p", "Claude takes temperature or top_p, not both — "
+                                   "temperature was kept")
 
     def _auth_headers(self) -> dict[str, str]:
         self._require_key()
@@ -229,28 +300,21 @@ class AnthropicProvider(Provider):
                 payload["tool_choice"] = {"type": "tool", "name": req.tool_choice["name"]}
             elif req.tool_choice == "auto":
                 payload["tool_choice"] = {"type": "auto"}
-        if req.stop:
-            payload["stop_sequences"] = req.stop
-
-        adaptive = req.model.startswith(_ADAPTIVE_THINKING)
-        thinking_on = bool(req.thinking)
-        if thinking_on:
-            if adaptive:
+        plan = self.plan_parameters(req)
+        payload["max_tokens"] = plan.get("max_tokens", req.max_tokens)
+        if plan.get("stop"):
+            payload["stop_sequences"] = plan.get("stop")
+        if plan.get("thinking"):
+            if _adaptive(req.model):
                 payload["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
-                budget = req.thinking_budget or max(
-                    1024, min(req.max_tokens - 1, req.max_tokens // 2))
-                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # Sampling is rejected outright by the thinking-only models, so it is sent
-        # only where it is accepted rather than being silently dropped by the API.
-        if not adaptive:
-            for field, key in (("temperature", "temperature"), ("top_p", "top_p"),
-                               ("top_k", "top_k")):
-                value = getattr(req, field)
-                if value is not None:
-                    payload[key] = value
-        if req.effort:
-            payload["output_config"] = {"effort": req.effort}
+                payload["thinking"] = {"type": "enabled",
+                                       "budget_tokens": plan.get("thinking_budget")}
+        for key in ("temperature", "top_p", "top_k"):
+            if key in plan:
+                payload[key] = plan.get(key)
+        if "effort" in plan:
+            payload["output_config"] = {"effort": plan.get("effort")}
         if req.response_schema:
             oc = payload.setdefault("output_config", {})
             oc["format"] = {"type": "json_schema", "schema": req.response_schema}

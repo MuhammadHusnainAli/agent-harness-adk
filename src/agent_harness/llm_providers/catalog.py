@@ -43,6 +43,7 @@ from .compatible import (
 from .fake import FakeProvider
 from .gemini import GeminiProvider
 from .openai import OpenAIProvider
+from .parameters import SAMPLING_PARAMETERS
 from .vertex import VertexGeminiProvider, VertexProvider
 
 __all__ = [
@@ -193,6 +194,10 @@ class ProviderSpec(BaseModel):
     class_name: str
     default_model: str = ""
     capabilities: list[str] = Field(default_factory=list)
+    #: The sampling parameters it accepts; the rest are dropped with a note.
+    #: `effort`, `thinking`, `thinking_budget`, `max_tokens` and `stop` are
+    #: understood by every provider and mapped to what each model takes.
+    parameters: list[str] = Field(default_factory=list)
     fields: list[ProviderField] = Field(default_factory=list)
     common_fields: list[ProviderField] = Field(default_factory=list)
     #: Models in the price table served by this provider.
@@ -231,6 +236,9 @@ class ProviderSpec(BaseModel):
             lines.append(f"  default  {self.default_model}")
         if self.capabilities:
             lines.append(f"  can      {', '.join(self.capabilities)}")
+        if self.parameters:
+            lines.append(f"  params   {', '.join(self.parameters)}, plus effort, thinking, "
+                         "max_tokens, stop")
         if self.fields:
             lines.append("  fields")
             for f in self.fields:
@@ -333,6 +341,7 @@ def _spec(key: str, cls: type[Provider]) -> ProviderSpec:
         class_name=cls.__name__,
         default_model=cls.default_model,
         capabilities=sorted(cls.capabilities),
+        parameters=[p for p in SAMPLING_PARAMETERS if p in cls.parameters],
         fields=list(cls.fields),
         common_fields=list(COMMON_FIELDS),
         models=sorted(m.id for m in MODELS.values() if m.provider == cls.name),

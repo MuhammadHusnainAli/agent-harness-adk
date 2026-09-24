@@ -5,13 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Literal
 
 from ..llm_providers.base import MODELS, model_info
+from ..llm_providers.parameters import Effort
 
 __all__ = ["Effort", "RouteRule", "ModelRouter"]
-
-Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 # A tier is a promise about capability, not a model id — so this stays portable.
 DEFAULT_TIERS: dict[str, str] = {

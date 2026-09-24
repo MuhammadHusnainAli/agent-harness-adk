@@ -49,6 +49,15 @@ class SubAgentSpec(BaseModel):
     max_steps: int = 12
     max_tokens: int = 8192
     temperature: float | None = None
+    thinking: bool | None = None
+    thinking_budget: int | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
+    seed: int | None = None
     output_schema: dict[str, Any] | None = None
     workspace: Literal["isolated", "shared", "none"] = "none"
     allow_shell: bool = False
