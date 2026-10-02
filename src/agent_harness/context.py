@@ -15,7 +15,8 @@ from typing import Any
 from .prompts import sections
 from .types import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
-__all__ = ["estimate_tokens", "ContextAssembler", "ContextCompactor"]
+__all__ = ["estimate_tokens", "ContextAssembler", "ContextCompactor",
+           "close_open_tool_calls"]
 
 Summarizer = Callable[[str], Awaitable[str]]
 
@@ -43,6 +44,37 @@ def conversation_tokens(messages: Iterable[Message]) -> int:
     return sum(message_tokens(m) for m in messages)
 
 
+def close_open_tool_calls(messages: list[Message]) -> list[Message]:
+    """Answer every tool call that never got a result.
+
+    A run that was stopped mid-step — a budget, a stop request — leaves an
+    assistant turn asking for tools and nothing after it. Providers reject a
+    conversation in that state, so a session picked back up from there would
+    fail on its first call. Each orphan gets a result saying it was interrupted.
+    """
+    out: list[Message] = []
+    for index, message in enumerate(messages):
+        out.append(message)
+        calls = message.tool_uses if message.role == "assistant" else []
+        if not calls:
+            continue
+        following = messages[index + 1] if index + 1 < len(messages) else None
+        answered = {b.tool_use_id for b in (following.content if following else [])
+                    if isinstance(b, ToolResultBlock)}
+        missing = [c for c in calls if c.id not in answered]
+        if not missing:
+            continue
+        blocks = [ToolResultBlock(tool_use_id=c.id, is_error=True,
+                                  content="[interrupted — this call did not finish]")
+                  for c in missing]
+        if answered and following is not None:
+            # Some were answered: the rest belong in that same turn.
+            following.content = [*blocks, *following.content]
+        else:
+            out.append(Message.tool_results(blocks))
+    return out
+
+
 class ContextAssembler:
     """Builds the system prompt. Stable parts first, so prompt caching works."""
 
@@ -51,12 +83,16 @@ class ContextAssembler:
         identity: str = "",
         *,
         instructions: str = "",
+        mode: str = "",
         skills: Any = None,
         memory: Any = None,
         extra: Iterable[str] = (),
         include_memory: bool = True,
     ) -> None:
         self.identity = identity
+        #: How the agent's mode works. Before the instructions, so that what
+        #: you wrote for this agent has the last word.
+        self.mode = mode
         self.instructions = instructions
         self.skills = skills
         self.memory = memory
@@ -80,6 +116,7 @@ class ContextAssembler:
 
         return sections(
             self.identity,
+            ("How you work", self.mode) if self.mode else None,
             self.instructions,
             skills_index,
             tool_note,

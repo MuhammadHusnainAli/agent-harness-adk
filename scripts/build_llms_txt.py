@@ -62,6 +62,12 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/09_governance_singapore_fintech.py",
      "Governance under Singapore's agentic framework: monitor then enforce, prompt "
      "injection, inherited authority, tool drift."),
+    ("examples/10_modes.py",
+     "Modes: a chat that keeps its thread, research with a checked source ledger, "
+     "and cowork that plans, asks, and hands back files."),
+    ("examples/11_sandboxes.py",
+     "Sandboxes: cowork inside a Docker container (or any other sandbox), with the "
+     "files it wrote handed back."),
 ]
 
 
@@ -129,7 +135,7 @@ def _own_methods(cls: type) -> list[tuple[str, Any]]:
 # Grouped the way the library is actually used, not alphabetically.
 GROUPS: list[tuple[str, list[str]]] = [
     ("Core", ["Agent", "Harness", "Orchestrator", "Plan", "Task", "Review",
-              "AgentVersion", "Blueprint", "AgentEntry"]),
+              "AgentVersion", "Blueprint", "AgentEntry", "Mode", "modes"]),
     ("Sub-agents", ["SubAgentSpec", "Bench", "SubAgentFactory", "SpecCompiler",
                     "CompiledSpec"]),
     ("Tools and skills", ["tool", "Tool", "ToolRegistry", "ToolContext", "Skill",
@@ -170,11 +176,14 @@ GROUPS: list[tuple[str, list[str]]] = [
                        "Checkpointer", "Replayer", "RecordingProvider",
                        "ReplayProvider", "DeliverableStore", "Workspace",
                        "WorkspaceBroker", "console_exporter", "jsonl_exporter"]),
+    ("Sandboxes", ["sandbox", "Sandbox", "SandboxWorkspace", "ExecResult",
+                   "register_sandbox", "available_sandboxes"]),
     ("Evaluation", ["Evaluator", "GoldenTask", "Expect", "EvalReport",
                     "TaskOutcome", "Comparison", "llm_judge"]),
     ("Context", ["ContextAssembler", "ContextCompactor", "estimate_tokens"]),
     ("Types", ["Message", "ModelResponse", "RunResult", "StreamEvent", "Usage",
-               "Artifact", "TextBlock", "ToolUseBlock", "ToolResultBlock"]),
+               "Artifact", "Todo", "Source", "TextBlock", "ToolUseBlock",
+               "ToolResultBlock"]),
     ("Errors", ["HarnessError", "ConfigurationError", "ProviderError",
                 "RateLimitError", "ToolError", "ToolNotFound", "PermissionDenied",
                 "BudgetExceeded", "GuardrailTripped", "MaxStepsExceeded",
@@ -196,12 +205,19 @@ def api_reference() -> str:
             if obj is None:
                 continue
             covered.add(name)
-            kind = "class" if inspect.isclass(obj) else "function"
+            kind = ("class" if inspect.isclass(obj)
+                    else "module" if inspect.ismodule(obj) else "function")
             signature = _signature(obj) if kind == "function" else ""
             rows.append(f"### `{name}{signature}`  ({kind})")
             summary = _summary(obj)
             if summary:
                 rows.append(f"{summary}")
+            if kind == "module":
+                members = [f"`{n}{_signature(getattr(obj, n))}`"
+                           for n in getattr(obj, "__all__", [])
+                           if inspect.isfunction(getattr(obj, n, None))]
+                if members:
+                    rows.append(f"Functions: {', '.join(members)}")
             if inspect.isclass(obj):
                 members = [f"`{n}{_signature(m)}`" for n, m in _own_methods(obj)]
                 if members:

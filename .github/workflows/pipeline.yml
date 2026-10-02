@@ -77,7 +77,7 @@ jobs:
       - run: uv run pytest -q
       - name: every example runs without an API key
         run: |
-          for example in examples/0*.py; do
+          for example in examples/[0-9]*.py; do
             echo "--- $example"
             (cd examples && uv run python "$(basename "$example")" > /dev/null)
           done

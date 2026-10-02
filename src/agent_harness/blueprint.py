@@ -20,6 +20,7 @@
 
     agents:
       support:
+        mode: chat
         instructions: "{house_style}"
         tools: [order_status, lookup]
         subagents: [researcher]
@@ -70,6 +71,8 @@ class AgentEntry(BaseModel):
     instructions: str = ""
     description: str = ""
     model: str | None = None
+    mode: str | dict[str, Any] | None = None
+    depth: str | None = None
     tier: str | None = None
     effort: str | None = None
     temperature: float | None = None
@@ -95,8 +98,10 @@ class AgentEntry(BaseModel):
     runtime_agents: bool | str | None = None
     max_runtime_agents: int | None = None
     compact_at: int | float | None = None
-    workspace: bool | str | None = None
-    allow_shell: bool = False
+    #: true for a folder; a sandbox by name or URL ("docker", "e2b://template");
+    #: or a mapping — {sandbox: daytona, image: python:3.12-slim}.
+    workspace: bool | str | dict[str, Any] | None = None
+    allow_shell: bool | None = None
     output_schema: dict[str, Any] | None = None
     version: str | None = None
     versions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -240,7 +245,8 @@ class Blueprint(BaseModel):
             "tools": self._tools(entry.tools, registry),
             "subagents": [self._subagent(n) for n in entry.subagents],
         }
-        for field in ("model", "tier", "effort", "temperature", "max_tokens",
+        for field in ("model", "mode", "depth", "tier", "effort", "temperature",
+                      "max_tokens",
                       "thinking", "thinking_budget", "top_p", "top_k", "min_p",
                       "frequency_penalty", "presence_penalty", "repetition_penalty",
                       "seed", "max_steps", "runtime_agents", "max_runtime_agents",

@@ -20,6 +20,7 @@ MCP servers and the runtime rails as the job needs them.
 
 from __future__ import annotations
 
+from . import modes
 from .agent import Agent
 from .blueprint import AgentEntry, Blueprint
 from .context import ContextAssembler, ContextCompactor, estimate_tokens
@@ -155,6 +156,7 @@ from .memory import (
     available_backends,
     memory_provider,
 )
+from .modes import Mode
 from .orchestrator import Orchestrator, Plan, Review, Task
 from .prompts import Prompt, PromptLibrary
 from .runtime import (
@@ -195,6 +197,14 @@ from .runtime import (
 )
 from .runtime.permissions import Rule as PermissionRule
 from .runtime.router import RouteRule
+from .sandboxes import (
+    ExecResult,
+    Sandbox,
+    SandboxWorkspace,
+    available_sandboxes,
+    register_sandbox,
+    sandbox,
+)
 from .skills import Skill, SkillRegistry
 from .spec import CompiledSpec, SpecCompiler
 from .subagents import Bench, SubAgentFactory, SubAgentSpec
@@ -204,8 +214,10 @@ from .types import (
     Message,
     ModelResponse,
     RunResult,
+    Source,
     StreamEvent,
     TextBlock,
+    Todo,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
@@ -244,6 +256,11 @@ __all__ = [
     "Plan",
     "Task",
     "Review",
+    # modes
+    "modes",
+    "Mode",
+    "Todo",
+    "Source",
     # sub-agents
     "SubAgentSpec",
     "AgentVersion",
@@ -412,6 +429,13 @@ __all__ = [
     "Checkpointer",
     "Workspace",
     "WorkspaceBroker",
+    # sandboxes
+    "sandbox",
+    "Sandbox",
+    "SandboxWorkspace",
+    "ExecResult",
+    "register_sandbox",
+    "available_sandboxes",
     # context
     "ContextAssembler",
     "ContextCompactor",

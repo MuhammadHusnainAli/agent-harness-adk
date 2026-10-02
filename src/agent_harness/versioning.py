@@ -38,7 +38,8 @@ __all__ = ["AgentVersion"]
 #: the harness, the provider, the memory backend — is infrastructure, shared by
 #: every version so switching one is cheap and comparable.
 OVERRIDABLE = {
-    "instructions", "description", "model", "tier", "effort", "temperature",
+    "instructions", "description", "model", "mode", "depth", "tier", "effort",
+    "temperature",
     "max_tokens", "thinking", "thinking_budget", "top_p", "top_k", "min_p",
     "frequency_penalty", "presence_penalty", "repetition_penalty", "seed",
     "max_steps", "tool_choice", "stop",
@@ -59,6 +60,10 @@ class AgentVersion(BaseModel):
     instructions: str | None = None
     description: str | None = None
     model: str | None = None
+    #: chat, research or cowork, and its depth. A version that names a mode
+    #: takes that mode's depth too; one that names only a depth keeps the mode.
+    mode: str | dict[str, Any] | None = None
+    depth: str | None = None
     tier: str | None = None
     effort: str | None = None
     temperature: float | None = None

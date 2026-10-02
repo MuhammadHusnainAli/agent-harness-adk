@@ -73,8 +73,15 @@ These are known, documented behaviours, not vulnerabilities:
   complete. `Guardrails` warns on known patterns; it does not claim to stop a
   determined injection. Put the security boundary in the policy gate and the
   tool allowlist, not in the prompt.
-- **`shell` or `fs_write` doing what they say.** They are gated (`shell` needs
-  `allow_shell=True` *and* approval), and inside a workspace, by design.
+- **`shell` or `fs_write` doing what they say.** They are gated (on your own
+  machine `shell` needs `allow_shell=True` *and* approval), and inside a
+  workspace, by design.
+- **Commands running without approval inside a sandbox.** A sandbox
+  (`agent_harness.sandboxes`) is its own machine, so its `shell` and
+  `run_python` do not ask. That is deliberate. A way for a command to get *out*
+  of a Docker sandbox started with the default options is a vulnerability; what
+  `network=True`, `mount=`, extra `args=`, or marking an `ssh` or `command`
+  sandbox `isolated=True` then lets it reach is your decision.
 - **A provider or MCP server you configured behaving badly.** Those are your
   trust decisions.
 
@@ -82,8 +89,9 @@ These are known, documented behaviours, not vulnerabilities:
 
 - Give every agent the smallest tool allowlist that can finish its task. Default
   `PolicyGate` to `deny` for anything that writes, spends or sends.
-- Run untrusted work in an isolated workspace — `WorkspaceBroker(backend="docker")`
-  where the command itself must be contained.
+- Run untrusted work in a sandbox — `sandbox("docker")`, or a hosted one — where
+  the command itself is contained. Leave the network off unless the task needs
+  it, and mount only the folder the task is about.
 - Set a `Budget`. An agent loop with no spend ceiling is an open tap.
 - Treat everything coming back from a tool, a document or an MCP server as
   untrusted data, never as instructions.

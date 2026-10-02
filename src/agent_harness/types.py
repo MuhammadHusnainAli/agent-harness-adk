@@ -29,6 +29,8 @@ __all__ = [
     "ToolCall",
     "ToolOutcome",
     "Artifact",
+    "Todo",
+    "Source",
     "RunResult",
     "new_id",
 ]
@@ -190,7 +192,7 @@ class StreamEvent(BaseModel):
 
     type: Literal[
         "run_start", "step_start", "text", "thinking", "tool_call", "tool_result",
-        "step_end", "run_end", "error", "delegation",
+        "step_end", "run_end", "error", "delegation", "progress",
     ]
     text: str = ""
     agent: str = ""
@@ -240,6 +242,40 @@ class Artifact(BaseModel):
     ts: float = Field(default_factory=time.time)
 
 
+TodoStatus = Literal["pending", "in_progress", "done", "skipped"]
+
+
+class Todo(BaseModel):
+    """One item on the list an agent keeps while it works through a task."""
+
+    content: str
+    status: TodoStatus = "pending"
+    note: str = ""
+
+    @property
+    def open(self) -> bool:
+        return self.status in ("pending", "in_progress")
+
+    def line(self) -> str:
+        mark = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]",
+                "skipped": "[-]"}[self.status]
+        return f"{mark} {self.content}{f' — {self.note}' if self.note else ''}"
+
+
+class Source(BaseModel):
+    """Something an agent read and relied on. `id` is the number it is cited by."""
+
+    id: int
+    ref: str
+    title: str = ""
+    finding: str = ""
+    agent: str = ""
+
+    def line(self) -> str:
+        label = f"{self.title} — {self.ref}" if self.title else self.ref
+        return f"[{self.id}] {label}"
+
+
 class RunResult(BaseModel):
     """The one object a caller gets back from `agent.run()`."""
 
@@ -261,6 +297,11 @@ class RunResult(BaseModel):
     budget_exceeded: str | None = None
     violations: list[str] = Field(default_factory=list)
     children: list[RunResult] = Field(default_factory=list)
+    #: The mode the agent ran in, and what that mode kept while it worked.
+    mode: str = ""
+    depth: str = ""
+    todos: list[Todo] = Field(default_factory=list)
+    sources: list[Source] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:

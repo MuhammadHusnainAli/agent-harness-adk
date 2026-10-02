@@ -44,6 +44,9 @@ class SubAgentSpec(BaseModel):
     tools: list[str] | None = None          # glob allowlist; None inherits the parent's
     skills: list[str] | None = None
     model: str | None = None
+    #: chat, research or cowork — and how hard it works at it. See `modes`.
+    mode: str | dict[str, Any] | None = None
+    depth: str | None = None
     tier: str | None = None
     effort: str | None = None
     max_steps: int = 12

@@ -62,6 +62,8 @@ class AIInventory:
             "provider": provider_name,
             "region": getattr(region, "jurisdiction", None) or "unknown",
             "version": getattr(agent, "version", ""),
+            "mode": str(getattr(agent, "mode", None) or ""),
+            "depth": getattr(agent, "depth", ""),
             "tools": tools,
             "skills": sorted(agent.skills.names) if agent.skills else [],
             "subagents": sorted(agent.subagents),

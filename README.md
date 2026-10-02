@@ -85,6 +85,225 @@ function is called. `await agent.run(...)` is the real implementation;
 
 ---
 
+## Modes: chat, research, cowork
+
+An agent with no mode is the plain loop, exactly as you configured it. A mode is
+a way of working laid over that loop, chosen where the agent is created:
+
+```python
+from agent_harness import Agent, Workspace, modes
+
+pal       = Agent("pal", mode="chat")
+analyst   = Agent("analyst", mode="research", depth="deep", tools=[search, http_fetch])
+colleague = Agent("colleague", mode="cowork", workspace=Workspace("./project"))
+```
+
+| mode | what it is | what the harness adds |
+|---|---|---|
+| `chat` | a conversation | the thread is kept between runs — the second `run()` is the second turn |
+| `research` | a report someone can check | a todo list of the questions, a **source ledger**, citations checked against it, the source list appended, `report.md` kept as an artefact |
+| `cowork` | a task handed over and carried through | a todo list it may not leave open, a workspace, `parse_document`, questions to you, helpers in parallel, every file it wrote handed back |
+
+`depth` is the second dial. The name is also the model tier it asks the router
+for — leave it out and the agent works at `balanced` on whatever model the
+router would have picked anyway.
+
+| | `fast` | `balanced` | `deep` |
+|---|---|---|---|
+| `chat` steps | 6 | 12 | 20 |
+| `research` steps · sources needed · helpers | 12 · 2 · 0 | 30 · 4 · 3 | 60 · 8 · 6 |
+| `cowork` steps · helpers | 25 · 0 | 60 · 3 | 120 · 8 |
+
+A mode only fills in what you left unset — `Agent(mode="cowork", max_steps=10)`
+takes ten steps, and `model=` is never overridden. To tune a mode itself, build it:
+
+```python
+Agent("analyst", mode=modes.research("deep", min_sources=12, helpers=4))
+Agent("colleague", mode=modes.cowork("balanced", ask=ask_me, python=True))
+```
+
+**Chat** keeps the conversation on the agent. `agent.new_session()` starts a
+fresh one; `session="..."` picks an old one back up. A run that was cut off
+mid-step — a budget, a stop — no longer poisons the thread: the tool calls it
+left unanswered are closed before the next turn is sent.
+
+**Research** makes the report checkable rather than asking the model to be
+careful:
+
+```python
+result = await analyst.run("How did Q3 go, and what is expected for Q4?")
+
+result.output       # "...revenue was 4.2M [1]...\n\n## Sources\n- [1] Q3 results — https://..."
+result.sources      # [Source(id=1, ref="https://...", finding="Q3 revenue 4.2M", agent="analyst")]
+result.violations   # [] — or what the report still lacks
+```
+
+- The agent calls `record_source(ref, finding)` for everything it relies on and
+  gets back the number to cite. A `ref` that nothing in the run actually
+  returned — no tool result, no tool argument, not the task — is refused, so a
+  source cannot be invented after the fact (`verify_sources=False` turns that off).
+- A citation to a number that was never recorded sends the report back. So does
+  having fewer sources than the depth requires, or citing none of them.
+- Helpers spun up for parallel reading write in the same ledger, so `[4]` means
+  one thing across the whole run.
+- With nothing to read with — no tool, no sub-agent — the run fails before the
+  first model call, not after a report written from memory.
+
+**Cowork** is the long one. Give it a folder and a task:
+
+```python
+async def ask_me(question: str, options: list[str]) -> str:
+    return await my_ui.prompt(question, options)       # sync works too
+
+colleague = Agent("colleague", mode=modes.cowork("deep", ask=ask_me),
+                  workspace=Workspace("./project"))
+result = await colleague.run("Turn the interview notes into a findings deck outline.")
+
+result.todos        # [Todo(content="Read the notes", status="done"), ...]
+result.artifacts    # every file created or changed in the workspace, with its path
+```
+
+- `todo_write` is the plan, and it is binding: the run may not finish while an
+  item is pending or in progress. Dropping one means marking it `skipped` with a
+  note saying why.
+- Without an `ask` handler there is no `ask_user` tool, and the agent is told to
+  make the reasonable assumption and say what it assumed.
+- `python=True` adds `run_python` in the workspace. On this machine it asks for
+  approval on every call, like the shell — a mode never loosens the permission
+  gate. Give it a [sandbox](#sandboxes-somewhere-else-to-work) and it has a shell
+  it can simply use.
+- The conversation is kept, so "now make it shorter" works on the same files.
+
+Three things hold in every mode:
+
+- **Unfinished work is sent back, then delivered honestly.** What a mode requires
+  is retried up to `retries` times (two by default). If it still falls short the
+  answer is returned with `result.violations` naming what is missing — not turned
+  into an error.
+- **The last step is for handing over.** On its final allowed step the model is
+  told so and cannot call a tool, so a long run ends with a hand-over instead of
+  `MaxStepsExceeded` and a tool result nobody read.
+- **The plan survives compaction.** The todo list and the ledger are pinned, so a
+  run that compresses its context still knows what is left and which number means
+  which source.
+
+Modes are declarable everywhere an agent is: `mode:` and `depth:` in a blueprint
+or a `SubAgentSpec`, and in a version — `versions={"v2": {"mode": "research",
+"depth": "deep"}}` — so a way of working can be evaluated against the old one.
+Under governance, an `identity.tools` allowlist needs `"tag:mode"` for the todo
+list and the ledger. `modes.register_mode(name, factory)` adds one of your own.
+
+## Sandboxes: somewhere else to work
+
+A workspace is a folder on this machine. A sandbox is a workspace that is its
+own machine — and it goes wherever a workspace does:
+
+```python
+from agent_harness import Agent, sandbox
+
+Agent("colleague", mode="cowork", workspace=sandbox("docker"))
+Agent("colleague", mode="cowork", workspace=sandbox("e2b", template="base"))
+Agent("colleague", mode="cowork", workspace="docker://node:22")      # by URL
+```
+
+| name | what it is | needs |
+|---|---|---|
+| `docker`, `podman` | a long-lived container; `runtime="runsc"` for gVisor | the CLI |
+| `kubernetes` | a pod, created or attached to | `kubectl` |
+| `ssh` | a machine you can already reach | `ssh` |
+| `e2b` | a Firecracker micro-VM | `pip install e2b`, `E2B_API_KEY` |
+| `daytona` | a sandbox from an image or snapshot | `pip install daytona`, `DAYTONA_API_KEY` |
+| `modal` | a container on Modal | `pip install modal`, a Modal token |
+| `command` | anything you can put in front of `sh -c` — nsjail, bubblewrap, firejail, `lxc exec` | — |
+
+```python
+sandbox("docker", image="python:3.12-slim")                 # no network, 2 CPUs, 2 GB
+sandbox("docker", image="node:22", mount="./project", network=True)
+sandbox("kubernetes", image="python:3.12-slim", namespace="agents")
+sandbox("ssh", host="agent@build-7", key="~/.ssh/agent")
+sandbox("daytona", image="python:3.12-slim", network=False)
+sandbox("modal", image="python:3.12-slim", cpu=2, memory=4096)
+sandbox("e2b", sandbox_id="i1a2b3")                         # one already running
+```
+
+Everything that works on a folder works in one, unchanged: the file tools,
+`shell`, `run_python`, `parse_document`, the chart and report tools, and cowork
+handing back the files it wrote — which are brought down to this machine, so
+they outlive the sandbox they were written in.
+
+- **It starts on first use and is stopped for you.** `await harness.aclose()`
+  stops every sandbox an agent was given; `async with sandbox(...) as ws:` does
+  it sooner. Each one also has a lifetime (`ttl`) enforced by the platform
+  itself, so one orphaned by a crash does not run — or bill — for ever. A
+  sandbox you attached to by id is left running.
+- **Inside one, the shell does not ask.** On this machine `shell` and
+  `run_python` are opt-in and ask for approval on every call. In a sandbox they
+  are there and they run: a command can only hurt the sandbox, and asking
+  before each one would make it pointless. `allow_shell=False` takes the shell
+  away; `PolicyGate(ask=["shell"])` puts the question back. `ssh` and `command`
+  do not claim to be isolated unless you say `isolated=True`.
+- **Docker starts closed.** No network, a CPU, memory and process limit, no
+  privilege escalation, and the container removes itself. `mount=` works in a
+  folder of yours, as you, so the files it leaves are yours and not root's. A
+  Kubernetes pod is created with no service-account token.
+- **A sandbox that is not ready says what is missing** — the package to
+  install, the key to set. A cowork run finds out at its start, before any model
+  call is paid for; any other agent finds out at its first file or shell call.
+  To find out ahead of time:
+
+```python
+from agent_harness import available_sandboxes
+
+available_sandboxes()      # {'docker': True, 'e2b': False, 'ssh': True, ...}
+report = await sandbox("docker").check()
+report["ok"], report["steps"]     # start · exec · write and read · list · detect changes · delete
+```
+
+```bash
+agent-harness sandboxes                              # what is ready, what each needs
+agent-harness sandboxes docker://alpine --check      # start one and prove it works
+agent-harness run "build it" --mode cowork --sandbox docker --workspace ./project
+```
+
+To give every agent and sub-agent its own, set it once on the harness. A
+sub-agent whose spec says `workspace: isolated` then gets a sandbox to itself:
+
+```python
+harness = Harness(workspaces=WorkspaceBroker(sandbox="e2b", template="base"))
+```
+
+In a blueprint it is `workspace: docker`, or
+`workspace: {sandbox: daytona, image: python:3.12-slim}`.
+
+**Your own sandbox is one method.** Reading, writing, listing and noticing what
+changed are all derived from `exec`, in shell that runs on busybox as well as
+GNU, so a new backend works the day it can run a command:
+
+```python
+from agent_harness import ExecResult, Sandbox, register_sandbox
+
+class MySandbox(Sandbox):
+    name = "mine"
+
+    async def _start(self):                       # optional
+        self.vm = await my_platform.create()
+
+    async def _exec(self, command, *, cwd, env, timeout):
+        done = await self.vm.run(self.script(command, cwd=cwd, env=env), timeout)
+        return ExecResult(done.code, done.stdout, done.stderr)
+
+    async def _stop(self):                        # optional
+        await self.vm.destroy()
+
+register_sandbox("mine", "myapp.sandboxes", "MySandbox")
+Agent("colleague", mode="cowork", workspace="mine")
+```
+
+Docker is tested against a real container. E2B, Daytona and Modal are driven
+through their own SDKs and tested against stand-ins for them, and Kubernetes and
+SSH against a recorded command line — so before relying on one, run
+`agent-harness sandboxes <name> --check` with your credentials.
+
 ## Tools
 
 ```python
@@ -119,10 +338,10 @@ Built-ins in `agent_harness.toolkits`:
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
-| `make_python_tool` | run code in the workspace — asks for approval every time |
+| `make_python_tool` | run code in the workspace — asks for approval every time, unless the workspace is a sandbox |
 
 A workspace brings `fs_read`, `fs_write`, `fs_list`, `fs_delete` and — only when
-you ask for it — `shell`.
+you ask for it — `shell`. A sandbox is a workspace too, and comes with its shell.
 
 ## Skills
 
@@ -703,14 +922,15 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | `RecordingProvider` / `ReplayProvider` | record a run once, reproduce it exactly with no network and no spend |
 | `DeliverableStore` | the documents and reports a run produced, versioned and digested |
 | `SessionStore` | resume, fork or branch a run; a long job survives a restart |
-| `WorkspaceBroker` | a jailed directory per sub-agent (or a shared one for handovers), local or Docker |
+| `WorkspaceBroker` | a jailed directory per sub-agent (or a shared one for handovers) — or a sandbox each: Docker, E2B, Daytona, Modal, a pod |
 | `ConcurrencyScheduler` | semaphore, queue, backpressure, peak tracking |
 | `ModelRouter` | per-task model and effort tier instead of one model for everything |
 | `SpecCompiler` | a sub-agent blueprint → the exact provider payload, inspectable before you spend |
 
 Path safety is enforced, not clamped: a workspace tool given `../../etc/passwd`
-refuses rather than resolving it. `shell` is absent unless the workspace was
-created with `allow_shell=True`, and even then it asks for approval.
+refuses rather than resolving it. On this machine `shell` is absent unless the
+workspace was created with `allow_shell=True`, and even then it asks for
+approval. Only a sandbox — its own machine — runs commands without asking.
 
 ## Governance: the laws your agents run under
 
@@ -1161,6 +1381,8 @@ async for event in agent.stream("Summarise the incident"):
         print(event.text, end="", flush=True)
     elif event.type == "tool_result":
         print(f"\n· {event.data['tool']}")
+    elif event.type == "progress":       # a mode's todo list or ledger changed
+        print(f"\n· {event.text}", event.data["todos"])
     elif event.type == "run_end":
         result = event.data["result"]
 ```
@@ -1202,6 +1424,10 @@ accordingly. The harness's own suite is 296 tests and runs in half a second.
 ```bash
 agent-harness run "summarise this incident" --tools --stream --state .harness
 agent-harness chat --skills ./skills --state .harness --approve
+agent-harness run "how did Q3 go?" --mode research --depth deep --tools
+agent-harness chat --mode cowork --workspace ./project --approve
+agent-harness run "build it" --mode cowork --sandbox docker://node:22
+agent-harness sandboxes docker --check
 agent-harness models
 agent-harness sessions --state .harness
 agent-harness journal --state .harness

@@ -6,7 +6,76 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+**Modes — `Agent(mode=..., depth=...)`**
+- `mode="chat" | "research" | "cowork"`, chosen where the agent is created, and
+  `depth="fast" | "balanced" | "deep"` for how hard it works. An agent with no
+  mode is unchanged. A mode only fills in what was left unset; `agent_harness.modes`
+  builds a tuned one (`modes.research("deep", min_sources=12)`), and
+  `modes.register_mode` adds your own.
+- **chat** keeps the conversation between runs; `Agent.new_session()` starts a
+  new one.
+- **research** keeps a source ledger: `record_source` returns the number to cite,
+  refuses a source nothing in the run returned, and the report is sent back for
+  a citation to nothing, too few sources, or none cited. The source list is
+  appended from the ledger and the report kept as `report.md`. Helpers share the
+  lead's ledger.
+- **cowork** keeps a binding todo list (`todo_write`), works in a workspace with
+  `parse_document`, can put questions to a handler (`ask_user`), spins up helpers
+  at `balanced` and `deep`, and hands back every file it created or changed as
+  an artefact.
+- `RunResult.mode`, `.depth`, `.todos` and `.sources`; `Todo` and `Source` types;
+  a `progress` stream event and journal entry when the list or ledger changes.
+- `mode:` / `depth:` in blueprints, `SubAgentSpec` and `AgentVersion`; the
+  governance inventory records them.
+- `agent-harness run|chat --mode --depth --workspace`.
+- `Workspace.snapshot()` and `Workspace.changed(since)`.
+- `examples/10_modes.py`.
+
+**Sandboxes — `agent_harness.sandboxes`**
+- `sandbox(name_or_url, **options)` returns a workspace that lives in a sandbox:
+  `docker` and `podman` (a long-lived container, `runtime=` for gVisor or Kata,
+  `mount=` to work in a host folder), `kubernetes` (a pod, created or attached
+  to), `ssh`, `e2b`, `daytona`, `modal`, and `command` for anything that can be
+  put in front of `sh -c`. `Agent(workspace=...)` takes one, or its name, URL or
+  mapping; so do blueprints.
+- `Sandbox`: a backend implements `_exec`, and reading, writing, listing and
+  change detection are derived from it in shell that runs on busybox and GNU.
+  `register_sandbox` names your own.
+- `WorkspaceBroker(sandbox=..., **options)` gives every agent and isolated
+  sub-agent its own sandbox; `Harness.aclose()` stops them all.
+- `SandboxWorkspace.check()`, `available_sandboxes()`, and
+  `agent-harness sandboxes [name] [--check]`; `--sandbox` on `run` and `chat`.
+- Every `Workspace` operation has an async twin (`aread`, `awrite`, `alistdir`,
+  `aremove`, `aexists`, `asnapshot`, `achanged`, `materialize`, `aclose`), which
+  is what the tools now call.
+- `examples/11_sandboxes.py`.
+
+### Changed
+
+- In a mode, the final allowed step tells the model it is the last and disables
+  tool calls, so the run ends with a hand-over rather than `MaxStepsExceeded`.
+- A todo list and source ledger are pinned through context compaction.
+- `agent-harness chat`: `/new` starts a session with its own id instead of
+  overwriting the previous one.
+- `DeliverableStore.put` keeps an artefact that has a file but no text (an
+  image, a large file) by its bytes, rather than storing it empty.
+- Inside a sandbox that is its own machine, `shell` is present and neither it
+  nor `run_python` asks for approval. On a local workspace nothing changes: the
+  shell is opt-in and both ask every time.
+- `Agent(allow_shell=...)` and a blueprint's `allow_shell:` default to unset
+  rather than `False`, so a sandbox keeps its shell unless told otherwise.
+- `WorkspaceBroker` no longer creates a temporary directory until a workspace is
+  asked for. `Harness.aclose()` awaits `WorkspaceBroker.aclose()`.
+- The workspace tools, `run_python`, `parse_document`, `render_chart` and
+  `write_report` are now async, and go through the workspace's async methods.
+
+### Fixed
+
+- Resuming a session whose last run was stopped mid-step (a budget, a stop
+  request) sent a tool call with no result, which providers reject. Unanswered
+  tool calls are now closed when the history is picked back up.
 
 ## [0.1.4] — 2026-09-24
 

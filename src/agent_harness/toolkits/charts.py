@@ -328,7 +328,7 @@ def make_chart_tool(workspace: Any = None, *, name: str = "render_chart") -> Too
     """A chart tool for an agent. With a workspace, it writes the file too."""
 
     @tool(name=name, tags=["builtin", "chart"])
-    def render_chart(kind: str, title: str, data: dict[str, Any],
+    async def render_chart(kind: str, title: str, data: dict[str, Any],
                      path: str = "", labels: list[str] | None = None,
                      subtitle: str = "") -> str:
         """Render a chart as SVG.
@@ -350,7 +350,7 @@ def make_chart_tool(workspace: Any = None, *, name: str = "render_chart") -> Too
             raise ToolError(f"unknown chart kind {kind!r}; use 'bar' or 'line'",
                             tool=name)
         if path and workspace is not None:
-            workspace.write(path, svg)
+            await workspace.awrite(path, svg)
             return f"wrote {path} ({len(svg)} bytes)"
         return svg
 
@@ -361,7 +361,7 @@ def make_report_tool(workspace: Any = None, *, name: str = "write_report") -> To
     """A report tool for an agent. With a workspace, it writes the file too."""
 
     @tool(name=name, tags=["builtin", "report"])
-    def write_report(title: str, sections: list[dict[str, str]], summary: str = "",
+    async def write_report(title: str, sections: list[dict[str, str]], summary: str = "",
                      path: str = "") -> str:
         """Assemble a markdown report.
 
@@ -374,7 +374,7 @@ def make_report_tool(workspace: Any = None, *, name: str = "write_report") -> To
         pairs = [(s.get("heading", ""), s.get("body", "")) for s in sections]
         text = render_report(title, pairs, summary=summary)
         if path and workspace is not None:
-            workspace.write(path, text)
+            await workspace.awrite(path, text)
             return f"wrote {path} ({len(text)} characters)"
         return text
 

@@ -190,7 +190,7 @@ def make_document_tool(workspace: Any = None, *, name: str = "parse_document") -
     """A document-parsing tool. With a workspace, paths resolve inside its jail."""
 
     @tool(name=name, tags=["builtin", "documents"], cacheable=True)
-    def parse_document_tool(path: str, max_pages: int = 50) -> dict[str, Any]:
+    async def parse_document_tool(path: str, max_pages: int = 50) -> dict[str, Any]:
         """Read a document and return its text.
 
         Handles text, Markdown, CSV, TSV, JSON, JSONL, HTML and XML directly;
@@ -200,7 +200,10 @@ def make_document_tool(workspace: Any = None, *, name: str = "parse_document") -
             path: the file to read.
             max_pages: for PDFs, how many pages to read.
         """
-        target = workspace.resolve(path) if workspace is not None else Path(path)
+        # From a sandbox the file is brought down first; locally it is read
+        # where it lies.
+        target = (await workspace.materialize(path) if workspace is not None
+                  else Path(path))
         return parse_document(target, max_pages=max_pages)
 
     return parse_document_tool

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..guardrails import AgentGuardrails
 from ..llm_providers.base import Provider
+from ..modes import LEAD
 from ..runtime.permissions import PolicyGate
 from ..types import new_id
 from .spec import SubAgentSpec
@@ -23,7 +24,7 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
     # orchestration-only ones. Delegation never cascades by default.
     if spec.tools is None:
         inherited = [t for t in parent.tools
-                     if "delegation" not in t.tags and "memory" not in t.tags]
+                     if not t.tags & {"delegation", "memory", LEAD}]
     else:
         inherited = list(parent.tools.select(spec.tools))
 
@@ -33,13 +34,21 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
                             ask=spec.ask, deny=spec.deny, approver=policy.approver,
                             audit=policy.audit)
 
-    workspace: Any = False
+    # A mode decides the two things a spec has no way to leave unsaid — the step
+    # ceiling and the workspace — unless the spec said them itself.
+    said = spec.model_fields_set
+    moded = spec.mode is not None
+    workspace: Any = None if moded and "workspace" not in said else False
     if spec.workspace == "isolated":
         workspace = parent.harness.workspaces.acquire(f"{spec.name}-{new_id()}")
-        workspace.allow_shell = spec.allow_shell
     elif spec.workspace == "shared":
         workspace = parent.harness.workspaces.shared()
-        workspace.allow_shell = spec.allow_shell
+    # A sandbox comes with its shell; a folder on this machine has one only if
+    # the spec asked.
+    allow_shell: bool | None = spec.allow_shell
+    if "allow_shell" not in said and (workspace is None
+                                      or getattr(workspace, "isolated", False)):
+        allow_shell = None
 
     guardrails = AgentGuardrails.from_dict(spec.guardrails)
 
@@ -59,6 +68,8 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
         instructions=spec.instructions,
         description=spec.description,
         model=spec.model,
+        mode=spec.mode,
+        depth=spec.depth,
         tier=spec.tier,
         effort=spec.effort,
         temperature=spec.temperature,
@@ -72,7 +83,7 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
         repetition_penalty=spec.repetition_penalty,
         seed=spec.seed,
         max_tokens=spec.max_tokens,
-        max_steps=spec.max_steps,
+        max_steps=None if moded and "max_steps" not in said else spec.max_steps,
         tools=inherited,
         skills=skills,
         memory=spec.memory,
@@ -82,7 +93,7 @@ def build_agent(spec: SubAgentSpec, parent: Any) -> Any:
         identity=spec.identity,
         budget=spec.budget,
         workspace=workspace,
-        allow_shell=spec.allow_shell,
+        allow_shell=allow_shell,
         output_type=output_type,
         persist_session=False,
     )

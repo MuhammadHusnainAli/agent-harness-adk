@@ -13,6 +13,7 @@ from . import __version__
 from .agent import Agent
 from .harness import Harness
 from .llm_providers.base import MODELS
+from .modes import DEPTHS, MODES
 from .runtime.permissions import console_approver
 from .runtime.tracing import console_exporter
 
@@ -28,22 +29,76 @@ def _harness(args: argparse.Namespace) -> Harness:
     return harness
 
 
+async def _console_ask(question: str, options: list[str]) -> str:
+    """Put an agent's question to whoever is at the terminal."""
+    choices = "".join(f"\n  {n}. {o}" for n, o in enumerate(options, 1))
+    answer = (await asyncio.to_thread(input, f"\n? {question}{choices}\n> ")).strip()
+    if answer.isdigit() and 0 < int(answer) <= len(options):
+        return options[int(answer) - 1]
+    return answer
+
+
 def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
     tools: list[Any] = []
     if args.tools:
         from .toolkits import basic_tools, http_fetch
         tools = [*basic_tools(), http_fetch]
+    mode: Any = args.mode
+    if mode == "cowork" and sys.stdin.isatty():
+        from . import modes
+
+        mode = modes.cowork(args.depth, ask=_console_ask)
+    workspace: Any = None
+    if args.sandbox:
+        from .sandboxes import sandbox
+
+        options: dict[str, Any] = {}
+        if args.workspace:
+            # The folder is mounted into the container, so the work lands in it.
+            if args.sandbox.partition("://")[0].lower() not in ("docker", "podman"):
+                raise SystemExit(
+                    "--workspace with --sandbox only applies to docker and podman, "
+                    "which can mount a folder; other sandboxes keep their own files")
+            options["mount"] = args.workspace
+        workspace = sandbox(args.sandbox, **options)
+    elif args.workspace:
+        from .runtime.workspace import Workspace
+
+        workspace = Workspace(args.workspace)
+    elif args.mode == "cowork" and not args.state:
+        print("note: no --workspace, so this works in a temporary folder that is "
+              "removed on exit", file=sys.stderr)
     return Agent(
         args.name,
         args.instructions or "",
         model=args.model,
         provider=args.provider,
+        mode=mode,
+        depth=args.depth if isinstance(mode, (str, type(None))) else None,
         harness=harness,
         tools=tools,
         skills=args.skills,
         memory=not args.no_memory,
         max_steps=args.max_steps,
+        workspace=workspace,
     )
+
+
+def _footer(result: Any) -> str:
+    """What a mode left behind, in a line or two for stderr."""
+    lines: list[str] = []
+    if result.todos:
+        done = sum(1 for t in result.todos if t.status == "done")
+        lines.append(f"todos: {done} of {len(result.todos)} done")
+    if result.sources:
+        lines.append(f"sources: {len(result.sources)}")
+    files = [a.path or a.name for a in result.artifacts]
+    if files:
+        lines.append("files: " + ", ".join(files[:12])
+                     + (f" (+{len(files) - 12} more)" if len(files) > 12 else ""))
+    if result.violations:
+        lines.extend(f"unmet: {v}" for v in result.violations)
+    return "\n".join(lines)
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -58,6 +113,9 @@ async def _run(args: argparse.Namespace) -> int:
                 elif event.type == "tool_result":
                     print(f"\n  · {event.data.get('tool')} → {event.text[:80]}",
                           file=sys.stderr)
+                elif event.type == "progress":
+                    print(f"\n  · {event.text} · {event.data.get('sources', 0)} "
+                          "sources", file=sys.stderr)
                 elif event.type == "run_end":
                     result = event.data["result"]
             print()
@@ -74,6 +132,8 @@ async def _run(args: argparse.Namespace) -> int:
             print(json.dumps(result.model_dump(mode="json"), indent=2, default=str))
         if args.report:
             print(json.dumps(harness.report(), indent=2), file=sys.stderr)
+        if _footer(result):
+            print(f"\n{_footer(result)}", file=sys.stderr)
         print(f"\n[{result.steps} steps · ${result.cost_usd:.4f} · "
               f"session {result.session_id}]", file=sys.stderr)
         return 1 if result.error else 0
@@ -85,7 +145,8 @@ async def _chat(args: argparse.Namespace) -> int:
     harness = _harness(args)
     agent = _agent(args, harness)
     session = args.session
-    print(f"agent-harness {__version__} · {agent.name} on {agent.model}")
+    how = f" · {agent.mode.name} ({agent.mode.depth})" if agent.mode else ""
+    print(f"agent-harness {__version__} · {agent.name} on {agent.model}{how}")
     print("Type /exit to leave, /new for a fresh session, /cost for the bill.\n")
     try:
         while True:
@@ -101,6 +162,7 @@ async def _chat(args: argparse.Namespace) -> int:
                 break
             if line == "/new":
                 session = None
+                agent.new_session()
                 print("(new session)")
                 continue
             if line == "/cost":
@@ -109,6 +171,8 @@ async def _chat(args: argparse.Namespace) -> int:
             result = await agent.run(line, session=session)
             session = result.session_id
             print(f"\n{agent.name} › {result.output or result.error}\n")
+            if _footer(result):
+                print(f"{_footer(result)}\n", file=sys.stderr)
         summary = await agent.close_session()
         if summary:
             print("(memory updated)", file=sys.stderr)
@@ -166,6 +230,43 @@ async def _providers(args: argparse.Namespace) -> int:
         print(f"{spec.name:<18} {status:<12} {', '.join(needs) or '—'}")
     print("\nagent-harness providers <name> for every field; --ping to test the "
           "credentials.")
+    return 0
+
+
+async def _sandboxes(args: argparse.Namespace) -> int:
+    from .sandboxes import describe_sandboxes, sandbox
+
+    if args.name and args.check:
+        workspace = sandbox(args.name)
+        try:
+            report = await workspace.check()
+        finally:
+            await workspace.aclose()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for row in report["steps"]:
+                mark = "ok  " if row["ok"] else "FAIL"
+                detail = f"  {row['detail']}" if row["detail"] else ""
+                print(f"{mark} {row['step']:<16} {row['seconds']:>6.2f}s{detail}")
+            verdict = "works" if report["ok"] else "does not work"
+            print(f"\n{report['sandbox']} {verdict} ({report['seconds']}s)")
+        return 0 if report["ok"] else 1
+
+    rows = describe_sandboxes()
+    if args.name:
+        wanted = args.name.partition("://")[0].lower()
+        rows = [r for r in rows if r["name"] == wanted] or rows
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"{'sandbox':<12} {'status':<12} what it is")
+    for row in rows:
+        status = "ready" if row["ready"] else "needs setup"
+        print(f"{row['name']:<12} {status:<12} {row['summary']}")
+        for gap in row["missing"]:
+            print(f"{'':<25} needs: {gap}")
+    print("\nagent-harness sandboxes <name> --check starts one and proves it works.")
     return 0
 
 
@@ -386,7 +487,20 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tools", action="store_true",
                        help="give it the built-in tools (time, maths, web fetch)")
         p.add_argument("--no-memory", action="store_true", help="run without memory")
-        p.add_argument("--max-steps", type=int, default=20)
+        p.add_argument("--mode", default=None, choices=sorted(MODES),
+                       help="how the agent works: chat keeps the thread, research "
+                            "writes a cited report, cowork carries a task through "
+                            "in a workspace")
+        p.add_argument("--depth", default=None, choices=list(DEPTHS),
+                       help="how hard the mode works, and the model tier it asks for")
+        p.add_argument("--workspace", default=None,
+                       help="a directory the agent may read and write files in")
+        p.add_argument("--sandbox", default=None, metavar="NAME",
+                       help="work inside a sandbox instead: docker, podman, e2b, "
+                            "daytona, modal, kubernetes, ssh — or a URL such as "
+                            "docker://node:22 (see `agent-harness sandboxes`)")
+        p.add_argument("--max-steps", type=int, default=None,
+                       help="the step ceiling (the mode's own, or 20)")
         p.add_argument("--state", default=None,
                        help="persist sessions, memory and traces under this directory")
         p.add_argument("--trace", action="store_true", help="print spans as they close")
@@ -415,6 +529,16 @@ def build_parser() -> argparse.ArgumentParser:
     providers.add_argument("--ready", action="store_true",
                            help="only the providers already configured")
     providers.add_argument("--json", action="store_true", help="machine-readable output")
+
+    sandboxes = sub.add_parser(
+        "sandboxes", help="list the sandboxes an agent can work in, or test one")
+    sandboxes.add_argument("name", nargs="?", default=None,
+                           help="one sandbox, by name or URL (docker://alpine)")
+    sandboxes.add_argument("--check", action="store_true",
+                           help="with a name: start it and prove it works — run a "
+                                "command, write and read a file, see a change")
+    sandboxes.add_argument("--json", action="store_true",
+                           help="machine-readable output")
 
     sessions = sub.add_parser("sessions", help="list or show stored sessions")
     sessions.add_argument("--state", default=None)
@@ -468,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
             return _models(args)
         if args.command == "providers":
             return asyncio.run(_providers(args))
+        if args.command == "sandboxes":
+            return asyncio.run(_sandboxes(args))
         if args.command == "sessions":
             return asyncio.run(_sessions(args))
         if args.command == "mcp":

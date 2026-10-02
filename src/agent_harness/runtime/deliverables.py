@@ -55,13 +55,19 @@ class DeliverableStore:
         if run_id:
             stored.run_id = run_id
         stored.version = len(versions) + 1
-        stored.digest = hashlib.sha256(stored.content.encode()).hexdigest()[:16]
+        # An artefact with no text but a file behind it — an image, a
+        # spreadsheet, something too large to carry — is kept by its bytes.
+        source = Path(stored.path) if stored.path and not stored.content else None
+        if source is not None and not source.is_file():
+            source = None
+        payload = source.read_bytes() if source else stored.content.encode()
+        stored.digest = hashlib.sha256(payload).hexdigest()[:16]
 
         if self.root:
             folder = self.root / _safe(stored.name)
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"v{len(versions) + 1}{Path(stored.name).suffix or '.txt'}"
-            path.write_text(stored.content, encoding="utf-8")
+            path.write_bytes(payload)
             stored.path = str(path)
             with (self.root / "index.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(stored.model_dump_json() + "\n")

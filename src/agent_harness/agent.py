@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .context import ContextAssembler, ContextCompactor
+from .context import ContextAssembler, ContextCompactor, close_open_tool_calls
 from .errors import (
     AuthenticationError,
     BudgetExceeded,
@@ -33,6 +33,7 @@ from .errors import (
     ProviderError,
     QuotaExceededError,
     StopRequested,
+    ToolError,
     ToolNotFound,
 )
 from .guardrails import AgentGuardrails
@@ -43,6 +44,7 @@ from .llm_providers.base import CompletionRequest, Provider
 from .llm_providers.parameters import GENERATION_PARAMETERS, validate_parameters
 from .memory.manager import MemoryManager
 from .memory.trace import Trace
+from .modes import LEAD, Mode, Notebook, resolve_mode
 from .prompts import Prompt
 from .runtime.budget import Budget, BudgetGuard
 from .runtime.checkpoints import Checkpoint
@@ -82,6 +84,17 @@ def _enabled(value: bool | str) -> bool:
     raise ConfigurationError(
         f"runtime_agents must be enable/disable (or a bool) — got {value!r}"
     )
+
+
+_YES = {"true", "yes", "on", "1", "enable", "enabled", "local", "isolated"}
+_NO = {"false", "no", "off", "0", "disable", "disabled", "none", ""}
+
+
+def _is_sandbox(value: Any) -> bool:
+    """A bare `Sandbox`, told apart without importing the package to ask."""
+    return (not isinstance(value, (bool, type(None)))
+            and callable(getattr(value, "_exec", None))
+            and callable(getattr(value, "stop", None)))
 
 
 def _agent_count(value: int) -> int:
@@ -125,6 +138,8 @@ class Agent:
         description: str = "",
         model: str | None = None,
         provider: Provider | str | None = None,
+        mode: str | Mode | dict[str, Any] | None = None,
+        depth: str | None = None,
         tier: str | None = None,
         effort: str | None = None,
         temperature: float | None = None,
@@ -144,8 +159,8 @@ class Agent:
         tools: Iterable[Tool | Callable[..., Any]] = (),
         skills: SkillRegistry | Iterable[Skill | str] | str | None = None,
         subagents: Sequence[Any] = (),
-        runtime_agents: bool | str = False,
-        max_runtime_agents: int = 5,
+        runtime_agents: bool | str | None = None,
+        max_runtime_agents: int | None = None,
         runtime_agent_tools: Iterable[str] | None = None,
         memory: MemoryManager | bool = True,
         trace: Trace | str | dict[str, Any] | None = None,
@@ -155,10 +170,10 @@ class Agent:
         guardrails: AgentGuardrails | Iterable[Any] | None = None,
         identity: Any = None,
         budget: Budget | None = None,
-        max_steps: int = 20,
+        max_steps: int | None = None,
         output_type: type[BaseModel] | None = None,
-        workspace: Workspace | bool = False,
-        allow_shell: bool = False,
+        workspace: Workspace | bool | str | dict[str, Any] | None = None,
+        allow_shell: bool | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         max_context_tokens: int | None = None,
         compact_at: int | float | None = None,
@@ -184,7 +199,8 @@ class Agent:
         self._siblings: dict[str, Agent] = {}
         self._base_kwargs: dict[str, Any] = {
             "instructions": instructions, "description": description,
-            "model": model, "provider": provider, "tier": tier, "effort": effort,
+            "model": model, "provider": provider, "mode": mode, "depth": depth,
+            "tier": tier, "effort": effort,
             "temperature": temperature, "max_tokens": max_tokens,
             "thinking": thinking, "thinking_budget": thinking_budget,
             "top_p": top_p, "top_k": top_k, "min_p": min_p,
@@ -217,6 +233,11 @@ class Agent:
                             else instructions)
             description = active.description or description
             model = active.model or model
+            if active.mode is not None:
+                # A version that changes the mode takes its depth with it.
+                mode, depth = active.mode, active.depth
+            elif active.depth is not None:
+                depth = active.depth
             tier = active.tier or tier
             effort = active.effort or effort
             temperature = (active.temperature if active.temperature is not None
@@ -259,6 +280,25 @@ class Agent:
                          if getattr(t, "name", getattr(t, "__name__", "")) in wanted]
             if active.subagents is not None:
                 subagents = list(active.subagents)
+        # --- mode ---------------------------------------------------------
+        # A mode fills in only what was left unset, so anything said explicitly
+        # — here, or by the active version — still wins.
+        try:
+            self.mode: Mode | None = resolve_mode(mode, depth)
+        except ConfigurationError as exc:
+            raise ConfigurationError(f"{name}: {exc}") from None
+        profile = self.mode
+        if max_steps is None:
+            max_steps = profile.max_steps if profile else 20
+        if workspace is None:
+            workspace = profile.workspace if profile else False
+        if runtime_agents is None:
+            runtime_agents = bool(profile and profile.helpers)
+        if max_runtime_agents is None:
+            max_runtime_agents = (profile.helpers if profile and profile.helpers
+                                  else 5)
+        if tier is None and profile is not None:
+            tier = profile.tier
         self.name = name
         self.description = description or f"{name} agent"
         self.instructions = (instructions.render() if isinstance(instructions, Prompt)
@@ -339,13 +379,35 @@ class Agent:
             self.trace = self.memory.trace
 
         # --- workspace --------------------------------------------------
+        # True is a folder (or whatever the harness's broker hands out). A name,
+        # a URL or a mapping is a sandbox: "docker", "e2b://template",
+        # {"sandbox": "daytona", "image": ...}.
+        if isinstance(workspace, str):
+            word = workspace.strip().lower()
+            if word in _YES:
+                workspace = True
+            elif word in _NO:
+                workspace = False
         if isinstance(workspace, Workspace):
             self.workspace: Workspace | None = workspace
+        elif isinstance(workspace, (str, dict)) or _is_sandbox(workspace):
+            from .sandboxes import sandbox as _sandbox
+
+            self.workspace = _sandbox(workspace)
+            # Every version of this agent works in the one sandbox.
+            self._base_kwargs["workspace"] = self.workspace
         elif workspace:
             self.workspace = self.harness.workspaces.acquire(name)
-            self.workspace.allow_shell = allow_shell
+            if allow_shell is None and not self.workspace.isolated:
+                # On this machine a shell is asked for, never assumed.
+                self.workspace.allow_shell = False
         else:
             self.workspace = None
+        if self.workspace is not None:
+            # The harness closes it, so a sandbox is not left running.
+            self.harness.workspaces.adopt(self.workspace)
+            if allow_shell is not None:
+                self.workspace.allow_shell = allow_shell
 
         # --- tools ------------------------------------------------------
         self.tools = ToolRegistry(tools)
@@ -355,6 +417,10 @@ class Agent:
             self.tools.extend(self.memory.tools())
         if self.workspace is not None:
             self.tools.extend(self.workspace.tools())
+        if profile is not None:
+            self.tools.extend(profile.tools(self.workspace))
+        #: The conversation a chat or cowork agent carries from one run to the next.
+        self._thread: Session | None = None
 
         # --- sub-agents -------------------------------------------------
         self._subagents: dict[str, Agent] = {}
@@ -385,6 +451,7 @@ class Agent:
                 name=name, purpose=f" {description}" if description else ""
             ),
             instructions=self.instructions,
+            mode=profile.prompt(self.tools.names) if profile else "",
             skills=self.skills,
             memory=self.memory,
         )
@@ -442,6 +509,36 @@ class Agent:
 
     def version_spec(self, version: str | None = None) -> AgentVersion | None:
         return self._versions.get(version or self._version)
+
+    # ------------------------------------------------------------------
+    # mode
+    # ------------------------------------------------------------------
+    @property
+    def depth(self) -> str:
+        """How hard this agent's mode works: fast, balanced or deep. "" without one."""
+        return self.mode.depth if self.mode else ""
+
+    @property
+    def conversational(self) -> bool:
+        """Does one run pick up where the last one left off?"""
+        return bool(self.mode and self.mode.conversational)
+
+    def new_session(self) -> None:
+        """Start a fresh conversation: the next run does not see the last one.
+
+        Only the thread is dropped. What the agent remembered about the user
+        stays, and so does everything in its workspace.
+        """
+        self._thread = None
+        if self.memory is not None:
+            from .memory.manager import SessionMemory
+
+            old, fresh = self.memory.session, SessionMemory()
+            self.memory.session = fresh
+            # A trace that was following the old conversation follows the new
+            # one; a session id you set yourself is left alone.
+            if self.memory.trace.session_id == old.id:
+                self.memory.trace.session_id = fresh.id
 
     @property
     def provider(self) -> Provider:
@@ -585,6 +682,7 @@ class Agent:
         memory: MemoryManager | None = None,
         subagent_memory: Any = None,
         model: str | None = None,
+        notebook: Notebook | None = None,
     ) -> AsyncIterator[StreamEvent]:
         harness = self.harness
         run_id = run_id or new_id("run")
@@ -593,17 +691,32 @@ class Agent:
         memory = memory if memory is not None else self.memory
         steps_allowed = max_steps or self.max_steps
         model = model or self.model
-        session_obj = await self._session(session)
+        # Handed a history, this is a one-off (a sub-agent's task, a replay) and
+        # has no business reading or moving the agent's own conversation.
+        threaded = self.conversational and messages is None
+        session_obj = await self._session(session, threaded=threaded)
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
         task_text = task_message.text
 
         result = RunResult(agent=self.name, run_id=run_id, session_id=session_obj.id)
+        profile = self.mode
+        if profile is not None:
+            result.mode, result.depth = profile.name, profile.depth
+            if notebook is None and profile.keeps_notebook:
+                notebook = Notebook(ledger=profile.sources,
+                                    tracking=profile.sources
+                                    and profile.verify_sources)
+        if notebook is not None:
+            # The same lists, not copies: what a tool writes shows on the result.
+            result.todos, result.sources = notebook.todos, notebook.sources
+        files_before: dict[str, tuple[int, int]] | None = None
 
         with harness.tracer.span(f"agent:{self.name}", kind="run", task=task_text[:120],
                                  model=model) as span:
             result.trace_id = span.trace_id
-            history = list(messages) if messages is not None else list(session_obj.messages)
+            history = (list(messages) if messages is not None
+                       else close_open_tool_calls(list(session_obj.messages)))
 
             try:
                 task_text = self.content_guardrails.check(task_text, where="input",
@@ -619,6 +732,8 @@ class Agent:
             history.append(task_message)
             if memory is not None:
                 memory.session.add_message(task_message)
+            if notebook is not None:
+                notebook.saw(task_text)
 
             if messages is None or guard is harness.guard:
                 self._spawned = 0        # a fresh run gets a fresh agent budget
@@ -642,12 +757,24 @@ class Agent:
             last_text = ""
             retries_left = self.contract_retries
             guard_retries = self.guardrails.max_retries if self.guardrails else 0
+            mode_retries = profile.retries if profile else 0
+            reported = notebook.revision if notebook is not None else 0
             final_text = ""
 
             try:
                 if started.blocked:
                     raise PermissionDenied(f"{self.name} may not run: {started.reason}",
                                            reason=started.reason)
+                self._check_mode()
+                if profile and profile.collect_files and self.workspace is not None:
+                    # Also what starts a sandbox — so one that cannot start
+                    # ends the run here, before a model call is paid for.
+                    try:
+                        files_before = await self.workspace.asnapshot()
+                    except ToolError as exc:
+                        raise ConfigurationError(
+                            f"{self.name}'s workspace is not usable: {exc}"
+                        ) from None
                 for step in range(1, steps_allowed + 1):
                     harness.control.check(f"{self.name} step {step}")
                     guard.step()
@@ -657,18 +784,27 @@ class Agent:
                                              run_id=run_id, step=step)
 
                     history = await self.compactor.compact(
-                        history, pinned=memory.session.facts if memory else ()
+                        history, pinned=[*(memory.session.facts if memory else ()),
+                                         *(notebook.pins() if notebook else ())]
                     )
                     system = await self.assembler.build(
                         query=task_text, tool_names=self.tools.names,
                         output_contract=contract,
                     )
+                    tool_choice = self.tool_choice
+                    # A mode's last step is for handing over, not for one more
+                    # tool call whose result nobody would ever read.
+                    last_step = (profile is not None and step == steps_allowed
+                                 and steps_allowed > 1)
+                    if last_step:
+                        system = f"{system}\n\n{profile.wrap_up}"
+                        tool_choice = "none" if len(self.tools) else tool_choice
                     request = CompletionRequest(
                         model=model,
                         messages=history,
                         system=system,
                         tools=self.tools.schemas(),
-                        tool_choice=self.tool_choice,
+                        tool_choice=tool_choice,
                         max_tokens=self.max_tokens,
                         temperature=self.temperature,
                         thinking=self.thinking,
@@ -728,7 +864,7 @@ class Agent:
                         outcomes = await self._execute_tools(
                             calls, run_id=run_id, step=step, guard=guard,
                             memory=memory, subagent_memory=subagent_memory,
-                            result=result,
+                            result=result, notebook=notebook,
                         )
                         for call, outcome in zip(calls, outcomes, strict=False):
                             result.tool_calls.append(ToolCall(
@@ -745,6 +881,14 @@ class Agent:
                         history.append(tool_message)
                         if memory is not None:
                             memory.session.add_message(tool_message)
+                        if notebook is not None and notebook.revision != reported:
+                            reported = notebook.revision
+                            await harness.journal.write(
+                                "progress", notebook.todo_summary(), agent=self.name,
+                                run_id=run_id, sources=len(notebook.sources))
+                            yield StreamEvent(type="progress", agent=self.name,
+                                              step=step, text=notebook.todo_summary(),
+                                              data=notebook.progress())
                         yield StreamEvent(type="step_end", agent=self.name, step=step)
                         continue
 
@@ -764,10 +908,28 @@ class Agent:
                             raise OutputContractError(problem)
                         result.data = parsed
 
+                    # What the mode itself requires: nothing left open on the
+                    # todo list, every citation leading to a recorded source. It
+                    # is sent back to be finished; if it still is not, the answer
+                    # is delivered with `violations` saying what is missing —
+                    # work that fell short is still worth more than an error.
+                    unmet = profile.unmet(final_text, notebook) if profile else []
+                    if unmet and mode_retries > 0 and step < steps_allowed:
+                        mode_retries -= 1
+                        await harness.journal.write(
+                            "mode", "; ".join(unmet), agent=self.name, run_id=run_id)
+                        history.append(Message.user(profile.feedback(unmet)))
+                        yield StreamEvent(type="step_end", agent=self.name, step=step)
+                        continue
+                    if unmet:
+                        harness.audit.record(self.name, "mode", target=profile.name,
+                                             decision="warn", run_id=run_id,
+                                             unmet=unmet)
+
                     violations = await self._check_completion(final_text, result)
                     # Always reassigned, so a successful retry clears what the
                     # previous attempt failed on.
-                    result.violations = [v.line() for v in violations]
+                    result.violations = [*unmet, *(v.line() for v in violations)]
                     if violations:
                         rails = self.guardrails
                         if rails is None:  # pragma: no cover - defensive
@@ -802,6 +964,8 @@ class Agent:
                         f"{self.name} did not finish within {steps_allowed} steps"
                     )
 
+                if profile is not None and self.output_type is None:
+                    final_text = profile.close(final_text, notebook)
                 final_text = self.content_guardrails.check(final_text, where="output",
                                                            label=self.name)
                 result.output = final_text
@@ -812,9 +976,11 @@ class Agent:
                 # it stopped, so the caller (often a parent agent) gets an answer
                 # rather than an exception.
                 if guard.budget.on_exceed == "stop":
+                    partial = final_text or last_text or result.output
+                    if profile is not None and self.output_type is None:
+                        partial = profile.close(partial, notebook)
                     result.output = self.content_guardrails.check(
-                        final_text or last_text or result.output,
-                        where="output", label=self.name)
+                        partial, where="output", label=self.name)
                     result.output = (result.output + self._budget_note(exc)).strip()
                     result.stop_reason = "budget"
                     result.budget_exceeded = exc.kind or "budget"
@@ -858,6 +1024,28 @@ class Agent:
             result.messages = history
             session_obj.messages = history
             session_obj.usage += result.usage
+            if threaded:
+                self._thread = session_obj
+            if notebook is not None:
+                result.todos, result.sources = list(notebook.todos), list(notebook.sources)
+            if profile is not None:
+                # A report is only worth keeping if the run finished one; files
+                # were written whether it finished or not.
+                have = {(a.name, a.path) for a in result.artifacts}
+                try:
+                    produced = await profile.artifacts(
+                        result.output if result.error is None
+                        and result.budget_exceeded is None else "",
+                        agent=self.name, workspace=self.workspace,
+                        before=files_before)
+                except Exception as exc:
+                    # A sandbox that died must not take the answer down with it.
+                    produced = []
+                    await harness.journal.write(
+                        "error", f"could not collect the files this run wrote: {exc}",
+                        agent=self.name, run_id=run_id)
+                result.artifacts.extend(a for a in produced
+                                        if (a.name, a.path) not in have)
             if memory is not None:
                 result.artifacts.extend(memory.session.artifacts)
                 session_obj.artifacts = list(memory.session.artifacts)
@@ -992,12 +1180,14 @@ class Agent:
         memory: MemoryManager | None,
         subagent_memory: Any,
         result: RunResult,
+        notebook: Notebook | None = None,
     ) -> list[ToolOutcome]:
         """Run every tool the model asked for, in parallel, under the rails."""
         ctx = ToolContext(
             agent=self.name, run_id=run_id, step=step, workspace=self.workspace,
             memory=memory, harness=self.harness,
-            state={"result": result, "guard": guard, "subagent_memory": subagent_memory},
+            state={"result": result, "guard": guard, "subagent_memory": subagent_memory,
+                   "notebook": notebook},
         )
 
         async def one(call: ToolUseBlock) -> ToolOutcome:
@@ -1005,18 +1195,30 @@ class Agent:
                                         step=step)
 
         if len(calls) == 1 or not self.parallel_tools:
-            return [await one(call) for call in calls]
+            outcomes = [await one(call) for call in calls]
+        else:
+            raw = await self.harness.scheduler.map(one, calls)
+            outcomes = []
+            for call, item in zip(calls, raw, strict=False):
+                if isinstance(item, BaseException):
+                    if isinstance(item, (BudgetExceeded, StopRequested)):
+                        raise item
+                    outcomes.append(ToolOutcome(call_id=call.id, name=call.name,
+                                                content=f"Error: {item}",
+                                                is_error=True))
+                else:
+                    outcomes.append(item)
 
-        raw = await self.harness.scheduler.map(one, calls)
-        outcomes: list[ToolOutcome] = []
-        for call, item in zip(calls, raw, strict=False):
-            if isinstance(item, BaseException):
-                if isinstance(item, (BudgetExceeded, StopRequested)):
-                    raise item
-                outcomes.append(ToolOutcome(call_id=call.id, name=call.name,
-                                            content=f"Error: {item}", is_error=True))
-            else:
-                outcomes.append(item)
+        # What the run has now read — the evidence a recorded source is checked
+        # against. Here rather than around the call, so a cached result counts.
+        if notebook is not None and notebook.tracking:
+            for call, outcome in zip(calls, outcomes, strict=False):
+                entry = self.tools.get(call.name) if call.name in self.tools else None
+                if outcome.is_error or entry is None or "mode" in entry.tags:
+                    continue
+                notebook.saw(call.name,
+                             json.dumps(call.input, default=str, ensure_ascii=False),
+                             outcome.content)
         return outcomes
 
     async def _run_tool(self, call: ToolUseBlock, *, ctx: ToolContext,
@@ -1228,7 +1430,7 @@ class Agent:
         allowed = self.runtime_agent_tools
         if allowed is None:
             allowed = [t.name for t in self.tools
-                       if "delegation" not in t.tags and "memory" not in t.tags]
+                       if not t.tags & {"delegation", "memory", LEAD}]
         if tools:
             wanted = set(tools)
             allowed = [name for name in allowed if name in wanted] or allowed
@@ -1237,6 +1439,9 @@ class Agent:
             spec = await self.factory.create(task, tools=allowed)
             if purpose:
                 spec.description = purpose
+            if (self.mode is not None and self.mode.sources
+                    and spec.tools is not None and "record_source" not in spec.tools):
+                spec.tools = [*spec.tools, "record_source"]
             span.set(spec=spec.name, tools=spec.tools)
 
         self.harness.audit.record(self.name, "spawn_agent", target=spec.name,
@@ -1304,6 +1509,14 @@ class Agent:
         sub_memory = (self.memory.subagent(task, child.name) if self.memory
                       else None)
         brief = f"{task}\n\n## Context you were given\n{context}" if context else task
+        # A helper keeps its own todo list but writes in the run's one source
+        # ledger, so the number it cites is the number the lead can cite.
+        notebook: Notebook | None = ctx.state.get("notebook") if ctx else None
+        shared = notebook.child() if notebook is not None and notebook.ledger else None
+        if shared is not None and "record_source" in child.tools:
+            brief += ("\n\n## Sources\nRecord every source you rely on with "
+                      "`record_source` and cite it by the number that returns — "
+                      "[n] after the claim it supports.")
 
         with self.harness.tracer.span(f"subagent:{child.name}", kind="subagent") as span:
             child_result = await child.run(
@@ -1311,6 +1524,7 @@ class Agent:
                 messages=[],  # every sub-agent starts clean
                 guard=guard.child(child.budget),
                 subagent_memory=sub_memory,
+                notebook=shared,
             )
             span.set(cost_usd=child_result.cost_usd, steps=child_result.steps,
                      error=child_result.error)
@@ -1358,14 +1572,34 @@ class Agent:
     # ------------------------------------------------------------------
     # sessions, artefacts, output contract
     # ------------------------------------------------------------------
-    async def _session(self, session: Session | str | None) -> Session:
+    async def _session(self, session: Session | str | None, *,
+                       threaded: bool = False) -> Session:
         if isinstance(session, Session):
             return session
         if isinstance(session, str):
             return await self.harness.sessions.load(session)
+        if threaded and self._thread is not None:
+            return self._thread
         if self.memory is not None:
             return Session(id=self.memory.session.id, agent=self.name)
         return Session(agent=self.name)
+
+    def _check_mode(self) -> None:
+        """Can this mode do its job with what the agent has? Asked at the start
+        of a run rather than at construction, because tools — an MCP server's,
+        say — are often attached after the agent is built."""
+        profile = self.mode
+        if profile is None or not profile.sources:
+            return
+        # Its own notebook, its memory and a factory with nothing to hand down
+        # are not ways of finding anything out; a sub-agent might be.
+        if self._subagents or any(
+                not t.tags & {"mode", "memory", "delegation"} for t in self.tools):
+            return
+        raise ConfigurationError(
+            f"{self.name} is in {profile.name} mode but has nothing to read with — give "
+            "it a search, fetch or lookup tool (tools=[...]), a sub-agent, or an "
+            "MCP server")
 
     def produce(self, name: str, content: str, **kw: Any) -> Artifact:
         """Record an artefact this agent produced, and store it."""
@@ -1441,7 +1675,8 @@ class Agent:
         return await self.memory.close_session(summary)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
-        return f"<Agent {self.name} model={self.model} tools={len(self.tools)}>"
+        mode = f" mode={self.mode.name}/{self.mode.depth}" if self.mode else ""
+        return f"<Agent {self.name} model={self.model}{mode} tools={len(self.tools)}>"
 
 
 #: A model we could not reach is worth retrying elsewhere. A 400 is not — the

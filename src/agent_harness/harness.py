@@ -159,4 +159,4 @@ class Harness:
         if isinstance(self.provider, Provider):
             await self.provider.aclose()
         await close_all()
-        self.workspaces.cleanup()
+        await self.workspaces.aclose()

@@ -1,16 +1,16 @@
 """Sandboxed compute: run code, get the answer, without it touching your machine.
 
 The agent writes Python, it runs inside the workspace, and only what it printed
-comes back. With the Docker workspace backend the process is contained and — by
-default — has no network. With the local backend it is a plain subprocess in a
-jailed directory, which is weaker: use Docker for anything you did not write.
+comes back. In a sandbox (`agent_harness.sandboxes`) or the Docker workspace the
+process is contained. With the local backend it is a plain subprocess in a
+jailed directory, which is weaker: use a sandbox for anything you did not write.
 
-The tool asks for approval before every run. That is deliberate.
+On this machine the tool asks for approval before every run. That is
+deliberate. Inside a sandbox, which is its own machine, it does not.
 """
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from ..errors import ToolError
@@ -38,7 +38,8 @@ def make_python_tool(workspace: Any, *, name: str = "run_python",
         raise ToolError("run_python needs a workspace to run inside",
                         tool=name)
 
-    @tool(name=name, tags=["builtin", "compute"], permission="ask")
+    @tool(name=name, tags=["builtin", "compute"],
+          permission="allow" if getattr(workspace, "isolated", False) else "ask")
     async def run_python(code: str, timeout_s: float = timeout) -> dict[str, Any]:
         """Run Python inside the workspace and return what it printed.
 
@@ -53,10 +54,8 @@ def make_python_tool(workspace: Any, *, name: str = "run_python",
         if not code.strip():
             raise ToolError("no code to run", tool=name)
         script = f"{preamble}\n{code}\n"
-        workspace.write("_snippet.py", script)
-        interpreter = "python3" if workspace.__class__.__name__ == "DockerWorkspace" \
-            else sys.executable
-        result = await workspace.shell(f"{interpreter} _snippet.py",
+        await workspace.awrite("_snippet.py", script)
+        result = await workspace.shell(f"{workspace.python} _snippet.py",
                                        timeout=timeout_s)
         if result["returncode"] != 0:
             return {
