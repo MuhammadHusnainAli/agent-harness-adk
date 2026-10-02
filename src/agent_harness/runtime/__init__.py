@@ -15,7 +15,13 @@ from .permissions import PolicyGate, Rule, always_approve, console_approver
 from .replay import RecordingProvider, Replayer, ReplayProvider
 from .router import ModelRouter, RouteRule
 from .scheduler import ConcurrencyScheduler
-from .session import FileSessionStore, InMemorySessionStore, Session, SessionStore
+from .session import (
+    DurableSessionStore,
+    FileSessionStore,
+    InMemorySessionStore,
+    Session,
+    SessionStore,
+)
 from .tracing import Span, Tracer, console_exporter, jsonl_exporter
 from .workspace import DockerWorkspace, Workspace, WorkspaceBroker
 
@@ -54,6 +60,7 @@ __all__ = [
     "ConcurrencyScheduler",
     "Session",
     "SessionStore",
+    "DurableSessionStore",
     "InMemorySessionStore",
     "FileSessionStore",
     "Tracer",

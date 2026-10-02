@@ -65,6 +65,16 @@ class Harness:
     _rate: RateGuard | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        # A connection string is as good as a store: "postgresql://…",
+        # "redis://…", "azure://container". Resolved here, connected on first use.
+        if isinstance(self.sessions, str):
+            from .sessions import session_provider
+
+            self.sessions = session_provider(self.sessions)
+        if isinstance(self.memory_store, str):
+            from .memory import memory_provider
+
+            self.memory_store = memory_provider(self.memory_store)
         if self.governance is not None:
             self.governance.attach(self)
 
@@ -114,18 +124,38 @@ class Harness:
         from .runtime.session import FileSessionStore
 
         tracer = Tracer([jsonl_exporter(base / "traces.jsonl")] if trace else [])
-        return cls(
-            tracer=tracer,
-            journal=RunJournal(base / "journal.jsonl"),
-            sessions=FileSessionStore(base / "sessions"),
-            checkpoints=Checkpointer(base / "checkpoints", every=1),
-            memory_store=FileStore(base / "memory"),
-            cache=ResultCache(path=base / "cache"),
-            workspaces=WorkspaceBroker(base / "workspaces"),
-            deliverables=DeliverableStore(base / "deliverables"),
-            audit=AuditTrail(base / "audit.jsonl"),
-            **kwargs,
-        )
+        # Anything named here replaces its file-backed default — chats in
+        # Postgres and everything else on disk is `Harness.local(sessions=url)`.
+        parts: dict[str, Any] = {
+            "tracer": tracer,
+            "journal": lambda: RunJournal(base / "journal.jsonl"),
+            "sessions": lambda: FileSessionStore(base / "sessions"),
+            "checkpoints": lambda: Checkpointer(base / "checkpoints", every=1),
+            "memory_store": lambda: FileStore(base / "memory"),
+            "cache": lambda: ResultCache(path=base / "cache"),
+            "workspaces": lambda: WorkspaceBroker(base / "workspaces"),
+            "deliverables": lambda: DeliverableStore(base / "deliverables"),
+            "audit": lambda: AuditTrail(base / "audit.jsonl"),
+        }
+        built = {name: (make() if callable(make) and name != "tracer" else make)
+                 for name, make in parts.items() if name not in kwargs}
+        return cls(**built, **kwargs)
+
+    @classmethod
+    def on(cls, url: str, **kwargs: Any) -> Harness:
+        """Memory and chat sessions in one database, on one connection pool.
+
+            Harness.on("postgresql://user:pass@host/agents")
+            Harness.on("mongodb://host:27017/agents")
+
+        The usual shape for a service with more than one replica: nothing that
+        has to be shared lives on a local disk.
+        """
+        from .memory import memory_provider
+        from .sessions import session_provider
+
+        store = memory_provider(url)
+        return cls(memory_store=store, sessions=session_provider(store), **kwargs)
 
     @classmethod
     def testing(cls, provider: Provider | None = None, **kwargs: Any) -> Harness:
@@ -160,3 +190,4 @@ class Harness:
             await self.provider.aclose()
         await close_all()
         await self.workspaces.aclose()
+        await self.sessions.aclose()

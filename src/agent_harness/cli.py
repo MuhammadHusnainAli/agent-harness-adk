@@ -21,7 +21,9 @@ __all__ = ["main"]
 
 
 def _harness(args: argparse.Namespace) -> Harness:
-    harness = (Harness.local(args.state) if args.state else Harness())
+    stores = {"sessions": args.sessions} if getattr(args, "sessions", None) else {}
+    harness = (Harness.local(args.state, **stores) if args.state
+               else Harness(**stores))
     if args.trace:
         harness.tracer.add_exporter(console_exporter())
     if args.approve:
@@ -85,6 +87,8 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         memory=not args.no_memory,
         max_steps=args.max_steps,
         workspace=workspace,
+        trace=({"user_id": args.user, "tenant_id": args.tenant}
+               if args.user or args.tenant else None),
     )
 
 
@@ -276,20 +280,49 @@ async def _sandboxes(args: argparse.Namespace) -> int:
 
 
 async def _sessions(args: argparse.Namespace) -> int:
-    harness = Harness.local(args.state or ".harness")
-    rows = await harness.sessions.list(limit=args.limit)
-    if args.show:
-        session = await harness.sessions.load(args.show)
-        for message in session.messages:
-            print(f"{message.role}: {message.text[:2000]}")
+    from .sessions import session_backends, session_provider
+
+    if args.backends:
+        for name, ready in session_backends().items():
+            print(f"{name:<10} {'ready' if ready else 'needs its driver'}")
         return 0
-    if not rows:
-        print("no sessions yet")
+    store = (session_provider(args.store) if args.store
+             else Harness.local(args.state or ".harness").sessions)
+    try:
+        if args.check:
+            report = await store.check()
+            for row in report["steps"]:
+                mark = "ok  " if row["ok"] else "FAIL"
+                detail = f"  {row['detail']}" if row["detail"] else ""
+                print(f"{mark} {row['step']:<20} {row['seconds']:>7.3f}s{detail}")
+            print(f"\n{report['store']} "
+                  f"{'works' if report['ok'] else 'does not work'}")
+            return 0 if report["ok"] else 1
+        if args.show:
+            session = await store.load(args.show)
+            for message in session.messages:
+                print(f"{message.role}: {message.text[:2000]}")
+            return 0
+        if args.delete:
+            await store.delete(args.delete)
+            print(f"deleted {args.delete}")
+            return 0
+        rows = await store.list(limit=args.limit, user_id=args.user,
+                                tenant_id=args.tenant, agent=args.agent)
+        if args.json:
+            print(json.dumps([s.summary() for s in rows], indent=2))
+            return 0
+        if not rows:
+            print("no sessions yet")
+            return 0
+        for session in rows:
+            owner = "/".join(p for p in (session.tenant_id, session.user_id) if p)
+            print(f"{session.id}  {session.agent:<14} {len(session.messages):>3} messages  "
+                  f"${session.usage.cost_usd:.4f}  {owner or '-':<16} "
+                  f"{session.title[:48]}")
         return 0
-    for session in rows:
-        print(f"{session.id}  {session.agent:<16} {len(session.messages):>3} messages  "
-              f"${session.usage.cost_usd:.4f}")
-    return 0
+    finally:
+        await store.aclose()
 
 
 async def _mcp(args: argparse.Namespace) -> int:
@@ -519,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--approve", action="store_true",
                        help="ask before any tool that needs approval")
         p.add_argument("--session", default=None, help="resume a session by id")
+        p.add_argument("--sessions", default=None, metavar="URL",
+                       help="keep chats in a database: postgresql://…, mongodb://…, "
+                            "redis://…, sqlite:///chats.db, azure://container")
+        p.add_argument("--user", default=None,
+                       help="who the agent is acting for; their chats are theirs")
+        p.add_argument("--tenant", default=None, help="the tenant they belong to")
 
     run = sub.add_parser("run", help="run one task and print the answer")
     run.add_argument("task")
@@ -554,8 +593,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sessions = sub.add_parser("sessions", help="list or show stored sessions")
     sessions.add_argument("--state", default=None)
+    sessions.add_argument("--store", default=None, metavar="URL",
+                          help="a database instead of --state: postgresql://…, "
+                               "mongodb://…, redis://…, azure://container, …")
     sessions.add_argument("--limit", type=int, default=20)
+    sessions.add_argument("--user", default=None, help="only this user's sessions")
+    sessions.add_argument("--tenant", default=None, help="only this tenant's")
+    sessions.add_argument("--agent", default=None, help="only this agent's")
     sessions.add_argument("--show", default=None, help="print one session's transcript")
+    sessions.add_argument("--delete", default=None, help="delete one session")
+    sessions.add_argument("--check", action="store_true",
+                          help="prove the store works: save, load, list by owner, "
+                               "refuse a stale save, delete")
+    sessions.add_argument("--backends", action="store_true",
+                          help="which stores have their driver installed")
+    sessions.add_argument("--json", action="store_true", help="machine-readable")
 
     mcp = sub.add_parser("mcp", help="list the tools an MCP server offers")
     mcp.add_argument("command", nargs="*", help="the server command and its arguments")

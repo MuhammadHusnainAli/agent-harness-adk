@@ -119,6 +119,8 @@ class Blueprint(BaseModel):
     subagents: dict[str, SubAgentSpec] = Field(default_factory=dict)
     agents: dict[str, AgentEntry] = Field(default_factory=dict)
     memory: str | dict[str, Any] | None = None
+    #: Where chats are kept: a URL, or {url: ..., table: ...}.
+    sessions: str | dict[str, Any] | None = None
     path: str | None = None
 
     @model_validator(mode="before")
@@ -316,6 +318,20 @@ class Blueprint(BaseModel):
         if not url:
             raise ConfigurationError("a memory section needs a `url`")
         return memory_provider(url, **options)
+
+    def session_store(self) -> Any:
+        """The session store the file declares, if it declares one."""
+        if self.sessions is None:
+            return None
+        from .sessions import session_provider
+
+        if isinstance(self.sessions, str):
+            return session_provider(self.sessions)
+        options = dict(self.sessions)
+        url = options.pop("url", None)
+        if not url:
+            raise ConfigurationError("a sessions section needs a `url`")
+        return session_provider(url, **options)
 
     @property
     def names(self) -> list[str]:

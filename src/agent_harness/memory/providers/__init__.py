@@ -201,6 +201,25 @@ def missing_driver(name: str) -> str:
     return " or ".join(f"pip install {PIP_NAMES.get(d, d)}" for d in drivers)
 
 
+def _sqlite_path(rest: str) -> str:
+    """The file a `sqlite://` URL names.
+
+        sqlite://:memory:            in memory
+        sqlite:///chats.db           chats.db, here
+        sqlite:///./data/chats.db    data/chats.db, here
+        sqlite:////var/lib/chats.db  /var/lib/chats.db
+        sqlite:///var/lib/chats.db   /var/lib/chats.db   (a path with folders in
+                                     it and no "./" has always been read as absolute)
+    """
+    if rest in ("", ":memory:", "/:memory:"):
+        return ":memory:"
+    if rest.startswith("//"):
+        return "/" + rest.lstrip("/")
+    if rest.startswith(("/./", "/../")) or (rest.startswith("/") and "/" not in rest[1:]):
+        return rest[1:]
+    return rest
+
+
 def memory_provider(url: str, **options: Any) -> MemoryStore:
     """Build a store from a connection string.
 
@@ -225,8 +244,7 @@ def memory_provider(url: str, **options: Any) -> MemoryStore:
     if name == "file":
         return cls(parsed.path or url or ".harness/memory")
     if name == "sqlite":
-        path = (parsed.netloc + parsed.path) or ":memory:"
-        return cls(path.lstrip("/") if path.startswith("//") else path, **options)
+        return cls(_sqlite_path(parsed.netloc + parsed.path), **options)
     if name in {"s3", "azure", "gcs"}:
         bucket = parsed.netloc
         prefix = parsed.path.strip("/")

@@ -47,6 +47,7 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [09_governance_singapore_fintech](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/09_governance_singapore_fintech.py): Governance under Singapore's agentic framework: monitor then enforce, prompt injection, inherited authority, tool drift.
 - [10_modes](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/10_modes.py): Modes: a chat that keeps its thread, research with a checked source ledger, and cowork that plans, asks, and hands back files.
 - [11_sandboxes](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/11_sandboxes.py): Sandboxes: cowork inside a Docker container (or any other sandbox), with the files it wrote handed back.
+- [12_sessions](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/12_sessions.py): Sessions in a database: owned, listed by user, continued by another process, and two requests on one chat both keeping their turn.
 
 ## Optional
 

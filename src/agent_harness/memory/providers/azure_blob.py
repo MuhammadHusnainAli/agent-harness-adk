@@ -87,7 +87,9 @@ class AzureBlobMemory(ObjectStoreMemory):
     async def _delete(self, keys: list[str]) -> None:
         container = await self._container()
         for start in range(0, len(keys), 256):       # the API's batch ceiling
-            await container.delete_blobs(*keys[start:start + 256])
+            # A blob that is already gone is what was wanted, not a failure.
+            await container.delete_blobs(*keys[start:start + 256],
+                                         raise_on_any_failure=False)
 
     async def aclose(self) -> None:
         if self._service is not None:

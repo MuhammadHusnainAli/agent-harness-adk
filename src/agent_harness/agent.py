@@ -32,6 +32,7 @@ from .errors import (
     PermissionDenied,
     ProviderError,
     QuotaExceededError,
+    SessionConflict,
     StopRequested,
     ToolError,
     ToolNotFound,
@@ -426,6 +427,9 @@ class Agent:
         self._thread: Session | None = None
         #: Set by `resume()`: follow that conversation, whatever the mode.
         self._following = False
+        #: The stored record of this agent's own runs, when it is not following
+        #: a conversation: each run starts clean, and is added to this.
+        self._log: Session | None = None
 
         # --- sub-agents -------------------------------------------------
         self._subagents: dict[str, Agent] = {}
@@ -530,7 +534,7 @@ class Agent:
         It needs a session store that outlives the process — `Harness.local()`,
         or your own `SessionStore` — for there to be anything to resume.
         """
-        loaded = await self.harness.sessions.load(session)
+        loaded = self._may_have(await self.harness.sessions.load(session))
         if sandbox_id:
             box = getattr(self.workspace, "sandbox", None)
             if box is None:
@@ -827,7 +831,12 @@ class Agent:
         # Handed a history, this is a one-off (a sub-agent's task, a replay) and
         # has no business reading or moving the agent's own conversation.
         threaded = (self.conversational or self._following) and messages is None
-        session_obj = await self._session(session, threaded=threaded)
+        # Handed its messages and no session, a run is somebody else's turn —
+        # a sub-agent's task, a tool call, a replay. It gets a session of its
+        # own, never this agent's.
+        one_off = messages is not None and session is None
+        session_obj = (self._may_have(Session(agent=self.name)) if one_off
+                       else await self._session(session, threaded=threaded))
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
         task_text = task_message.text
@@ -848,8 +857,19 @@ class Agent:
         with harness.tracer.span(f"agent:{self.name}", kind="run", task=task_text[:120],
                                  model=model) as span:
             result.trace_id = span.trace_id
-            history = (list(messages) if messages is not None
-                       else close_open_tool_calls(list(session_obj.messages)))
+            # A conversation being continued starts from what was said. A run
+            # that is not continuing one starts clean, and is added to the
+            # session's record afterwards rather than replacing it.
+            continuing = threaded or session is not None
+            if messages is not None:
+                history = list(messages)
+            elif continuing:
+                history = close_open_tool_calls(list(session_obj.messages))
+            else:
+                history = []
+            earlier = [] if continuing else list(session_obj.messages)
+            began_at = len(history)
+            rewritten = False
 
             try:
                 task_text = self.content_guardrails.check(task_text, where="input",
@@ -922,10 +942,13 @@ class Agent:
                     await self.hooks.emit("step_start", agent=self.name,
                                              run_id=run_id, step=step)
 
-                    history = await self.compactor.compact(
+                    compacted = await self.compactor.compact(
                         history, pinned=[*(memory.session.facts if memory else ()),
                                          *(notebook.pins() if notebook else ())]
                     )
+                    # The compactor hands back the same list when it did nothing.
+                    rewritten = rewritten or compacted is not history
+                    history = compacted
                     system = await self.assembler.build(
                         query=task_text, tool_names=self.tools.names,
                         output_contract=contract,
@@ -1161,10 +1184,10 @@ class Agent:
                 stop_reason=result.stop_reason,
             )
             result.messages = history
-            session_obj.messages = history
+            session_obj.messages = [*earlier, *history]
             session_obj.usage += result.usage
-            if threaded:
-                self._thread = session_obj
+            if not session_obj.title:
+                session_obj.title = " ".join(task_text.split())[:80]
             produced: list[Artifact] = []
             if notebook is not None:
                 result.todos, result.sources = list(notebook.todos), list(notebook.sources)
@@ -1192,8 +1215,14 @@ class Agent:
                 session_obj.artifacts = list(memory.session.artifacts)
             if result.artifacts:
                 harness.deliverables.extend(result.artifacts, run_id=run_id)
-            if self.persist_session:
-                await harness.sessions.save(session_obj)
+            if self.persist_session and not one_off:
+                session_obj = await self._save_session(
+                    session_obj, result, added=history[began_at:],
+                    rewritten=rewritten, run_id=run_id)
+            if threaded:
+                self._thread = session_obj
+            elif session is None and not one_off:
+                self._log = session_obj
 
             await harness.journal.handback(
                 self.name, (result.output or result.error or "")[:500], run_id=run_id,
@@ -1716,14 +1745,96 @@ class Agent:
     async def _session(self, session: Session | str | None, *,
                        threaded: bool = False) -> Session:
         if isinstance(session, Session):
-            return session
+            return self._may_have(session)
         if isinstance(session, str):
-            return await self.harness.sessions.load(session)
+            return self._may_have(await self.harness.sessions.load(session))
         if threaded and self._thread is not None:
             return self._thread
         if self.memory is not None:
-            return Session(id=self.memory.session.id, agent=self.name)
-        return Session(agent=self.name)
+            if self._log is not None and self._log.id == self.memory.session.id:
+                return self._log
+            return self._may_have(Session(id=self.memory.session.id, agent=self.name))
+        return self._may_have(Session(agent=self.name))
+
+    def _may_have(self, session: Session) -> Session:
+        """This agent's trace says who it is acting for. A session that belongs
+        to someone else is refused in the same words as one that does not exist,
+        so an id cannot be probed; one that belongs to nobody yet becomes theirs.
+        """
+        user = self.trace.user_id if self.trace is not None else None
+        tenant = self.trace.tenant_id if self.trace is not None else None
+        if not session.owned_by(user, tenant):
+            self.harness.audit.record(self.name, "session_denied", target=session.id,
+                                      decision="deny", user=user, tenant=tenant)
+            raise ConfigurationError(f"no session {session.id!r}")
+        session.user_id = session.user_id or user
+        session.tenant_id = session.tenant_id or tenant
+        return session
+
+    async def _save_session(self, session: Session, result: RunResult, *,
+                            added: list[Message], rewritten: bool,
+                            run_id: str) -> Session:
+        """Save the conversation without losing anyone's turn — or the answer.
+
+        If another request saved this session while this run was working, the
+        store refuses the save. This run's own messages are then added to what
+        is there now. When they cannot be — the history was compacted along the
+        way, so "this run's messages" no longer lines up — the run is kept as a
+        fork, and the result says which session it ended up in.
+        """
+        harness = self.harness
+        try:
+            try:
+                return await harness.sessions.save(session)
+            except SessionConflict:
+                pass
+            for _ in range(3):
+                if rewritten:
+                    break
+                latest = self._may_have(await harness.sessions.load(session.id))
+                if latest is session:
+                    break
+                latest.messages = [*close_open_tool_calls(list(latest.messages)), *added]
+                latest.usage += result.usage
+                latest.metadata.update(session.metadata)
+                latest.title = latest.title or session.title
+                names = {a.name for a in session.artifacts}
+                latest.artifacts = [*(a for a in latest.artifacts if a.name not in names),
+                                    *session.artifacts]
+                try:
+                    saved = await harness.sessions.save(latest)
+                except SessionConflict:
+                    continue
+                harness.audit.record(self.name, "session_merged", target=session.id,
+                                     decision="ok", run_id=run_id, added=len(added))
+                await harness.journal.write(
+                    "decision", f"session {session.id} had moved on; this run's "
+                    f"{len(added)} messages were added to it", agent=self.name,
+                    run_id=run_id)
+                return saved
+            forked = session.model_copy(update={
+                "id": new_id("ses"), "parent_id": session.id, "version": 0,
+                "title": f"{session.title} (fork)" if session.title else ""})
+            saved = await harness.sessions.save(forked)
+            result.session_id = saved.id
+            result.warnings.append(
+                f"session {session.id} was changed by another request while this "
+                f"run was working; this run is kept as {saved.id}")
+            harness.audit.record(self.name, "session_forked", target=session.id,
+                                 decision="ok", run_id=run_id, fork=saved.id)
+            return saved
+        except Exception as exc:
+            # The work is done and paid for. A store that is down loses the
+            # record of it, not the answer.
+            result.warnings.append(f"the session could not be saved: "
+                                   f"{type(exc).__name__}: {exc}")
+            harness.audit.record(self.name, "session_save", target=session.id,
+                                 decision="error", run_id=run_id,
+                                 reason=str(exc)[:300])
+            await harness.journal.write(
+                "error", f"session {session.id} could not be saved: {exc}",
+                agent=self.name, run_id=run_id)
+            return session
 
     def _check_mode(self) -> None:
         """Can this mode do its job with what the agent has? Asked at the start

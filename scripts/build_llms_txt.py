@@ -68,6 +68,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/11_sandboxes.py",
      "Sandboxes: cowork inside a Docker container (or any other sandbox), with the "
      "files it wrote handed back."),
+    ("examples/12_sessions.py",
+     "Sessions in a database: owned, listed by user, continued by another "
+     "process, and two requests on one chat both keeping their turn."),
 ]
 
 
@@ -171,6 +174,8 @@ GROUPS: list[tuple[str, list[str]]] = [
                        "AuditEntry", "ServiceHealth", "ComponentHealth", "Tracer",
                        "Span", "RunJournal", "ResultCache", "ConcurrencyScheduler",
                        "ModelRouter", "RouteRule", "Session", "SessionStore",
+                       "DurableSessionStore", "session_provider",
+                       "session_backends", "SessionConflict",
                        "PermissionRule",
                        "InMemorySessionStore", "FileSessionStore", "Checkpoint",
                        "Checkpointer", "Replayer", "RecordingProvider",

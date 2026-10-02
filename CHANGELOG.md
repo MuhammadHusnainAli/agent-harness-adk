@@ -66,6 +66,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `agent-harness run|chat --sandbox-id --keep-sandbox`; the run footer prints
   the sandbox id.
 
+**Sessions in a database — `agent_harness.sessions`**
+- `session_provider(url)`: chats in SQLite, PostgreSQL, MySQL/MariaDB, MongoDB,
+  Redis, DynamoDB, S3, Azure Blob or GCS, on the memory backends' own URLs and
+  drivers. `Harness(sessions=url)`, `Harness.on(url)` for memory and chats on
+  one pool, `sessions:` in a blueprint, `--sessions` on the CLI.
+- A session has an owner (`user_id`, `tenant_id`, from the agent's trace) and a
+  `version`. `SessionStore.list(user_id=, tenant_id=, agent=)`,
+  `Session.summary()`.
+- An agent acting for someone else is refused the session as if it did not
+  exist, and the refusal is audited.
+- A stale save raises `SessionConflict`. The agent then adds its own turn to
+  what is there, or — if its history was compacted — keeps the run as a fork and
+  says so in the new `RunResult.warnings`.
+- A failed save no longer raises out of `run()`: the answer is returned with a
+  warning.
+- `SessionStore.check()` and `agent-harness sessions --store URL --check`;
+  `--user`, `--tenant`, `--agent`, `--delete`, `--json`, `--backends`.
+- `DurableSessionStore` for writing your own. `examples/12_sessions.py`.
+
 ### Changed
 
 - In a mode, the final allowed step tells the model it is the last and disables
@@ -85,8 +104,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The workspace tools, `run_python`, `parse_document`, `render_chart` and
   `write_report` are now async, and go through the workspace's async methods.
 
+- A run that is not continuing a conversation is now *added* to its session's
+  record instead of replacing it; it still starts with a clean context.
+- A run handed its own `messages` and no session (an agent used as a tool, a
+  replay) is no longer saved over the agent's session.
+- `FileSessionStore` replaces a session file in one step, and refuses a save
+  from a stale version.
+- `Harness.local(...)` accepts replacements for any of its file-backed parts.
+
 ### Fixed
 
+- `AzureBlobMemory` raised when asked to delete a blob that was already gone.
 - Resuming a session whose last run was stopped mid-step (a budget, a stop
   request) sent a tool call with no result, which providers reject. Unanswered
   tool calls are now closed when the history is picked back up.

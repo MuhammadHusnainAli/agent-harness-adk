@@ -305,6 +305,9 @@ class RunResult(BaseModel):
     #: The sandbox the run worked in, if it worked in one. With `session_id`,
     #: this is what picks the conversation back up where it left off.
     sandbox_id: str = ""
+    #: Things that went wrong around the run without stopping it — a session
+    #: that could not be saved, say. The answer is still the answer.
+    warnings: list[str] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:

@@ -286,6 +286,7 @@ was working in:
 
 ```python
 harness = Harness.local(".harness")              # sessions that outlive the process
+# or a database: Harness(sessions="postgresql://…") — see "Sessions" below
 agent = Agent("colleague", mode="cowork", harness=harness,
               workspace=sandbox("e2b", keep=True))      # keep: do not kill it at the end
 
@@ -369,6 +370,94 @@ Docker is tested against a real container. E2B, Daytona and Modal are driven
 through their own SDKs and tested against stand-ins for them, and Kubernetes and
 SSH against a recorded command line — so before relying on one, run
 `agent-harness sandboxes <name> --check` with your credentials.
+
+## Sessions: where chats are kept
+
+A chat id is a row in a store. By default that store is in memory and gone with
+the process; `Harness.local()` keeps a JSON file per chat. For anything with more
+than one replica, name a database:
+
+```python
+from agent_harness import Agent, Harness, session_provider
+
+harness = Harness(sessions="postgresql://user:pass@host/agents")
+harness = Harness(sessions=session_provider("redis://host:6379/0", ttl=30 * 86_400))
+harness = Harness.on("postgresql://user:pass@host/agents")    # memory and chats, one pool
+harness = Harness.local(".harness", sessions="azure://chats")  # chats in a storage account
+```
+
+| store | URL | install |
+|---|---|---|
+| SQLite | `sqlite:///chats.db` | — |
+| PostgreSQL | `postgresql://…` | `asyncpg` or `psycopg` |
+| MySQL / MariaDB | `mysql://…` | `aiomysql` |
+| MongoDB (and Cosmos DB's Mongo API) | `mongodb://…` | `motor` or `pymongo` |
+| Redis | `redis://…` | `redis` |
+| DynamoDB | `dynamodb://table` | `boto3` |
+| Amazon S3 | `s3://bucket/prefix` | `boto3` |
+| Azure Blob — a storage account | `azure://container` | `azure-storage-blob` |
+| Google Cloud Storage | `gs://bucket/prefix` | `google-cloud-storage` |
+
+The URLs and drivers are the memory backends' own, so a database is configured
+in one place. Every store keeps a session under the same three promises:
+
+**It knows whose it is.** A session is stamped with the user and tenant the agent
+was acting for (`Agent(trace={"user_id": ..., "tenant_id": ...})`), and those
+are indexed columns, not buried in a blob:
+
+```python
+chats = await harness.sessions.list(user_id="ada", tenant_id="acme", limit=20)
+[c.summary() for c in chats]        # id, title, messages, updated, cost — for a sidebar
+```
+
+An agent acting for someone else is refused the session in the same words as for
+an id that never existed — `no session 'ses_…'` — so ids cannot be probed, and
+the refusal is in the audit trail.
+
+**Two requests cannot overwrite each other.** A session carries a version, and a
+store accepts a save only from the version it holds — one atomic statement in
+SQL, a conditional write in MongoDB and DynamoDB, a Lua script in Redis. When a
+second request on the same chat finishes after the first, its turn is *added* to
+what is there; nobody's message is lost. If that is not possible — the run
+compacted its history along the way — the run is kept as a fork and
+`result.warnings` says which session it ended up in.
+
+**A store that is down loses the record, not the answer.** If the save fails,
+the result still comes back, with the failure in `result.warnings` and the audit
+trail.
+
+To find out whether a database is wired up correctly before the first real
+conversation:
+
+```python
+report = await harness.sessions.check()
+report["ok"], report["steps"]   # save · load · list by owner · refuse a stale save · delete
+```
+
+```bash
+agent-harness sessions --store postgresql://… --check
+agent-harness sessions --store postgresql://… --user ada --tenant acme
+agent-harness run "carry on" --sessions postgresql://… --user ada --session ses_4f1c
+```
+
+Three things worth knowing:
+
+- **DynamoDB** limits an item to 400 KB, so a conversation is stored compressed
+  and in pieces behind one small head item; the conditional write on that head
+  is what makes a save all-or-nothing.
+- **Object storage** (S3, Azure Blob, GCS) is the cheap, durable place for chats
+  kept for years. Its version check reads before it writes, which stops the
+  ordinary double-submit but is not atomic; keep live, concurrent chats in a
+  database and archive to a bucket.
+- **Your own store** is a `SessionStore` — `save`, `load`, `list`, `delete` — or
+  a `DurableSessionStore`, which gives you the versioning for four smaller
+  methods. `check()` will tell you if it holds the line.
+
+PostgreSQL, MariaDB, MongoDB, Redis, DynamoDB (DynamoDB Local) and Azure Blob
+(Azurite) have each been run against a real server through the whole contract,
+including a race of eight saves from one version. S3 and GCS share the Azure
+code path and have not; `tests/test_sessions.py` lists the environment variables
+that run the suite against yours.
 
 ## Tools
 
@@ -987,7 +1076,7 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | `Checkpointer` + `Replayer` | step snapshots, a timeline, and resume-from-any-step |
 | `RecordingProvider` / `ReplayProvider` | record a run once, reproduce it exactly with no network and no spend |
 | `DeliverableStore` | the documents and reports a run produced, versioned and digested |
-| `SessionStore` | resume, fork or branch a run; a long job survives a restart |
+| `SessionStore` | resume, fork or branch a run; a long job survives a restart — in files, SQL, MongoDB, Redis, DynamoDB or a storage account, owned and versioned |
 | `WorkspaceBroker` | a jailed directory per sub-agent (or a shared one for handovers) — or a sandbox each: Docker, E2B, Daytona, Modal, a pod |
 | `ConcurrencyScheduler` | semaphore, queue, backpressure, peak tracking |
 | `ModelRouter` | per-task model and effort tier instead of one model for everything |
@@ -1633,6 +1722,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `agent-harness run|chat --sandbox-id --keep-sandbox`; the run footer prints
   the sandbox id.
 
+**Sessions in a database — `agent_harness.sessions`**
+- `session_provider(url)`: chats in SQLite, PostgreSQL, MySQL/MariaDB, MongoDB,
+  Redis, DynamoDB, S3, Azure Blob or GCS, on the memory backends' own URLs and
+  drivers. `Harness(sessions=url)`, `Harness.on(url)` for memory and chats on
+  one pool, `sessions:` in a blueprint, `--sessions` on the CLI.
+- A session has an owner (`user_id`, `tenant_id`, from the agent's trace) and a
+  `version`. `SessionStore.list(user_id=, tenant_id=, agent=)`,
+  `Session.summary()`.
+- An agent acting for someone else is refused the session as if it did not
+  exist, and the refusal is audited.
+- A stale save raises `SessionConflict`. The agent then adds its own turn to
+  what is there, or — if its history was compacted — keeps the run as a fork and
+  says so in the new `RunResult.warnings`.
+- A failed save no longer raises out of `run()`: the answer is returned with a
+  warning.
+- `SessionStore.check()` and `agent-harness sessions --store URL --check`;
+  `--user`, `--tenant`, `--agent`, `--delete`, `--json`, `--backends`.
+- `DurableSessionStore` for writing your own. `examples/12_sessions.py`.
+
 ### Changed
 
 - In a mode, the final allowed step tells the model it is the last and disables
@@ -1652,8 +1760,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The workspace tools, `run_python`, `parse_document`, `render_chart` and
   `write_report` are now async, and go through the workspace's async methods.
 
+- A run that is not continuing a conversation is now *added* to its session's
+  record instead of replacing it; it still starts with a clean context.
+- A run handed its own `messages` and no session (an agent used as a tool, a
+  replay) is no longer saved over the agent's session.
+- `FileSessionStore` replaces a session file in one step, and refuses a save
+  from a stale version.
+- `Harness.local(...)` accepts replacements for any of its file-backed parts.
+
 ### Fixed
 
+- `AzureBlobMemory` raised when asked to delete a blob that was already gone.
 - Resuming a session whose last run was stopped mid-step (a budget, a stop
   request) sent a tool call with no result, which providers reject. Unanswered
   tool calls are now closed when the history is picked back up.
@@ -2657,7 +2774,7 @@ Properties: available_versions, content_guardrails, conversational, depth, facto
 
 ### `Harness`  (class)
 Shared runtime services. Everything has a working default.
-Methods: `aclose(self) -> None`, `local(root: str | Path = .harness, *, trace: bool = True, **kwargs: Any) -> Harness`, `report(self) -> dict[str, Any]`, `reset_budget(self, budget: Budget | None = None) -> BudgetGuard`, `stop(self, reason: str = , *, mode: str = drain, requested_by: str = human) -> Any`, `testing(provider: Provider | None = None, **kwargs: Any) -> Harness`
+Methods: `aclose(self) -> None`, `local(root: str | Path = .harness, *, trace: bool = True, **kwargs: Any) -> Harness`, `on(url: str, **kwargs: Any) -> Harness`, `report(self) -> dict[str, Any]`, `reset_budget(self, budget: Budget | None = None) -> BudgetGuard`, `stop(self, reason: str = , *, mode: str = drain, requested_by: str = human) -> Any`, `testing(provider: Provider | None = None, **kwargs: Any) -> Harness`
 Properties: compiler, guard, rate, replayer
 
 ### `Orchestrator`  (class)
@@ -2685,9 +2802,9 @@ Fields: instructions, description, model, mode, depth, tier, effort, temperature
 
 ### `Blueprint`  (class)
 A file's worth of declarations, and the agents it can build.
-Methods: `build(self, name: str, *, tools: Any = (), harness: Any = None, **overrides: Any) -> Any`, `build_all(self, *, tools: Any = (), harness: Any = None, **overrides: Any) -> dict[str, Any]`, `from_dict(data: dict[str, Any]) -> Blueprint`, `from_file(path: str | Path) -> Blueprint`, `from_text(text: str, *, fmt: str = yaml, path: str | None = None) -> Blueprint`, `memory_store(self) -> Any`, `render(self, text: str) -> str`, `save(self, path: str | Path) -> Path`
+Methods: `build(self, name: str, *, tools: Any = (), harness: Any = None, **overrides: Any) -> Any`, `build_all(self, *, tools: Any = (), harness: Any = None, **overrides: Any) -> dict[str, Any]`, `from_dict(data: dict[str, Any]) -> Blueprint`, `from_file(path: str | Path) -> Blueprint`, `from_text(text: str, *, fmt: str = yaml, path: str | None = None) -> Blueprint`, `memory_store(self) -> Any`, `render(self, text: str) -> str`, `save(self, path: str | Path) -> Path`, `session_store(self) -> Any`
 Properties: names
-Fields: version, defaults, prompts, guardrails, subagents, agents, memory, path
+Fields: version, defaults, prompts, guardrails, subagents, agents, memory, sessions, path
 
 ### `AgentEntry`  (class)
 One agent, as declared in the file.
@@ -3156,24 +3273,37 @@ Methods: `matches(self, name: str) -> bool`
 
 ### `Session`  (class)
 Everything needed to pick a conversation back up where it stopped.
-Methods: `add(self, message: Message) -> Message`, `fork(self, *, at: int | None = None) -> Session`, `replay(self) -> list[Message]`
-Fields: id, agent, title, messages, artifacts, usage, created, updated, parent_id, forked_at, metadata
+Methods: `add(self, message: Message) -> Message`, `fork(self, *, at: int | None = None) -> Session`, `owned_by(self, user_id: str | None, tenant_id: str | None) -> bool`, `replay(self) -> list[Message]`, `summary(self) -> dict[str, Any]`
+Fields: id, agent, title, user_id, tenant_id, version, messages, artifacts, usage, created, updated, parent_id, forked_at, metadata
 
 ### `SessionStore`  (class)
-Helper class that provides a standard way to create an ABC using inheritance.
-Methods: `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
+Where conversations are kept. Four methods make a store.
+Methods: `aclose(self) -> None`, `check(self) -> dict[str, Any]`, `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50, user_id: str | None = None, tenant_id: str | None = None, agent: str | None = None) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
+
+### `DurableSessionStore`  (class)
+The shape every store that outlives the process shares.
+Methods: `aclose(self) -> None`, `check(self) -> dict[str, Any]`, `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50, user_id: str | None = None, tenant_id: str | None = None, agent: str | None = None) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
+
+### `session_provider(target: Any, **options: Any) -> SessionStore`  (function)
+A session store from a connection string, or on a memory backend you already have.
+
+### `session_backends() -> dict[str, bool]`  (function)
+Which stores can be used right now, without installing anything.
+
+### `SessionConflict`  (class)
+Someone else saved this session first.
 
 ### `PermissionRule`  (class)
 First matching rule wins. `pattern` globs the tool name.
 Methods: `matches(self, tool: str, args: dict[str, Any]) -> bool`
 
 ### `InMemorySessionStore`  (class)
-Helper class that provides a standard way to create an ABC using inheritance.
-Methods: `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
+The default. Gone when the process exits.
+Methods: `aclose(self) -> None`, `check(self) -> dict[str, Any]`, `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50, user_id: str | None = None, tenant_id: str | None = None, agent: str | None = None) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
 
 ### `FileSessionStore`  (class)
-One JSON file per session under `root`.
-Methods: `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
+One JSON file per session under `root`. For one machine.
+Methods: `aclose(self) -> None`, `check(self) -> dict[str, Any]`, `delete(self, session_id: str) -> None`, `fork(self, session_id: str, *, at: int | None = None) -> Session`, `list(self, *, limit: int = 50, user_id: str | None = None, tenant_id: str | None = None, agent: str | None = None) -> list[Session]`, `load(self, session_id: str) -> Session`, `resume(self, session_id: str) -> Session`, `save(self, session: Session) -> Session`
 
 ### `Checkpoint`  (class)
 A run frozen mid-flight.
@@ -3307,7 +3437,7 @@ Fields: message, stop_reason, usage, model, provider, latency_ms, raw
 ### `RunResult`  (class)
 The one object a caller gets back from `agent.run()`.
 Properties: cost_usd, ok
-Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id
+Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id, warnings
 
 ### `StreamEvent`  (class)
 One beat of a streaming run: a token, a tool call, a step boundary.
@@ -4479,6 +4609,82 @@ async def main() -> None:
 
     await harness.aclose()          # stops the sandbox
     print(f"\nsandbox stopped: {not workspace.sandbox.info()['running']}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/12_sessions.py
+
+Sessions in a database: owned, listed by user, continued by another process, and two requests on one chat both keeping their turn.
+
+```python
+"""Chats in a database: owned, listed, continued by another process, never lost.
+
+Uses SQLite so it runs anywhere. Change the URL to `postgresql://…`,
+`mongodb://…`, `redis://…` or `azure://container` and nothing else changes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+
+from _common import pick_provider
+
+from agent_harness import Agent, ConfigurationError, FakeProvider, Harness
+
+ADA = {"user_id": "ada", "tenant_id": "acme"}
+BOB = {"user_id": "bob", "tenant_id": "acme"}
+
+
+async def main() -> None:
+    provider, model = pick_provider()
+    scripted = provider is not None
+    url = f"sqlite:///{tempfile.mkdtemp()}/chats.db"
+
+    def replica(script: list, who: dict) -> Agent:
+        """One process of several serving the same chats."""
+        harness = (Harness.on(url, provider=FakeProvider(script)) if scripted
+                   else Harness.on(url))
+        return Agent("support", "Answer briefly.", mode="chat", model=model,
+                     harness=harness, trace=who)
+
+    report = await Harness.on(url).sessions.check()
+    print(f"{report['store']}: "
+          + ", ".join(f"{s['step']} {'ok' if s['ok'] else 'FAILED'}"
+                      for s in report["steps"]))
+
+    # --- one process starts a chat for Ada ---------------------------------
+    first = replica(["Noted: order 4182."], ADA)
+    started = await first.run("My order number is 4182.")
+    await first.harness.aclose()
+
+    # --- another continues it, by its id ---------------------------------------
+    second = replica(["Your order is 4182."], ADA)
+    reply = await second.run("What was my order number?", session=started.session_id)
+    print(f"\ncontinued  {reply.output}")
+
+    # --- it is Ada's: listed for her, and not there at all for Bob ---------------
+    for chat in await second.harness.sessions.list(**ADA):
+        print(f"ada's      {chat.id}  v{chat.version}  {len(chat.messages)} messages"
+              f"  “{chat.title}”")
+    bob = replica(["never asked"], BOB)
+    try:
+        await bob.run("What was her order number?", session=started.session_id)
+    except ConfigurationError as refused:
+        print(f"bob        {refused}")
+
+    # --- two requests on one chat: both turns are kept ----------------------------
+    one = replica(["Tomorrow."], ADA)
+    two = replica(["By courier."], ADA)
+    await asyncio.gather(one.run("When does it arrive?", session=started.session_id),
+                         two.run("How is it shipped?", session=started.session_id))
+    final = await one.harness.sessions.load(started.session_id)
+    print(f"\nboth kept  {len(final.messages)} messages, version {final.version}:")
+    for message in final.messages[-4:]:
+        print(f"           {message.role}: {message.text}")
 
 
 if __name__ == "__main__":

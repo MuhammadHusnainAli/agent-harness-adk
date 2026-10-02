@@ -140,6 +140,19 @@ class OutputContractError(HarnessError):
     """The agent's final answer did not match the declared output type."""
 
 
+class SessionConflict(HarnessError):
+    """Someone else saved this session first.
+
+    A session carries a version; a store only accepts a save made from the
+    version it holds. This is what stops two requests on one chat from quietly
+    overwriting each other.
+    """
+
+    def __init__(self, message: str, *, session_id: str = "") -> None:
+        super().__init__(message)
+        self.session_id = session_id
+
+
 class StopRequested(HarnessError):
     """A human pulled the stop control."""
 

@@ -43,6 +43,7 @@ from .errors import (
     ProviderUnavailableError,
     QuotaExceededError,
     RateLimitError,
+    SessionConflict,
     StopRequested,
     ToolError,
     ToolNotFound,
@@ -169,6 +170,7 @@ from .runtime import (
     ComponentHealth,
     ConcurrencyScheduler,
     DeliverableStore,
+    DurableSessionStore,
     FileSessionStore,
     Guardrails,
     HookContext,
@@ -205,6 +207,7 @@ from .sandboxes import (
     register_sandbox,
     sandbox,
 )
+from .sessions import session_backends, session_provider
 from .skills import Skill, SkillRegistry
 from .spec import CompiledSpec, SpecCompiler
 from .subagents import Bench, SubAgentFactory, SubAgentSpec
@@ -423,8 +426,12 @@ __all__ = [
     "RouteRule",
     "Session",
     "SessionStore",
+    "DurableSessionStore",
     "InMemorySessionStore",
     "FileSessionStore",
+    "session_provider",
+    "session_backends",
+    "SessionConflict",
     "Checkpoint",
     "Checkpointer",
     "Workspace",

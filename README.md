@@ -274,6 +274,7 @@ was working in:
 
 ```python
 harness = Harness.local(".harness")              # sessions that outlive the process
+# or a database: Harness(sessions="postgresql://…") — see "Sessions" below
 agent = Agent("colleague", mode="cowork", harness=harness,
               workspace=sandbox("e2b", keep=True))      # keep: do not kill it at the end
 
@@ -357,6 +358,94 @@ Docker is tested against a real container. E2B, Daytona and Modal are driven
 through their own SDKs and tested against stand-ins for them, and Kubernetes and
 SSH against a recorded command line — so before relying on one, run
 `agent-harness sandboxes <name> --check` with your credentials.
+
+## Sessions: where chats are kept
+
+A chat id is a row in a store. By default that store is in memory and gone with
+the process; `Harness.local()` keeps a JSON file per chat. For anything with more
+than one replica, name a database:
+
+```python
+from agent_harness import Agent, Harness, session_provider
+
+harness = Harness(sessions="postgresql://user:pass@host/agents")
+harness = Harness(sessions=session_provider("redis://host:6379/0", ttl=30 * 86_400))
+harness = Harness.on("postgresql://user:pass@host/agents")    # memory and chats, one pool
+harness = Harness.local(".harness", sessions="azure://chats")  # chats in a storage account
+```
+
+| store | URL | install |
+|---|---|---|
+| SQLite | `sqlite:///chats.db` | — |
+| PostgreSQL | `postgresql://…` | `asyncpg` or `psycopg` |
+| MySQL / MariaDB | `mysql://…` | `aiomysql` |
+| MongoDB (and Cosmos DB's Mongo API) | `mongodb://…` | `motor` or `pymongo` |
+| Redis | `redis://…` | `redis` |
+| DynamoDB | `dynamodb://table` | `boto3` |
+| Amazon S3 | `s3://bucket/prefix` | `boto3` |
+| Azure Blob — a storage account | `azure://container` | `azure-storage-blob` |
+| Google Cloud Storage | `gs://bucket/prefix` | `google-cloud-storage` |
+
+The URLs and drivers are the memory backends' own, so a database is configured
+in one place. Every store keeps a session under the same three promises:
+
+**It knows whose it is.** A session is stamped with the user and tenant the agent
+was acting for (`Agent(trace={"user_id": ..., "tenant_id": ...})`), and those
+are indexed columns, not buried in a blob:
+
+```python
+chats = await harness.sessions.list(user_id="ada", tenant_id="acme", limit=20)
+[c.summary() for c in chats]        # id, title, messages, updated, cost — for a sidebar
+```
+
+An agent acting for someone else is refused the session in the same words as for
+an id that never existed — `no session 'ses_…'` — so ids cannot be probed, and
+the refusal is in the audit trail.
+
+**Two requests cannot overwrite each other.** A session carries a version, and a
+store accepts a save only from the version it holds — one atomic statement in
+SQL, a conditional write in MongoDB and DynamoDB, a Lua script in Redis. When a
+second request on the same chat finishes after the first, its turn is *added* to
+what is there; nobody's message is lost. If that is not possible — the run
+compacted its history along the way — the run is kept as a fork and
+`result.warnings` says which session it ended up in.
+
+**A store that is down loses the record, not the answer.** If the save fails,
+the result still comes back, with the failure in `result.warnings` and the audit
+trail.
+
+To find out whether a database is wired up correctly before the first real
+conversation:
+
+```python
+report = await harness.sessions.check()
+report["ok"], report["steps"]   # save · load · list by owner · refuse a stale save · delete
+```
+
+```bash
+agent-harness sessions --store postgresql://… --check
+agent-harness sessions --store postgresql://… --user ada --tenant acme
+agent-harness run "carry on" --sessions postgresql://… --user ada --session ses_4f1c
+```
+
+Three things worth knowing:
+
+- **DynamoDB** limits an item to 400 KB, so a conversation is stored compressed
+  and in pieces behind one small head item; the conditional write on that head
+  is what makes a save all-or-nothing.
+- **Object storage** (S3, Azure Blob, GCS) is the cheap, durable place for chats
+  kept for years. Its version check reads before it writes, which stops the
+  ordinary double-submit but is not atomic; keep live, concurrent chats in a
+  database and archive to a bucket.
+- **Your own store** is a `SessionStore` — `save`, `load`, `list`, `delete` — or
+  a `DurableSessionStore`, which gives you the versioning for four smaller
+  methods. `check()` will tell you if it holds the line.
+
+PostgreSQL, MariaDB, MongoDB, Redis, DynamoDB (DynamoDB Local) and Azure Blob
+(Azurite) have each been run against a real server through the whole contract,
+including a race of eight saves from one version. S3 and GCS share the Azure
+code path and have not; `tests/test_sessions.py` lists the environment variables
+that run the suite against yours.
 
 ## Tools
 
@@ -975,7 +1064,7 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | `Checkpointer` + `Replayer` | step snapshots, a timeline, and resume-from-any-step |
 | `RecordingProvider` / `ReplayProvider` | record a run once, reproduce it exactly with no network and no spend |
 | `DeliverableStore` | the documents and reports a run produced, versioned and digested |
-| `SessionStore` | resume, fork or branch a run; a long job survives a restart |
+| `SessionStore` | resume, fork or branch a run; a long job survives a restart — in files, SQL, MongoDB, Redis, DynamoDB or a storage account, owned and versioned |
 | `WorkspaceBroker` | a jailed directory per sub-agent (or a shared one for handovers) — or a sandbox each: Docker, E2B, Daytona, Modal, a pod |
 | `ConcurrencyScheduler` | semaphore, queue, backpressure, peak tracking |
 | `ModelRouter` | per-task model and effort tier instead of one model for everything |
