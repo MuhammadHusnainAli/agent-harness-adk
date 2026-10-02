@@ -766,7 +766,8 @@ async def test_e2b_is_created_with_what_was_asked_and_killed_at_the_end(
                        workdir=str(tmp_path / "a"))
     await attached.start()
     await attached.aclose()
-    assert seen["connect"] == ("sbx-9", {"api_key": "other"}) and seen["killed"] == 1
+    assert seen["connect"] == ("sbx-9", {"timeout": 3600, "api_key": "other"})
+    assert seen["killed"] == 1 and not attached.sandbox.replaced
 
 
 async def test_e2b_without_its_sdk_or_its_key_says_which(monkeypatch):
@@ -852,6 +853,7 @@ async def test_daytona_is_created_from_an_image_or_a_snapshot_and_deleted(
     await attached.start()
     await attached.aclose()
     assert seen["get"] == "dt-9" and seen["deleted"] == 1
+    assert not attached.sandbox.replaced
 
     with pytest.raises(ConfigurationError, match="not both"):
         sandbox("daytona", image="a", snapshot="b")
@@ -880,6 +882,10 @@ async def test_modal_is_created_under_an_app_and_terminated(monkeypatch, tmp_pat
         def __init__(self):
             self.exec = aio(self._exec)
             self.terminate = aio(self._terminate)
+            self.poll = aio(self._poll)
+
+        async def _poll(self):
+            return None                      # still running
 
         async def _exec(self, *argv, timeout=None):
             seen["argv"], seen["exec_timeout"] = argv[:2], timeout
@@ -936,6 +942,7 @@ async def test_modal_is_created_under_an_app_and_terminated(monkeypatch, tmp_pat
     await attached.start()
     await attached.aclose()
     assert seen["from_id"] == "sb-9" and seen["terminated"] == 1
+    assert not attached.sandbox.replaced
 
 
 # --- the command line ----------------------------------------------------------------------------

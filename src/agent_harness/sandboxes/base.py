@@ -81,17 +81,32 @@ class Sandbox(ABC):
     url_option: ClassVar[str] = ""
     driver_hint: ClassVar[str] = ""
 
-    def __init__(self, *, workdir: str | None = None, env: dict[str, str] | None = None,
-                 timeout: float = 120.0, start_timeout: float = 300.0,
-                 keep: bool = False, python: str = "python3") -> None:
+    def __init__(self, *, id: str | None = None, workdir: str | None = None,
+                 env: dict[str, str] | None = None, timeout: float = 120.0,
+                 start_timeout: float = 300.0, keep: bool | None = None,
+                 on_missing: str = "new", python: str = "python3") -> None:
+        if on_missing not in ("new", "error"):
+            raise ConfigurationError(
+                f"on_missing must be \"new\" or \"error\" — got {on_missing!r}")
+        #: The sandbox to pick back up instead of creating one. Whatever a run
+        #: reported as `result.sandbox_id` goes here.
+        self.attach_id = id or None
         #: Where the agent works, inside the sandbox. None means a `workspace`
         #: folder under wherever the sandbox starts, settled at start.
         self.workdir = workdir
         self.env = dict(env or {})
         self.timeout = timeout
         self.start_timeout = start_timeout
-        #: Leave it running at `stop()` — to reconnect to later, by `id`.
-        self.keep = keep
+        #: Leave it running at `stop()`, to be picked back up later by its id.
+        #: One that was itself picked up is kept unless told otherwise.
+        self.keep = keep if keep is not None else self.attach_id is not None
+        #: When the sandbox to pick up is gone: start a new one in its place
+        #: ("new"), or fail ("error").
+        self.on_missing = on_missing
+        #: The id of the sandbox this one had to replace, and why it was gone.
+        self.replaced = ""
+        self.missing_reason = ""
+        self._keep_before = self.keep
         self.python = python
         self.id = ""
         self.started_at = 0.0
@@ -101,7 +116,8 @@ class Sandbox(ABC):
 
     # ---- what a backend provides ---------------------------------------------
     async def _start(self) -> None:  # noqa: B027 - optional, not abstract
-        """Create the sandbox, or connect to it. Set `self.id`."""
+        """Create the sandbox — or, when `self.attach_id` is set, connect to
+        that one and raise if it is not there. Set `self.id`."""
 
     @abstractmethod
     async def _exec(self, command: str, *, cwd: str | None, env: dict[str, str],
@@ -122,11 +138,20 @@ class Sandbox(ABC):
                 raise ToolError(f"this {self.name} sandbox has been stopped",
                                 tool="sandbox")
             try:
-                await asyncio.wait_for(self._start(), self.start_timeout)
-            except _Timeout:
-                raise ToolError(
-                    f"the {self.name} sandbox did not start within "
-                    f"{self.start_timeout:.0f}s", tool="sandbox") from None
+                await self._begin()
+            except ConfigurationError:
+                raise          # a missing key or driver: a new one would fail too
+            except Exception as exc:
+                if self.attach_id is None or self.on_missing == "error":
+                    raise
+                # The one to pick up is gone — expired, deleted, never there.
+                # Work goes on in a new one, and the caller is told which.
+                self.replaced, self.attach_id, self.id = self.attach_id, None, ""
+                self.missing_reason = str(exc)[:300]
+                # The new one is ours: whether it is kept is as it was set up,
+                # not as it would have been for one we had only picked up.
+                self.keep = self._keep_before
+                await self._begin()
             self.id = self.id or new_id("sbx")
             if self.workdir is None:
                 here = await self._exec("pwd", cwd=None, env={}, timeout=30)
@@ -143,12 +168,46 @@ class Sandbox(ABC):
             self._started = True
         return self
 
-    async def stop(self) -> None:
-        """Destroy the sandbox, unless it was asked to be kept. Safe to repeat."""
+    @property
+    def running(self) -> bool:
+        return self._started
+
+    async def _begin(self) -> None:
+        """Start it, with whatever went wrong said as one kind of error — a
+        platform's own exception is not something a run knows how to survive."""
+        try:
+            await asyncio.wait_for(self._start(), self.start_timeout)
+        except _Timeout:
+            raise ToolError(
+                f"the {self.name} sandbox did not start within "
+                f"{self.start_timeout:.0f}s", tool="sandbox") from None
+        except (ConfigurationError, ToolError):
+            raise
+        except Exception as exc:
+            what = (f"{self.name} sandbox {self.attach_id} could not be picked up"
+                    if self.attach_id else f"the {self.name} sandbox could not start")
+            raise ToolError(f"{what}: {exc}", tool="sandbox") from exc
+
+    def attach(self, id: str) -> Sandbox:
+        """Pick up the sandbox with this id when this one starts, and leave it
+        running afterwards. Only before the first use."""
+        if self._started:
+            raise ToolError(
+                f"this {self.name} sandbox is already running as {self.id}; it "
+                "cannot become another one", tool="sandbox")
+        self.attach_id = id
+        self._keep_before, self.keep = self.keep, True
+        return self
+
+    async def stop(self, *, destroy: bool = False) -> None:
+        """Destroy the sandbox, unless it was asked to be kept. Safe to repeat.
+
+        `destroy=True` ends a kept one too — the conversation is over.
+        """
         if self._stopped:
             return
         self._stopped = True
-        if self._started and not self.keep:
+        if self._started and (destroy or not self.keep):
             await self._stop()
         self._started = False
 
@@ -274,7 +333,7 @@ class Sandbox(ABC):
     def info(self) -> dict[str, Any]:
         return {"sandbox": self.name, "id": self.id, "workdir": self.workdir,
                 "isolated": self.isolated, "running": self._started,
-                "kept": self.keep}
+                "kept": self.keep, "replaced": self.replaced}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
         state = "running" if self._started else "stopped" if self._stopped else "idle"
@@ -543,6 +602,20 @@ class SandboxWorkspace(Workspace):
 
     async def aclose(self) -> None:
         await self.sandbox.stop()
+
+    async def destroy(self) -> None:
+        """End the sandbox even if it was being kept for later."""
+        await self.sandbox.stop(destroy=True)
+
+    @property
+    def sandbox_id(self) -> str:
+        """The id to pick this sandbox back up with. "" until it has started."""
+        return self.sandbox.id
+
+    def ref(self) -> dict[str, str]:
+        """Which sandbox this is, as plain data — what a session remembers."""
+        return {"sandbox": self.sandbox.name, "id": self.sandbox.id,
+                "workdir": self.sandbox.workdir or ""}
 
     async def __aenter__(self) -> SandboxWorkspace:
         return await self.start()

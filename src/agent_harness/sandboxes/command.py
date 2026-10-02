@@ -48,6 +48,10 @@ class CommandSandbox(ProcessSandbox):
     def _wrap(self, script: str) -> list[str]:
         return [*self.wrap, script]
 
+    async def _start(self) -> None:
+        # The same place every time, so a conversation finds its files again.
+        self.id = self.workdir or ""
+
 
 class SSHSandbox(ProcessSandbox):
     """A machine over SSH — a VM you already have, a build box, a lab host.
@@ -117,12 +121,11 @@ class KubernetesSandbox(ProcessSandbox):
                  ttl: int | None = 14_400, labels: dict[str, str] | None = None,
                  service_account: str | None = None, kubectl: str = "kubectl",
                  workdir: str | None = "/workspace", **kw: Any) -> None:
-        # A pod we were pointed at is somebody else's to delete.
-        kw.setdefault("keep", pod is not None)
+        if pod is not None:
+            kw.setdefault("id", pod)
         super().__init__(workdir=workdir, **kw)
         self.image = image
-        self.pod = pod
-        self.attached = pod is not None
+        self.pod: str | None = self.attach_id
         self.container = container
         self.cpu, self.memory, self.ttl = cpu, memory, ttl
         self.labels = {"app.kubernetes.io/managed-by": "agent-harness",
@@ -174,7 +177,9 @@ class KubernetesSandbox(ProcessSandbox):
         return out.decode(errors="replace")
 
     async def _start(self) -> None:
-        if not self.attached:
+        if self.attach_id:
+            self.pod = self.attach_id
+        else:
             self.pod = f"agent-harness-{new_id()}"
             await self._kubectl(
                 "run", self.pod, f"--image={self.image}", "--restart=Never",

@@ -41,8 +41,12 @@ class DockerSandbox(ProcessSandbox):
             and what the agent writes there stays after the container is gone.
             The container then runs as you, so the files are yours.
         network: let the container reach the network.
-        container: attach to a container that is already running, and leave it
-            running afterwards.
+        container: pick up a container that already exists — one of your own,
+            or one an earlier run was told to `keep` — and leave it afterwards.
+            The same thing as `id=`.
+        keep: leave the container behind at the end, so a later conversation
+            can pick it up by its id. It is not removed when it exits, and is
+            started again if it has.
         runtime: an OCI runtime — "runsc" for gVisor, "kata" for Kata.
         ttl: seconds until the container ends by itself. None is no limit.
         args: anything else `docker run` should be given.
@@ -60,15 +64,14 @@ class DockerSandbox(ProcessSandbox):
                  runtime: str | None = None, ttl: int | None = 14_400,
                  args: Sequence[str] = (), cli: str = "docker",
                  workdir: str | None = "/workspace", **kw: Any) -> None:
-        # A container we were pointed at is somebody else's to remove.
-        kw.setdefault("keep", container is not None)
+        if container is not None:
+            kw.setdefault("id", container)
         super().__init__(workdir=workdir, **kw)
         self.image = image
         self.mount = Path(mount).expanduser().resolve() if mount else None
         self.mount_read_only = mount_read_only
         self.network = network
-        self.attached = container is not None
-        self.container = container or f"agent-harness-{new_id()}"
+        self.container = self.attach_id or f"agent-harness-{new_id()}"
         self.memory, self.cpus, self.pids = memory, cpus, pids
         self.user = user
         self.runtime = runtime
@@ -81,9 +84,12 @@ class DockerSandbox(ProcessSandbox):
 
     def run_argv(self) -> list[str]:
         """The `docker run` this sandbox starts its container with."""
-        argv = [self.cli, "run", "-d", "--rm", "--name", self.container,
+        argv = [self.cli, "run", "-d", "--name", self.container,
                 "--label", "agent-harness=sandbox", "-w", self.workdir or "/workspace",
                 "--security-opt", "no-new-privileges"]
+        if not self.keep:
+            # One to be picked up later must outlive its own exit.
+            argv.insert(3, "--rm")
         if not self.network:
             argv += ["--network", "none"]
         if self.memory:
@@ -124,14 +130,18 @@ class DockerSandbox(ProcessSandbox):
         if self._run is run_process and shutil.which(self.cli) is None:
             raise ConfigurationError(
                 f"{self.cli} is not on PATH — install it, or pick another sandbox")
-        if self.attached:
+        if self.attach_id:
+            self.container = self.attach_id
             state = await self._cli(
                 [self.cli, "inspect", "-f", "{{.State.Running}}", self.container],
                 timeout=30, what="inspect")
             if state != "true":
-                raise ToolError(f"container {self.container} is not running",
-                                tool="sandbox")
+                # Kept, and since exited: its files are still in it.
+                await self._cli([self.cli, "start", self.container],
+                                timeout=self.start_timeout, what="start")
         else:
+            if self.replaced:
+                self.container = f"agent-harness-{new_id()}"
             if self.mount is not None:
                 self.mount.mkdir(parents=True, exist_ok=True)
             await self._cli(self.run_argv(), timeout=self.start_timeout, what="run")
@@ -157,8 +167,6 @@ class DockerSandbox(ProcessSandbox):
             pass
 
     async def _stop(self) -> None:
-        if self.attached:
-            return
         atexit.unregister(self._remove_now)
         try:
             await self._run([self.cli, "rm", "-f", self.container], None, 30)

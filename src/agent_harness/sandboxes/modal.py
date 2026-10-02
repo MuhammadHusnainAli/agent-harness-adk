@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from ..errors import ConfigurationError
+from ..errors import ConfigurationError, ToolError
 from .base import ExecResult, Sandbox
 
 __all__ = ["ModalSandbox"]
@@ -26,7 +26,10 @@ class ModalSandbox(Sandbox):
         ttl: seconds the sandbox lives before Modal ends it.
         network: False blocks all network access.
         cpu, memory: cores, and MiB.
-        sandbox_id: connect to an existing sandbox, and leave it afterwards.
+        sandbox_id: pick up an existing sandbox, and leave it afterwards. The
+            same as `id=`.
+        keep: do not terminate it at the end, so a later conversation can pick
+            it up by its id — until `ttl` runs out.
     """
 
     name: ClassVar[str] = "modal"
@@ -38,25 +41,28 @@ class ModalSandbox(Sandbox):
                  memory: int | None = None, sandbox_id: str | None = None,
                  box: Any = None, workdir: str | None = "/workspace",
                  **kw: Any) -> None:
-        kw.setdefault("keep", sandbox_id is not None)
+        if sandbox_id is not None:
+            kw.setdefault("id", sandbox_id)
         super().__init__(workdir=workdir, **kw)
         self.image = image or None
         self.app = app
         self.ttl = ttl
         self.network = network
         self.cpu, self.memory = cpu, memory
-        self.sandbox_id = sandbox_id
         self._box = box
 
     async def _start(self) -> None:
-        if self._box is None:
+        if self._box is None or self.replaced:
             try:
                 import modal
             except ImportError as exc:
                 raise ConfigurationError(
                     "the modal sandbox needs its SDK — " + self.driver_hint) from exc
-            if self.sandbox_id:
-                self._box = await modal.Sandbox.from_id.aio(self.sandbox_id)
+            if self.attach_id:
+                self._box = await modal.Sandbox.from_id.aio(self.attach_id)
+                if await self._box.poll.aio() is not None:
+                    raise ToolError(f"modal sandbox {self.attach_id} has finished",
+                                    tool="sandbox")
             else:
                 app = await modal.App.lookup.aio(self.app, create_if_missing=True)
                 image = (modal.Image.from_registry(self.image) if self.image
@@ -70,7 +76,7 @@ class ModalSandbox(Sandbox):
                 if self.memory is not None:
                     options["memory"] = self.memory
                 self._box = await modal.Sandbox.create.aio(**options)
-        self.id = str(getattr(self._box, "object_id", "") or self.sandbox_id or "")
+        self.id = str(getattr(self._box, "object_id", "") or self.attach_id or "")
 
     async def _exec(self, command: str, *, cwd: str | None, env: dict[str, str],
                     timeout: float) -> ExecResult:

@@ -135,7 +135,9 @@ Agent("colleague", mode=modes.cowork("balanced", ask=ask_me, python=True))
 ```
 
 **Chat** keeps the conversation on the agent. `agent.new_session()` starts a
-fresh one; `session="..."` picks an old one back up. A run that was cut off
+fresh one; `session="..."` picks an old one back up, and `await
+agent.resume("...")` follows it from then on (see [picking a conversation back
+up](#picking-a-conversation-back-up) for the sandbox that goes with it). A run that was cut off
 mid-step — a budget, a stop — no longer poisons the thread: the tool calls it
 left unanswered are closed before the next turn is sent.
 
@@ -276,6 +278,58 @@ agent-harness sandboxes                              # what is ready, what each 
 agent-harness sandboxes docker://alpine --check      # start one and prove it works
 agent-harness run "build it" --mode cowork --sandbox docker --workspace ./project
 ```
+
+### Picking a conversation back up
+
+A run hands back the two ids that continue it — the chat, and the sandbox it
+was working in:
+
+```python
+harness = Harness.local(".harness")              # sessions that outlive the process
+agent = Agent("colleague", mode="cowork", harness=harness,
+              workspace=sandbox("e2b", keep=True))      # keep: do not kill it at the end
+
+result = await agent.run("Build the importer.")
+result.session_id, result.sandbox_id             # ("ses_4f1c...", "i1a2b3...")
+```
+
+Later — another request, another process — the chat id is enough, because the
+session remembers its sandbox:
+
+```python
+agent = Agent("colleague", mode="cowork", workspace="e2b",
+              harness=Harness.local(".harness"))
+
+await agent.run("Now add the tests.", session="ses_4f1c...")
+
+# or pass both by hand, or follow the conversation from here on:
+await agent.run("Now add the tests.", session="ses_4f1c...", sandbox_id="i1a2b3...")
+await agent.resume("ses_4f1c...")                # every run after this continues it
+```
+
+`sandbox("e2b", id="i1a2b3...")` says the same thing where the sandbox is built;
+every backend takes `id=`.
+
+- **`keep=True` is what leaves a sandbox to come back to.** Without it the
+  sandbox is destroyed when the harness closes. One that was picked up is left
+  as it was found; `await agent.workspace.destroy()` ends it when the
+  conversation is over. A kept Docker container that has since stopped is
+  started again with its files in it; a Daytona sandbox stopped for idleness
+  likewise; E2B and Modal sandboxes last until their `ttl`, which picking one
+  up renews on E2B.
+- **If the sandbox is gone, the conversation still continues.** A new one is
+  started, the text files the conversation is known to have written are put
+  back, and the model is told — in the conversation — which sandbox was lost,
+  what came back and what did not. `on_missing="error"` refuses instead.
+  The record kept with the session is for this, not a backup: it holds what
+  cowork handed back, up to 2 MB of text, and names anything larger or binary.
+- **One agent, one sandbox.** An agent already working in one sandbox refuses a
+  conversation whose files are in another, rather than mixing two people's
+  work. In a server, build an agent per conversation — it is cheap — on a shared
+  harness.
+- A local `Workspace("./project")` needs none of this: the files never left.
+
+### One for every agent
 
 To give every agent and sub-agent its own, set it once on the harness. A
 sub-agent whose spec says `workspace: isolated` then gets a sandbox to itself:
@@ -1440,6 +1494,8 @@ agent-harness run "how did Q3 go?" --mode research --depth deep --tools
 agent-harness chat --mode cowork --workspace ./project --approve
 agent-harness run "build it" --mode cowork --sandbox docker://node:22
 agent-harness sandboxes docker --check
+agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
+agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness models
 agent-harness sessions --state .harness
 agent-harness journal --state .harness
@@ -1562,6 +1618,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aremove`, `aexists`, `asnapshot`, `achanged`, `materialize`, `aclose`), which
   is what the tools now call.
 - `examples/11_sandboxes.py`.
+
+**Picking a conversation back up**
+- `RunResult.sandbox_id`, alongside `session_id`. A session remembers the
+  sandbox it was working in, so `agent.run(task, session=...)` puts the agent
+  back in it; `sandbox_id=` on a run, or `id=` on any sandbox, names one by hand.
+- `await agent.resume(session_id)` follows a conversation from then on, in any
+  mode.
+- `sandbox(..., keep=True)` leaves a sandbox for later; `workspace.destroy()`
+  ends a kept one. A kept Docker container is started again if it has stopped.
+- When the sandbox is gone, a new one is started, the text files the
+  conversation wrote are restored from the session, and the model is told what
+  was lost. `on_missing="error"` refuses instead.
+- `agent-harness run|chat --sandbox-id --keep-sandbox`; the run footer prints
+  the sandbox id.
 
 ### Changed
 
@@ -2582,7 +2652,7 @@ For answers to common questions about this code of conduct, see the FAQ at
 
 ### `Agent`  (class)
 One accountable agent: a model, a prompt, its tools, and its sub-agents.
-Methods: `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `close_session(self, summary: str | None = None) -> str`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
+Methods: `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `close_session(self, summary: str | None = None) -> str`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `resume(self, session: str, *, sandbox_id: str | None = None) -> Session`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
 Properties: available_versions, content_guardrails, conversational, depth, factory, provider, runtime_agents_remaining, subagents, version
 
 ### `Harness`  (class)
@@ -3156,12 +3226,13 @@ A workspace inside a sandbox — what `Agent(workspace=...)` takes.
 
 ### `Sandbox`  (class)
 Somewhere else to run commands. Started on first use, stopped once.
-Methods: `exec(self, command: str, *, cwd: str | None = None, env: dict[str, str] | None = None, timeout: float | None = None) -> ExecResult`, `exists(self, path: str) -> bool`, `info(self) -> dict[str, Any]`, `list_dir(self, path: str) -> list[str]`, `read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes`, `remove(self, path: str) -> None`, `script(command: str, *, cwd: str | None = None, env: dict[str, str] | None = None) -> str`, `snapshot(self, root: str) -> dict[str, tuple[int, int]]`, `start(self) -> Sandbox`, `stop(self) -> None`, `write_bytes(self, path: str, data: bytes, *, append: bool = False) -> None`
+Methods: `attach(self, id: str) -> Sandbox`, `exec(self, command: str, *, cwd: str | None = None, env: dict[str, str] | None = None, timeout: float | None = None) -> ExecResult`, `exists(self, path: str) -> bool`, `info(self) -> dict[str, Any]`, `list_dir(self, path: str) -> list[str]`, `read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes`, `remove(self, path: str) -> None`, `script(command: str, *, cwd: str | None = None, env: dict[str, str] | None = None) -> str`, `snapshot(self, root: str) -> dict[str, tuple[int, int]]`, `start(self) -> Sandbox`, `stop(self, *, destroy: bool = False) -> None`, `write_bytes(self, path: str, data: bytes, *, append: bool = False) -> None`
+Properties: running
 
 ### `SandboxWorkspace`  (class)
 A workspace whose files and commands live in a sandbox.
-Methods: `achanged(self, since: dict[str, tuple[int, int]]) -> list[str]`, `aclose(self) -> None`, `aexists(self, path: str) -> bool`, `alistdir(self, path: str = .) -> list[str]`, `aread(self, path: str) -> str`, `aread_bytes(self, path: str) -> bytes`, `aremove(self, path: str) -> None`, `asnapshot(self) -> dict[str, tuple[int, int]]`, `awrite(self, path: str, content: str | bytes, *, append: bool = False) -> int`, `changed(self, *_: Any, **__: Any) -> Any`, `check(self) -> dict[str, Any]`, `cleanup(self) -> None`, `exists(self, path: str) -> bool`, `listdir(self, *_: Any, **__: Any) -> Any`, `materialize(self, path: str) -> Path`, `read(self, *_: Any, **__: Any) -> Any`, `remove(self, *_: Any, **__: Any) -> Any`, `resolve(self, path: str | Path) -> PurePosixPath`, `shell(self, command: str, *, timeout: float | None = None) -> dict[str, Any]`, `snapshot(self, *_: Any, **__: Any) -> Any`, `start(self) -> SandboxWorkspace`, `tools(self) -> list[Tool]`, `uri(self, path: str = ) -> str`, `write(self, *_: Any, **__: Any) -> Any`
-Properties: isolated, python, root
+Methods: `achanged(self, since: dict[str, tuple[int, int]]) -> list[str]`, `aclose(self) -> None`, `aexists(self, path: str) -> bool`, `alistdir(self, path: str = .) -> list[str]`, `aread(self, path: str) -> str`, `aread_bytes(self, path: str) -> bytes`, `aremove(self, path: str) -> None`, `asnapshot(self) -> dict[str, tuple[int, int]]`, `awrite(self, path: str, content: str | bytes, *, append: bool = False) -> int`, `changed(self, *_: Any, **__: Any) -> Any`, `check(self) -> dict[str, Any]`, `cleanup(self) -> None`, `destroy(self) -> None`, `exists(self, path: str) -> bool`, `listdir(self, *_: Any, **__: Any) -> Any`, `materialize(self, path: str) -> Path`, `read(self, *_: Any, **__: Any) -> Any`, `ref(self) -> dict[str, str]`, `remove(self, *_: Any, **__: Any) -> Any`, `resolve(self, path: str | Path) -> PurePosixPath`, `shell(self, command: str, *, timeout: float | None = None) -> dict[str, Any]`, `snapshot(self, *_: Any, **__: Any) -> Any`, `start(self) -> SandboxWorkspace`, `tools(self) -> list[Tool]`, `uri(self, path: str = ) -> str`, `write(self, *_: Any, **__: Any) -> Any`
+Properties: isolated, python, root, sandbox_id
 
 ### `ExecResult`  (class)
 What a command did.
@@ -3236,7 +3307,7 @@ Fields: message, stop_reason, usage, model, provider, latency_ms, raw
 ### `RunResult`  (class)
 The one object a caller gets back from `agent.run()`.
 Properties: cost_usd, ok
-Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources
+Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id
 
 ### `StreamEvent`  (class)
 One beat of a streaming run: a token, a tool call, a step boundary.

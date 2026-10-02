@@ -52,6 +52,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is what the tools now call.
 - `examples/11_sandboxes.py`.
 
+**Picking a conversation back up**
+- `RunResult.sandbox_id`, alongside `session_id`. A session remembers the
+  sandbox it was working in, so `agent.run(task, session=...)` puts the agent
+  back in it; `sandbox_id=` on a run, or `id=` on any sandbox, names one by hand.
+- `await agent.resume(session_id)` follows a conversation from then on, in any
+  mode.
+- `sandbox(..., keep=True)` leaves a sandbox for later; `workspace.destroy()`
+  ends a kept one. A kept Docker container is started again if it has stopped.
+- When the sandbox is gone, a new one is started, the text files the
+  conversation wrote are restored from the session, and the model is told what
+  was lost. `on_missing="error"` refuses instead.
+- `agent-harness run|chat --sandbox-id --keep-sandbox`; the run footer prints
+  the sandbox id.
+
 ### Changed
 
 - In a mode, the final allowed step tells the model it is the last and disables

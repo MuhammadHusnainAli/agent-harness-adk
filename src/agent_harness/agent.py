@@ -71,6 +71,9 @@ __all__ = ["Agent"]
 
 MAX_RUNTIME_AGENTS = 100
 
+# How much of what a sandboxed conversation wrote is kept with its session.
+_SESSION_FILE_CHARS = 2_000_000
+
 
 def _enabled(value: bool | str) -> bool:
     """Accept `True`, `"enable"`, `"on"`, `"yes"` — and their opposites."""
@@ -421,6 +424,8 @@ class Agent:
             self.tools.extend(profile.tools(self.workspace))
         #: The conversation a chat or cowork agent carries from one run to the next.
         self._thread: Session | None = None
+        #: Set by `resume()`: follow that conversation, whatever the mode.
+        self._following = False
 
         # --- sub-agents -------------------------------------------------
         self._subagents: dict[str, Agent] = {}
@@ -510,6 +515,132 @@ class Agent:
     def version_spec(self, version: str | None = None) -> AgentVersion | None:
         return self._versions.get(version or self._version)
 
+    async def resume(self, session: str, *, sandbox_id: str | None = None) -> Session:
+        """Pick a conversation back up: every run from here continues it.
+
+            agent = Agent("colleague", mode="cowork", workspace="e2b", harness=harness)
+            await agent.resume("ses_4f1c")          # the chat, and the sandbox it used
+            await agent.run("Now add the tests.")
+
+        The session remembers which sandbox it was working in, so the id alone
+        is enough; `sandbox_id=` says a different one. If that sandbox is gone,
+        the run starts a new one, puts back the files the conversation is known
+        to have written, and tells the model what it could not put back.
+
+        It needs a session store that outlives the process — `Harness.local()`,
+        or your own `SessionStore` — for there to be anything to resume.
+        """
+        loaded = await self.harness.sessions.load(session)
+        if sandbox_id:
+            box = getattr(self.workspace, "sandbox", None)
+            if box is None:
+                raise ConfigurationError(
+                    f"{self.name}: sandbox_id={sandbox_id!r} was given, but this "
+                    "agent's workspace is not a sandbox")
+            loaded.metadata["sandbox"] = {"sandbox": box.name, "id": sandbox_id}
+        self._thread = loaded
+        self._following = True
+        return loaded
+
+    async def _rejoin(self, session: Session, sandbox_id: str | None) -> str:
+        """Put this agent back in the sandbox its conversation was using.
+
+        Returns what the model has to be told when that was not possible: it is
+        in a new sandbox, and which of its files came back.
+        """
+        box = getattr(self.workspace, "sandbox", None)
+        if box is None:
+            if sandbox_id:
+                raise ConfigurationError(
+                    f"{self.name}: sandbox_id={sandbox_id!r} was given, but this "
+                    "agent's workspace is not a sandbox")
+            return ""
+        ref = dict(session.metadata.get("sandbox") or {})
+        if not ref and not sandbox_id:
+            return ""                  # a conversation with no sandbox behind it yet
+        # What was asked for now beats what the sandbox was built with, which
+        # beats what the conversation remembers.
+        elsewhere = bool(ref) and ref.get("sandbox") != box.name
+        wanted = sandbox_id or box.attach_id or ("" if elsewhere else ref.get("id", ""))
+        if box.running:
+            if wanted and box.id != wanted:
+                raise ConfigurationError(
+                    f"{self.name} is already working in {box.name} sandbox "
+                    f"{box.id}, but this conversation's files are in {wanted} — "
+                    "build an agent for each conversation that has its own sandbox")
+            return ""
+        if wanted and box.attach_id != wanted:
+            box.attach(wanted)
+        try:
+            await self.workspace.start()
+        except ToolError as exc:
+            raise ConfigurationError(
+                f"{self.name}'s sandbox could not be picked back up: {exc}") from None
+        gone = box.replaced or (ref.get("id", "") if elsewhere else "")
+        if not gone:
+            return ""
+
+        # A new sandbox: put back what the conversation is known to have written.
+        restored: list[str] = []
+        lost: list[str] = []
+        for name, content in (session.metadata.get("sandbox_files") or {}).items():
+            try:
+                if content is None:
+                    lost.append(name)
+                elif not await self.workspace.aexists(name):
+                    await self.workspace.awrite(name, content)
+                    restored.append(name)
+            except ToolError:
+                lost.append(name)
+        self.harness.audit.record(self.name, "sandbox_replaced", target=box.id,
+                                  decision="ok", was=gone, restored=len(restored),
+                                  lost=len(lost), reason=box.missing_reason)
+        await self.harness.journal.write(
+            "decision", f"sandbox {gone} was gone; continuing in {box.id} with "
+            f"{len(restored)} files restored", agent=self.name)
+        lines = [f"[Workspace notice: the sandbox this conversation was working in "
+                 f"({gone}) is no longer available, so you are in a new one."]
+        if restored:
+            lines.append("Put back from the conversation's record: "
+                         + ", ".join(restored) + ".")
+        if lost:
+            lines.append("Could not be put back (not text, or too large): "
+                         + ", ".join(lost) + ".")
+        lines.append("Anything else that was installed, built or written there is "
+                     "gone — check before you rely on it.]")
+        return " ".join(lines)
+
+    async def _remember_sandbox(self, session: Session, result: RunResult,
+                                produced: list[Artifact]) -> None:
+        """Note on the session which sandbox it is in and what it wrote there,
+        so the conversation can be picked up — in it, or without it."""
+        box = getattr(self.workspace, "sandbox", None)
+        if box is None or not box.running:
+            return
+        result.sandbox_id = box.id
+        session.metadata["sandbox"] = self.workspace.ref()
+        files: dict[str, str | None] = dict(session.metadata.get("sandbox_files") or {})
+        for artifact in produced:
+            if artifact.produced_by == self.name and artifact.name != getattr(
+                    self.mode, "report", ""):
+                files[artifact.name] = artifact.content or None
+        if files:
+            try:
+                present = await self.workspace.asnapshot()
+                files = {name: text for name, text in files.items() if name in present}
+            except ToolError:
+                pass
+            # The record is for getting a conversation going again, not a backup:
+            # past the cap, the largest files are remembered by name only.
+            budget = _SESSION_FILE_CHARS
+            for name in sorted(files, key=lambda n: len(files[n] or "")):
+                size = len(files[name] or "")
+                if size > budget:
+                    files[name] = None
+                else:
+                    budget -= size
+        session.metadata["sandbox_files"] = files
+
     # ------------------------------------------------------------------
     # mode
     # ------------------------------------------------------------------
@@ -530,6 +661,7 @@ class Agent:
         stays, and so does everything in its workspace.
         """
         self._thread = None
+        self._following = False
         if self.memory is not None:
             from .memory.manager import SessionMemory
 
@@ -683,6 +815,7 @@ class Agent:
         subagent_memory: Any = None,
         model: str | None = None,
         notebook: Notebook | None = None,
+        sandbox_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         harness = self.harness
         run_id = run_id or new_id("run")
@@ -693,7 +826,7 @@ class Agent:
         model = model or self.model
         # Handed a history, this is a one-off (a sub-agent's task, a replay) and
         # has no business reading or moving the agent's own conversation.
-        threaded = self.conversational and messages is None
+        threaded = (self.conversational or self._following) and messages is None
         session_obj = await self._session(session, threaded=threaded)
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
@@ -766,6 +899,12 @@ class Agent:
                     raise PermissionDenied(f"{self.name} may not run: {started.reason}",
                                            reason=started.reason)
                 self._check_mode()
+                if messages is None:
+                    notice = await self._rejoin(session_obj, sandbox_id)
+                    if notice:
+                        # Said in the conversation itself, so it is still there
+                        # the next time this history is read.
+                        task_message.content[0].text = f"{notice}\n\n{task_text}"
                 if profile and profile.collect_files and self.workspace is not None:
                     # Also what starts a sandbox — so one that cannot start
                     # ends the run here, before a model call is paid for.
@@ -1026,6 +1165,7 @@ class Agent:
             session_obj.usage += result.usage
             if threaded:
                 self._thread = session_obj
+            produced: list[Artifact] = []
             if notebook is not None:
                 result.todos, result.sources = list(notebook.todos), list(notebook.sources)
             if profile is not None:
@@ -1040,12 +1180,13 @@ class Agent:
                         before=files_before)
                 except Exception as exc:
                     # A sandbox that died must not take the answer down with it.
-                    produced = []
                     await harness.journal.write(
                         "error", f"could not collect the files this run wrote: {exc}",
                         agent=self.name, run_id=run_id)
                 result.artifacts.extend(a for a in produced
                                         if (a.name, a.path) not in have)
+            if messages is None:
+                await self._remember_sandbox(session_obj, result, produced)
             if memory is not None:
                 result.artifacts.extend(memory.session.artifacts)
                 session_obj.artifacts = list(memory.session.artifacts)

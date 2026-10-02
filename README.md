@@ -123,7 +123,9 @@ Agent("colleague", mode=modes.cowork("balanced", ask=ask_me, python=True))
 ```
 
 **Chat** keeps the conversation on the agent. `agent.new_session()` starts a
-fresh one; `session="..."` picks an old one back up. A run that was cut off
+fresh one; `session="..."` picks an old one back up, and `await
+agent.resume("...")` follows it from then on (see [picking a conversation back
+up](#picking-a-conversation-back-up) for the sandbox that goes with it). A run that was cut off
 mid-step — a budget, a stop — no longer poisons the thread: the tool calls it
 left unanswered are closed before the next turn is sent.
 
@@ -264,6 +266,58 @@ agent-harness sandboxes                              # what is ready, what each 
 agent-harness sandboxes docker://alpine --check      # start one and prove it works
 agent-harness run "build it" --mode cowork --sandbox docker --workspace ./project
 ```
+
+### Picking a conversation back up
+
+A run hands back the two ids that continue it — the chat, and the sandbox it
+was working in:
+
+```python
+harness = Harness.local(".harness")              # sessions that outlive the process
+agent = Agent("colleague", mode="cowork", harness=harness,
+              workspace=sandbox("e2b", keep=True))      # keep: do not kill it at the end
+
+result = await agent.run("Build the importer.")
+result.session_id, result.sandbox_id             # ("ses_4f1c...", "i1a2b3...")
+```
+
+Later — another request, another process — the chat id is enough, because the
+session remembers its sandbox:
+
+```python
+agent = Agent("colleague", mode="cowork", workspace="e2b",
+              harness=Harness.local(".harness"))
+
+await agent.run("Now add the tests.", session="ses_4f1c...")
+
+# or pass both by hand, or follow the conversation from here on:
+await agent.run("Now add the tests.", session="ses_4f1c...", sandbox_id="i1a2b3...")
+await agent.resume("ses_4f1c...")                # every run after this continues it
+```
+
+`sandbox("e2b", id="i1a2b3...")` says the same thing where the sandbox is built;
+every backend takes `id=`.
+
+- **`keep=True` is what leaves a sandbox to come back to.** Without it the
+  sandbox is destroyed when the harness closes. One that was picked up is left
+  as it was found; `await agent.workspace.destroy()` ends it when the
+  conversation is over. A kept Docker container that has since stopped is
+  started again with its files in it; a Daytona sandbox stopped for idleness
+  likewise; E2B and Modal sandboxes last until their `ttl`, which picking one
+  up renews on E2B.
+- **If the sandbox is gone, the conversation still continues.** A new one is
+  started, the text files the conversation is known to have written are put
+  back, and the model is told — in the conversation — which sandbox was lost,
+  what came back and what did not. `on_missing="error"` refuses instead.
+  The record kept with the session is for this, not a backup: it holds what
+  cowork handed back, up to 2 MB of text, and names anything larger or binary.
+- **One agent, one sandbox.** An agent already working in one sandbox refuses a
+  conversation whose files are in another, rather than mixing two people's
+  work. In a server, build an agent per conversation — it is cheap — on a shared
+  harness.
+- A local `Workspace("./project")` needs none of this: the files never left.
+
+### One for every agent
 
 To give every agent and sub-agent its own, set it once on the harness. A
 sub-agent whose spec says `workspace: isolated` then gets a sandbox to itself:
@@ -1428,6 +1482,8 @@ agent-harness run "how did Q3 go?" --mode research --depth deep --tools
 agent-harness chat --mode cowork --workspace ./project --approve
 agent-harness run "build it" --mode cowork --sandbox docker://node:22
 agent-harness sandboxes docker --check
+agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
+agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness models
 agent-harness sessions --state .harness
 agent-harness journal --state .harness

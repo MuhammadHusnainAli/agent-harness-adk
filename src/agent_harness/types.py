@@ -302,6 +302,9 @@ class RunResult(BaseModel):
     depth: str = ""
     todos: list[Todo] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
+    #: The sandbox the run worked in, if it worked in one. With `session_id`,
+    #: this is what picks the conversation back up where it left off.
+    sandbox_id: str = ""
 
     @property
     def ok(self) -> bool:

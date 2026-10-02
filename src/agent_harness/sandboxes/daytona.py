@@ -26,7 +26,11 @@ class DaytonaSandbox(Sandbox):
             `DAYTONA_API_URL` and `DAYTONA_TARGET`.
         ttl: seconds of idleness after which Daytona stops the sandbox itself.
         network: False blocks all network access.
-        sandbox_id: connect to an existing sandbox, and leave it afterwards.
+        sandbox_id: pick up an existing sandbox, and leave it afterwards. One
+            that Daytona has stopped for idleness is started again, files and
+            all. The same as `id=`.
+        keep: do not delete it at the end, so a later conversation can pick it
+            up by its id.
         labels: labels on the sandbox.
 
     Daytona returns a command's stdout and stderr as one stream, so both arrive
@@ -46,7 +50,8 @@ class DaytonaSandbox(Sandbox):
         if image and snapshot:
             raise ConfigurationError(
                 "a daytona sandbox starts from an image or a snapshot, not both")
-        kw.setdefault("keep", sandbox_id is not None)
+        if sandbox_id is not None:
+            kw.setdefault("id", sandbox_id)
         super().__init__(**kw)
         self.image = image or None
         # Not `self.snapshot`: that is the method that lists the files.
@@ -54,13 +59,12 @@ class DaytonaSandbox(Sandbox):
         self.api_key, self.api_url, self.target = api_key, api_url, target
         self.ttl = ttl
         self.network = network
-        self.sandbox_id = sandbox_id
         self.labels = labels
         self._client = client
         self._box = box
 
     async def _start(self) -> None:
-        if self._box is None:
+        if self._box is None or self.replaced:
             try:
                 import daytona
             except ImportError as exc:
@@ -78,8 +82,11 @@ class DaytonaSandbox(Sandbox):
                 if self.target:
                     config["target"] = self.target
                 self._client = daytona.AsyncDaytona(daytona.DaytonaConfig(**config))
-            if self.sandbox_id:
-                self._box = await self._client.get(self.sandbox_id)
+            if self.attach_id:
+                self._box = await self._client.get(self.attach_id)
+                state = str(getattr(self._box, "state", "")).lower()
+                if any(word in state for word in ("stopped", "archived")):
+                    await self._box.start()
             else:
                 options: dict[str, Any] = {
                     # Daytona counts idleness in minutes.
@@ -100,7 +107,7 @@ class DaytonaSandbox(Sandbox):
                     params = daytona.CreateSandboxFromSnapshotParams(**options)
                 self._box = await self._client.create(params,
                                                       timeout=self.start_timeout)
-        self.id = str(getattr(self._box, "id", "") or self.sandbox_id or "")
+        self.id = str(getattr(self._box, "id", "") or self.attach_id or "")
 
     async def _exec(self, command: str, *, cwd: str | None, env: dict[str, str],
                     timeout: float) -> ExecResult:

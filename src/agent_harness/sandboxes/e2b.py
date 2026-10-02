@@ -24,8 +24,10 @@ class E2BSandbox(Sandbox):
         ttl: seconds the sandbox lives. E2B ends it after that whatever happens
             here, so one we lose track of does not bill for ever.
         network: False cuts the sandbox off from the internet.
-        sandbox_id: connect to a running sandbox instead of creating one. It is
-            left running afterwards.
+        sandbox_id: pick up a sandbox that is already running instead of
+            creating one, and leave it running afterwards. The same as `id=`.
+        keep: do not kill it at the end, so that a later conversation can pick
+            it up by its id — within `ttl`, which picking it up renews.
         metadata: labels shown in the E2B dashboard.
     """
 
@@ -38,18 +40,18 @@ class E2BSandbox(Sandbox):
                  sandbox_id: str | None = None,
                  metadata: dict[str, str] | None = None, client: Any = None,
                  workdir: str | None = "/home/user/workspace", **kw: Any) -> None:
-        kw.setdefault("keep", sandbox_id is not None)
+        if sandbox_id is not None:
+            kw.setdefault("id", sandbox_id)
         super().__init__(workdir=workdir, **kw)
         self.template = template or None
         self.api_key = api_key
         self.ttl = ttl
         self.network = network
-        self.sandbox_id = sandbox_id
         self.metadata = metadata
         self._box = client
 
     async def _start(self) -> None:
-        if self._box is None:
+        if self._box is None or self.replaced:
             try:
                 from e2b import AsyncSandbox
             except ImportError as exc:
@@ -60,8 +62,10 @@ class E2BSandbox(Sandbox):
                 raise ConfigurationError(
                     "the e2b sandbox needs an API key — set E2B_API_KEY, or pass "
                     "api_key=")
-            if self.sandbox_id:
-                self._box = await AsyncSandbox.connect(self.sandbox_id, api_key=key)
+            if self.attach_id:
+                # Connecting renews its lifetime, and wakes one that was paused.
+                self._box = await AsyncSandbox.connect(
+                    self.attach_id, timeout=int(self.ttl), api_key=key)
             else:
                 # Only what was asked for is passed, so an older SDK that does
                 # not know a newer option is not handed it.
@@ -75,7 +79,7 @@ class E2BSandbox(Sandbox):
                 if not self.network:
                     options["allow_internet_access"] = False
                 self._box = await AsyncSandbox.create(**options)
-        self.id = str(getattr(self._box, "sandbox_id", "") or self.sandbox_id or "")
+        self.id = str(getattr(self._box, "sandbox_id", "") or self.attach_id or "")
 
     async def _exec(self, command: str, *, cwd: str | None, env: dict[str, str],
                     timeout: float) -> ExecResult:

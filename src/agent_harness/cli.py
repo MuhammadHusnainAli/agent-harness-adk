@@ -53,6 +53,10 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         from .sandboxes import sandbox
 
         options: dict[str, Any] = {}
+        if args.sandbox_id:
+            options["id"] = args.sandbox_id
+        if args.keep_sandbox:
+            options["keep"] = True
         if args.workspace:
             # The folder is mounted into the container, so the work lands in it.
             if args.sandbox.partition("://")[0].lower() not in ("docker", "podman"):
@@ -134,8 +138,9 @@ async def _run(args: argparse.Namespace) -> int:
             print(json.dumps(harness.report(), indent=2), file=sys.stderr)
         if _footer(result):
             print(f"\n{_footer(result)}", file=sys.stderr)
+        where = f" · sandbox {result.sandbox_id}" if result.sandbox_id else ""
         print(f"\n[{result.steps} steps · ${result.cost_usd:.4f} · "
-              f"session {result.session_id}]", file=sys.stderr)
+              f"session {result.session_id}{where}]", file=sys.stderr)
         return 1 if result.error else 0
     finally:
         await harness.aclose()
@@ -499,6 +504,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="work inside a sandbox instead: docker, podman, e2b, "
                             "daytona, modal, kubernetes, ssh — or a URL such as "
                             "docker://node:22 (see `agent-harness sandboxes`)")
+        p.add_argument("--sandbox-id", default=None, metavar="ID",
+                       help="pick up the sandbox an earlier run reported, instead "
+                            "of starting a new one (with --session, not needed: "
+                            "the session remembers its sandbox)")
+        p.add_argument("--keep-sandbox", action="store_true",
+                       help="leave the sandbox running at exit, to continue in "
+                            "it later")
         p.add_argument("--max-steps", type=int, default=None,
                        help="the step ceiling (the mode's own, or 20)")
         p.add_argument("--state", default=None,
