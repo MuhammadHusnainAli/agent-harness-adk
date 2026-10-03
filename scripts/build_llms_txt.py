@@ -80,6 +80,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/15_handoffs.py",
      "Handoffs: a front desk hands the conversation to a specialist, who answers "
      "the customer directly, keeps the next turn, and hands back."),
+    ("examples/16_workflows.py",
+     "A declared workflow in YAML: parallel lookups, a foreach, a branch, and a "
+     "write-and-review loop, with shared state between the steps."),
 ]
 
 

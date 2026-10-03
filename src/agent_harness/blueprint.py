@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,8 @@ class Blueprint(BaseModel):
     memory: str | dict[str, Any] | None = None
     #: Where chats are kept: a URL, or {url: ..., table: ...}.
     sessions: str | dict[str, Any] | None = None
+    #: Declared workflows over these agents, by name. See `agent_harness.workflow`.
+    workflows: dict[str, dict[str, Any]] = Field(default_factory=dict)
     path: str | None = None
 
     @model_validator(mode="before")
@@ -193,7 +196,16 @@ class Blueprint(BaseModel):
             return text
         from .prompts import Prompt
 
-        return Prompt("_inline", text).render(**self.prompts)
+        try:
+            return Prompt("_inline", text).render(**self.prompts)
+        except ValueError:
+            # Braces that are not placeholders — a JSON example in an agent's
+            # instructions, say. Fill in the prompts by name; leave the rest.
+            if not self.prompts:
+                return text
+            names = "|".join(re.escape(name) for name in self.prompts)
+            return re.sub(r"\{(" + names + r")\}",
+                          lambda m: self.prompts[m.group(1)], text)
 
     def _guardrails(self, value: str | dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
@@ -343,6 +355,18 @@ class Blueprint(BaseModel):
         return {name: self._build(name, built, tools=tools, harness=shared,
                                   **overrides)
                 for name in self.agents}
+
+    def workflow(self, name: str, *, tools: Any = (), harness: Any = None,
+                 agents: Any = None) -> Any:
+        """Build one declared workflow, and the agents its steps name."""
+        from .workflow import Workflow
+
+        if name not in self.workflows:
+            raise ConfigurationError(
+                f"no workflow {name!r} in this blueprint; declared: "
+                f"{', '.join(sorted(self.workflows)) or 'none'}")
+        return Workflow({"name": name, **self.workflows[name]}, agents=agents,
+                        tools=tools, harness=harness, blueprint=self)
 
     def memory_store(self) -> Any:
         """The store the file declares, if it declares one."""

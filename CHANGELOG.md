@@ -8,6 +8,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Declared workflows — `agent_harness.Workflow`**
+- A workflow written in YAML or JSON and run as written:
+  `Workflow.from_file(path, agents=, tools=, harness=)`, `.run(inputs)`,
+  `.stream(inputs)`, `.describe()`, `.as_tool()`.
+- Step kinds: `agent`, `tool`, `set`, `steps` (sequence), `parallel`, `foreach`
+  (with `as`, `index`, `concurrency`), `loop` (`max`, `until`, `while`),
+  `if`/`then`/`else`, `switch`, `graph` (nodes with `needs`, `join: all|any`),
+  `wait`, `fail`, `return`.
+- On any step: `when`, `save`, `retry`, `timeout`, `on_error: continue`.
+- Shared `state`, declared `inputs` (required, default, type), and `{{ }}`
+  templates over `inputs`, `state`, `steps.<id>` and `previous`, compiled with
+  the policy expression language — never `eval`. A template that is one
+  expression keeps its type.
+- The file is validated when loaded: unknown keys, duplicate ids, templates that
+  name a step or input that does not exist, missing agents and tools, cyclic
+  graphs.
+- Agents may be passed in, declared in the file (`agents:`, as in a blueprint),
+  or declared inline on a step. `workflows:` in a blueprint and
+  `Blueprint.workflow(name)`.
+- `WorkflowResult` (`output`, `state`, `steps`, `status`, `error`,
+  `failed_step`, `usage`, `cost_usd`), `StepResult`, `WorkflowEvent`,
+  `WorkflowError`.
+- Tool steps pass the permission gate, hooks, guardrails and audit trail. A
+  stop is honoured before every step; `budget:`, `timeout:` and `max_steps:`
+  bound a run; `workflow_start`, `workflow_step` and `workflow_end` hook events.
+- `agent-harness workflow FILE [--check] [--input name=value] [--tool path]`.
+- `examples/16_workflows.py`.
+
 **Handoffs — `Agent(handoffs=[...])`**
 - Another agent takes over the conversation: it sees what was said, answers the
   user itself, and keeps the conversation on the turns that follow. A `handoff`
@@ -176,6 +204,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A blueprint agent whose instructions contain braces that are not a prompt
+  reference — a JSON example, say — no longer fails to build.
 - A sqlite URL such as `sqlite:///./memory.db` pointed at the filesystem root,
   and `sqlite:////abs/path` at a relative path.
 - An attachment a provider could not encode was sent as its printed form — the

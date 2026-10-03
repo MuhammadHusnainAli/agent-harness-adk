@@ -159,3 +159,7 @@ class StopRequested(HarnessError):
 
 class MCPError(HarnessError):
     """An MCP server misbehaved."""
+
+
+class WorkflowError(HarnessError):
+    """A declared workflow could not carry a step through."""

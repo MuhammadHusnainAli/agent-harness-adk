@@ -47,6 +47,7 @@ from .errors import (
     StopRequested,
     ToolError,
     ToolNotFound,
+    WorkflowError,
 )
 from .evaluation import (
     Comparison,
@@ -242,7 +243,12 @@ __version__ = "0.1.4"
 _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
          "Governance": "governance", "AgentIdentity": "governance",
          "VoiceAgent": "voice", "RealtimeAgent": "voice", "VoiceEvent": "voice",
-         "OpenAISpeech": "voice", "EnergyVAD": "voice"}
+         "OpenAISpeech": "voice", "EnergyVAD": "voice",
+         # Workflows compile their conditions with the policy expression
+         # language, which lives with governance.
+         "Workflow": "workflow", "WorkflowSpec": "workflow",
+         "WorkflowResult": "workflow", "WorkflowEvent": "workflow",
+         "StepResult": "workflow"}
 
 
 def __getattr__(name: str):
@@ -494,6 +500,12 @@ __all__ = [
     "ProviderUnavailableError",
     "ToolError",
     "ToolNotFound",
+    "WorkflowError",
+    "Workflow",
+    "WorkflowSpec",
+    "WorkflowResult",
+    "WorkflowEvent",
+    "StepResult",
     "PermissionDenied",
     "BudgetExceeded",
     "GuardrailTripped",

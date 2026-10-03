@@ -19,6 +19,10 @@ only, leaving the agent's own history untouched.
 `handoff` fires when an agent asks to give the conversation to another one —
 `agent` is the one that would take over, `data["source"]` the one giving it up.
 Blocking it keeps the conversation where it is.
+
+`workflow_start`, `workflow_step` and `workflow_end` fire around a declared
+workflow and each of its steps. Blocking the first refuses the run; blocking a
+step fails that step.
 """
 
 from __future__ import annotations
@@ -34,12 +38,13 @@ HookEvent = Literal[
     "run_start", "run_end", "step_start", "step_end",
     "pre_model", "post_model", "model_egress", "pre_tool", "post_tool",
     "subagent_start", "subagent_end", "handoff", "memory_write", "error",
+    "workflow_start", "workflow_step", "workflow_end",
 ]
 
 EVENTS: tuple[str, ...] = (
     "run_start", "run_end", "step_start", "step_end", "pre_model", "post_model",
     "model_egress", "pre_tool", "post_tool", "subagent_start", "subagent_end", "handoff",
-    "memory_write", "error",
+    "memory_write", "error", "workflow_start", "workflow_step", "workflow_end",
 )
 
 

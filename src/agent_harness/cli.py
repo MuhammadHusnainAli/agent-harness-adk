@@ -285,6 +285,63 @@ async def _chat(args: argparse.Namespace) -> int:
         await harness.aclose()
 
 
+def _value(text: str) -> Any:
+    """`--input amount=40` is the number 40; anything JSON cannot read is text."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+async def _workflow(args: argparse.Namespace) -> int:
+    from .blueprint import _import_tool
+    from .workflow import Workflow
+
+    tools: list[Any] = [_import_tool(path) for path in args.tool]
+    if args.tools:
+        from .toolkits import basic_tools, http_fetch
+        tools += [*basic_tools(), http_fetch]
+    harness = _harness(args)
+    try:
+        workflow = Workflow.from_file(args.file, tools=tools, harness=harness)
+        if args.check:
+            print(workflow.describe())
+            return 0
+        inputs: dict[str, Any] = {}
+        declared = workflow.spec.input_specs()
+        for pair in args.input:
+            key, sep, value = pair.partition("=")
+            if not sep:
+                raise SystemExit(f"--input takes name=value — got {pair!r}")
+            # An input declared as text stays text: an order number is not
+            # a number.
+            inputs[key] = (value if declared.get(key, {}).get("type") == "string"
+                           else _value(value))
+
+        def show(event: Any) -> None:
+            if event.type == "step_start":
+                print(f"  ▸ {event.step} ({event.kind})", file=sys.stderr)
+            elif event.type == "step_skipped":
+                print(f"  - {event.step} skipped", file=sys.stderr)
+            elif event.type in ("step_failed", "step_retry"):
+                print(f"  ✗ {event.step}: {event.text}", file=sys.stderr)
+
+        result = await workflow.run(inputs or args.text, on_event=show)
+        if args.json:
+            print(json.dumps(result.model_dump(mode="json"), indent=2, default=str))
+        else:
+            print(result.output if isinstance(result.output, str)
+                  else json.dumps(result.output, indent=2, default=str))
+        if result.error:
+            print(f"\nerror: {result.error}", file=sys.stderr)
+        print(f"\n[{result.status} · {result.steps_run} steps · "
+              f"${result.cost_usd:.4f} · {result.duration_ms / 1000:.1f}s]",
+              file=sys.stderr)
+        return 0 if result.ok else 1
+    finally:
+        await harness.aclose()
+
+
 def _models(args: argparse.Namespace) -> int:
     rows = sorted(MODELS.values(), key=lambda m: (m.provider, m.id))
     print(f"{'model':<26} {'provider':<10} {'tier':<9} {'in $/M':>8} {'out $/M':>8} "
@@ -682,6 +739,28 @@ def build_parser() -> argparse.ArgumentParser:
     voice.add_argument("--greeting", default=None, help="said when the call opens")
     common(voice)
 
+    flow = sub.add_parser(
+        "workflow", help="run a declared workflow from a YAML or JSON file")
+    flow.add_argument("file", help="the workflow file")
+    flow.add_argument("text", nargs="?", default=None,
+                      help="the input, for a workflow that takes one")
+    flow.add_argument("--input", action="append", default=[], metavar="NAME=VALUE",
+                      help="one input; the value is read as JSON if it is JSON "
+                           "(repeatable)")
+    flow.add_argument("--tool", action="append", default=[], metavar="PATH",
+                      help="a tool the steps may call, as package.module:name "
+                           "(repeatable)")
+    flow.add_argument("--tools", action="store_true",
+                      help="give it the built-in tools (time, maths, web fetch)")
+    flow.add_argument("--check", action="store_true",
+                      help="validate the file and print its outline; run nothing")
+    flow.add_argument("--json", action="store_true", help="print the full result")
+    flow.add_argument("--state", default=None,
+                      help="persist sessions, memory and traces under this directory")
+    flow.add_argument("--trace", action="store_true", help="print spans as they close")
+    flow.add_argument("--approve", action="store_true",
+                      help="ask before any tool that needs approval")
+
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
     providers = sub.add_parser(
@@ -767,6 +846,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_chat(args))
         if args.command == "voice":
             return asyncio.run(_voice(args))
+        if args.command == "workflow":
+            return asyncio.run(_workflow(args))
         if args.command == "models":
             return _models(args)
         if args.command == "providers":

@@ -1,4 +1,4 @@
-git add -A && git commit -m "feat: handoffs — another agent takes over the conversation""""Voice: agents you talk to.
+"""Voice: agents you talk to.
 
 Two ways to build one, and they are used the same way.
 

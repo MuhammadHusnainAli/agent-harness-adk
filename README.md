@@ -965,6 +965,133 @@ The rules around it:
 In a voice pipeline the agent that was handed the call keeps it between turns. A
 realtime voice model drives its own loop, so it is not offered the tool.
 
+## Workflows: when the order is yours to fix
+
+An agent decides what to do next. A workflow already knows: the steps are
+written down, in YAML or JSON, and run as written — in sequence, in parallel,
+in a loop, down one branch, or as a graph. Put agents in the steps where
+judgement is needed, and tools where it is not.
+
+```yaml
+# refunds.yaml
+name: refund_desk
+inputs:
+  customer: {required: true, type: string}
+  orders:   {required: true, type: array}
+state: {refunded: 0}
+
+agents:                       # declared here, as in a blueprint — or passed in
+  classifier: {instructions: 'Reply with only JSON: {"duplicates": [...]}'}
+  writer:     {instructions: Write a short, plain email to the customer.}
+  reviewer:   {instructions: 'Reply with only JSON: {"approved": true|false, "fix": "..."}'}
+
+steps:
+  - id: gather                # two lookups at once
+    parallel:
+      - id: charges
+        foreach: "{{ inputs.orders }}"
+        as: order
+        concurrency: 4
+        steps:
+          - {tool: find_charges, args: {order: "{{ order }}"}}
+      - {id: profile, tool: customer_profile, args: {customer: "{{ inputs.customer }}"}}
+
+  - id: classify              # an agent reads what came back
+    agent: classifier
+    input: "Charges: {{ steps.charges.output }}"
+    parse: json
+    save: verdict             # → state.verdict
+
+  - if: len(state.verdict.duplicates) > 0
+    then:
+      - foreach: "{{ state.verdict.duplicates }}"
+        as: order
+        steps:
+          - {tool: issue_refund, args: {order: "{{ order }}", amount: 40}, retry: 2}
+          - set: {refunded: "{{ state.refunded + 40 }}"}
+    else:
+      - return: "Nothing to refund."
+
+  - id: email                 # write, review, go round until approved
+    loop: {max: 3, until: state.review.approved}
+    steps:
+      - {id: draft, agent: writer, input: "Refunded {{ state.refunded }} EUR. Fix: {{ state.review.fix }}"}
+      - {id: review, agent: reviewer, parse: json, save: review}
+
+output: "{{ steps.draft.output }}"
+```
+
+```python
+from agent_harness import Workflow
+
+workflow = Workflow.from_file("refunds.yaml",
+                              tools=[find_charges, customer_profile, issue_refund])
+result = await workflow.run({"customer": "c_17", "orders": ["4182", "4190"]})
+
+result.output                     # the approved email
+result.state                      # {"refunded": 40, "verdict": {...}, "review": {...}}
+result.steps["email"].iterations  # how many drafts it took
+result.status, result.error, result.failed_step, result.cost_usd
+```
+
+**A step is one thing**, said by the key it carries:
+
+| step | what it does |
+|---|---|
+| `agent: name` | Runs an agent on `input`. With no `input` it is handed what the step before produced. `parse: json` or the agent's output contract fills `.data`; `thread: true` keeps its conversation through the run. |
+| `tool: name` | Calls a tool with `args` — through the permission gate, hooks, guardrails and audit trail, like any other call. |
+| `set: {...}` | Writes to the shared state. |
+| `steps: [...]` | A sequence, as one step. |
+| `parallel: [...]` | Branches at the same time; `concurrency` caps them. The first failure stops the rest. |
+| `foreach: <list>` | The `steps` body once per item (`as: order`, plus `index`), `concurrency` at a time. Its output is the list of what each pass came to. |
+| `loop: {max, until, while}` | The `steps` body until a condition holds. `loop: 5` is a counted loop. `max` is a ceiling, always. |
+| `if:` / `then:` / `else:` | One of two branches. |
+| `switch: [{when, steps}, …]` | The first case that holds; a case with no `when` is the default. |
+| `graph: [...]` | Nodes that say what they `needs`. Each starts the moment its needs are done, so everything that can run at once does. A node whose needs were skipped or failed is skipped; `join: any` runs it if any one arrived. |
+| `wait: 2` · `fail: "why"` · `return: value` | Pause; stop with an error; finish now with this output. |
+
+**Any step may carry** `when:` (skip unless it holds), `save:` (keep its result
+in the state), `retry: 2` or `{max, delay, backoff}`, `timeout:` in seconds, and
+`on_error: continue` — the failure is recorded on `steps.<id>` and the run goes on.
+
+**Values are templates.** `{{ ... }}` holds an expression over `inputs`, `state`,
+`steps.<id>` (`.output`, `.data`, `.status`, `.error`, `.iterations`) and
+`previous`. A value that is one expression keeps its type —
+`amount: "{{ state.total }}"` is a number — and inside other text it is written
+out. Expressions are parsed and checked against a short list of what is allowed
+(comparisons, arithmetic, `and`/`or`/`not`, `a if b else c`, and functions such
+as `len`, `sum`, `join`, `json`, `default`, `lower`, `matches`); nothing is ever
+passed to `eval`.
+
+**A file that is wrong says so when it is loaded**, not half-way through a run:
+an unknown key, two steps with one id, a template naming a step or an input that
+does not exist, a tool or agent nobody supplied, a graph whose nodes wait on each
+other.
+
+```python
+async for event in workflow.stream(inputs):       # step_start, step_end, step_skipped,
+    print(event.type, event.step, event.text)     # step_retry, step_failed, workflow_end
+
+print(workflow.describe())                         # the outline, without running it
+agent = Agent("desk", tools=[workflow.as_tool()])  # a workflow an agent can call
+blueprint.workflow("refund_desk", tools=[...])     # `workflows:` in an agents.yaml
+```
+
+```bash
+agent-harness workflow refunds.yaml --check
+agent-harness workflow refunds.yaml --tool myapp.tools:find_charges \
+    --input customer=c_17 --input 'orders=["4182","4190"]'
+```
+
+The rest of the harness applies. A stop is honoured before every step; `budget:`
+in the file is a ceiling for every agent in it; `max_steps` (1000) ends a loop
+that does not; every step is a span, an audit record and — through the
+`workflow_start`, `workflow_step` and `workflow_end` hooks — something you can
+refuse. A failed step ends the run with `result.error` set rather than raising.
+
+Not there yet: a run is not checkpointed, so a failed workflow starts again from
+the top; and a graph runs forwards — to go round again, use a `loop`.
+
 ## The orchestrator
 
 ```python
