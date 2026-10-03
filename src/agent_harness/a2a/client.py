@@ -1,4 +1,4 @@
-"""Call an agent that is served over A2A — whatever it was built with.
+git add -A && git commit -m "feat: OpenAPI → tools — every operation of an API document as a tool""""Call an agent that is served over A2A — whatever it was built with.
 
     client = A2AClient("https://agents.example.com/pricing", token="sk-…")
     task = await client.send("What does the gold plan cost?")

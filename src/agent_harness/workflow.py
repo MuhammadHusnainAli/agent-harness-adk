@@ -319,6 +319,9 @@ class WorkflowSpec(BaseModel):
     prompts: dict[str, str] = Field(default_factory=dict)
     defaults: dict[str, Any] = Field(default_factory=dict)
     guardrails: dict[str, Any] = Field(default_factory=dict)
+    #: APIs whose operations are tools the steps may call: an OpenAPI file or
+    #: URL by name, as in a blueprint.
+    openapi: dict[str, Any] = Field(default_factory=dict)
 
     def root(self) -> Step:
         """The whole of it as one step."""
@@ -481,7 +484,8 @@ class Workflow:
     def __init__(self, spec: WorkflowSpec | Mapping[str, Any], *,
                  agents: Iterable[Any] | Mapping[str, Any] | None = None,
                  tools: Iterable[Any] | ToolRegistry = (),
-                 harness: Harness | None = None, blueprint: Any = None) -> None:
+                 harness: Harness | None = None, blueprint: Any = None,
+                 base_dir: str | Path | None = None) -> None:
         if not isinstance(spec, WorkflowSpec):
             try:
                 spec = WorkflowSpec(**spec)
@@ -502,6 +506,13 @@ class Workflow:
                             if getattr(a, "harness", None) is not None), None) or Harness()
         self.harness = harness
         self.tools = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
+        if spec.openapi:
+            from .toolkits.openapi import toolkits_from_config
+
+            #: The APIs the file declares; their operations are tools here.
+            self.apis = toolkits_from_config(spec.openapi, base_dir)
+            self.tools = ToolRegistry(
+                [*self.tools, *(t for kit in self.apis for t in kit)])
         self.agents = self._agents(given, blueprint)
         for step in self.ids.values():
             if step.tool is not None and step.tool not in self.tools:
@@ -515,6 +526,7 @@ class Workflow:
         file = Path(path)
         if not file.is_file():
             raise ConfigurationError(f"no workflow at {file}")
+        kwargs.setdefault("base_dir", file.parent)
         return cls.from_text(file.read_text(encoding="utf-8"),
                              fmt=file.suffix.lstrip("."), **kwargs)
 

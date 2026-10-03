@@ -619,6 +619,92 @@ Built-ins in `agent_harness.toolkits`:
 A workspace brings `fs_read`, `fs_write`, `fs_list`, `fs_delete` and — only when
 you ask for it — `shell`. A sandbox is a workspace too, and comes with its shell.
 
+## OpenAPI → tools
+
+Hand an agent an API by handing it the API's document. Every operation in an
+`openapi.json` becomes a tool, with the arguments the document describes.
+
+```python
+from agent_harness import Agent, openapi_tools
+
+api = openapi_tools("openapi.json", token=os.environ["SHOP_TOKEN"])
+agent = Agent("support", "Help the customer with their orders.", tools=api)
+
+api.names                                     # ['listOrders', 'getOrder', 'refundOrder']
+print(api.describe())                         # each tool, its request, its arguments
+await api.call("getOrder", orderId="4182")    # call one yourself, to see it is wired up
+```
+
+The document can be a file (JSON or YAML), a URL, the text itself, or a mapping
+you already loaded. OpenAPI 3.0 and 3.1 are read as they are, and Swagger 2.0 too.
+
+**What a tool looks like.** Its name is the `operationId` (or the method and
+path, when there is none). Its arguments are the operation's own: path, query and
+header parameters, and — for a JSON or form body that is an object — one argument
+per field, which is what a model fills in best. Any other body is a single `body`
+argument. Types, enums, defaults and descriptions come from the document with
+`$ref` followed and `allOf` merged; fields the server sets (`readOnly`) are left
+out. A schema that refers to itself ends rather than going round for ever.
+
+**What is sent.** Each argument goes where the document says — into the path
+(escaped, so a value cannot become another path), the query (with the document's
+`style` and `explode`), a header, or the body as JSON, a form, or text. JSON
+comes back as JSON; a `4xx` or `5xx` comes back to the model as an error it can
+read and act on, with the status and the body's message.
+
+**Credentials are yours, never the model's.** They are added to the request and
+appear in no tool's schema:
+
+```python
+openapi_tools(spec, token="…")                 # Authorization: Bearer …
+openapi_tools(spec, token=fetch_token)         # a function: called per request, to renew
+openapi_tools(spec, api_key="…")               # wherever the document's apiKey scheme says
+openapi_tools(spec, basic=("user", "pass"))
+openapi_tools(spec, credentials={"partnerKey": "…"})   # by security-scheme name
+openapi_tools(spec, headers={"X-Tenant": "acme"}, params={"version": "2"})
+```
+
+A parameter you fix with `headers=` or `params=` is not offered to the model.
+Redirects are not followed, so a credential never goes to wherever a response
+points.
+
+**Choosing what the agent gets.** A large API is hundreds of tools; give an
+agent the ones its job needs.
+
+```python
+openapi_tools(spec, include=["getOrder", "list*", "POST /orders/*/refunds"])
+openapi_tools(spec, exclude=["delete*"], tags=["orders"], methods=["get"])
+openapi_tools(spec, writes="ask")       # anything but GET/HEAD/OPTIONS needs an approver
+openapi_tools(spec, prefix="shop_")     # keep two APIs' tools apart
+openapi_tools(spec, base_url="https://staging.shop.example/v1", cache_reads=True)
+```
+
+Tools are tagged `openapi`, the API's name, and `read` or `write`. They pass the
+same permission gate, hooks, guardrails, audit trail and budget as any other
+tool. Reads are retried on a dropped connection or a `429`/`502`/`503`/`504`;
+writes never are. `api.skipped` lists what could not be made a tool, and why —
+deprecated operations (`deprecated=True` includes them) and file uploads.
+
+In a blueprint or a workflow file an API is declared by name, with its secret
+named rather than written:
+
+```yaml
+openapi:
+  shop:
+    spec: ./shop.openapi.json        # or a URL
+    token_env: SHOP_TOKEN
+    include: [getOrder, listOrders, refundOrder]
+    writes: ask
+agents:
+  support: {instructions: Help with orders., tools: [getOrder, listOrders]}
+```
+
+```bash
+agent-harness openapi openapi.json                       # the tools it becomes
+agent-harness openapi openapi.json --call getOrder --arg orderId=4182 --token …
+agent-harness run "Where is order 4182?" --openapi openapi.json
+```
+
 ## Skills
 
 A skill is packaged know-how: a folder with `SKILL.md` and, optionally, its own

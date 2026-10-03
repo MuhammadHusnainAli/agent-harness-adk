@@ -8,6 +8,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**OpenAPI → tools — `openapi_tools`, `OpenAPIToolkit`**
+- `openapi_tools(spec)` turns every operation of an OpenAPI document into a tool.
+  The document is a file (JSON or YAML), a URL, its text, or a mapping; OpenAPI
+  3.0, 3.1 and Swagger 2.0.
+- Arguments come from the document: path, query, header and cookie parameters,
+  and the fields of a JSON or form body; `$ref` followed, `allOf` merged,
+  `readOnly` fields left out, recursive schemas ended. Query `style`/`explode`,
+  `deepObject`, JSON-encoded parameters, form, multipart and text bodies.
+- `token=` (a string or a function), `api_key=`, `basic=`, `credentials=` by
+  security-scheme name, `headers=`, `params=`. Credentials are added to the
+  request and never appear in a tool's schema. Redirects are not followed.
+- `include`, `exclude`, `tags`, `methods`, `deprecated`, `prefix`, `base_url`,
+  `writes="allow"|"ask"|"deny"`, `cache_reads`, `retries`, `timeout`.
+- `toolkit.call(name, **args)`, `.describe()`, `.names`, `.skipped`, `.aclose()`.
+  An HTTP error is a tool error the model reads.
+- `openapi:` in blueprints and workflow files (`spec`, `token_env`,
+  `api_key_env`, …); `Blueprint.api_toolkits()`.
+- `agent-harness openapi SPEC [--call TOOL --arg name=value] [--json]`, and
+  `--openapi SPEC` on `run`, `chat`, `voice` and `a2a serve`.
+- `examples/18_openapi.py`.
+
 **Agent-to-agent protocol — `agent_harness.a2a`**
 - `A2AServer(agent)` serves an agent over the JSON-RPC binding of A2A 0.3: the
   agent card, `message/send`, `message/stream` (SSE), `tasks/get`,

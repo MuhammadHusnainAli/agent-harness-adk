@@ -45,6 +45,8 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
     if args.tools:
         from .toolkits import basic_tools, http_fetch
         tools = [*basic_tools(), http_fetch]
+    for spec in getattr(args, "openapi", None) or []:
+        tools += _api(spec, args).tools
     mode: Any = args.mode
     if mode == "cowork" and sys.stdin.isatty():
         from . import modes
@@ -90,6 +92,45 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         trace=({"user_id": args.user, "tenant_id": args.tenant}
                if args.user or args.tenant else None),
     )
+
+
+def _api(spec: str, args: argparse.Namespace) -> Any:
+    """An OpenAPI document named on the command line, as a toolkit."""
+    import os
+
+    from .toolkits.openapi import OpenAPIToolkit
+
+    return OpenAPIToolkit(
+        spec, base_url=getattr(args, "base_url", None),
+        token=getattr(args, "openapi_token", None) or os.environ.get("OPENAPI_TOKEN"),
+        api_key=getattr(args, "api_key", None),
+        writes="ask" if getattr(args, "approve", False) else "allow")
+
+
+async def _openapi(args: argparse.Namespace) -> int:
+    toolkit = _api(args.spec, args)
+    try:
+        if not args.call:
+            if args.json:
+                print(json.dumps([{"name": t.name, "description": t.description,
+                                   "parameters": t.parameters, **t.operation}
+                                  for t in toolkit], indent=2))
+            else:
+                print(toolkit.describe())
+            return 0
+        arguments: dict[str, Any] = {}
+        for pair in args.arg:
+            key, sep, value = pair.partition("=")
+            if not sep:
+                raise SystemExit(f"--arg takes name=value — got {pair!r}")
+            kind = toolkit.get(args.call).parameters["properties"].get(key, {}).get("type")
+            arguments[key] = value if kind == "string" else _value(value)
+        answer = await toolkit.call(args.call, **arguments)
+        print(answer if isinstance(answer, str)
+              else json.dumps(answer, indent=2, default=str))
+        return 0
+    finally:
+        await toolkit.aclose()
 
 
 def _footer(result: Any) -> str:
@@ -718,6 +759,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--skills", default=None, help="a directory of skills to load")
         p.add_argument("--tools", action="store_true",
                        help="give it the built-in tools (time, maths, web fetch)")
+        p.add_argument("--openapi", action="append", default=[], metavar="SPEC",
+                       help="an OpenAPI file or URL whose operations become tools "
+                            "(repeatable)")
+        p.add_argument("--openapi-token", default=None,
+                       help="the bearer token for --openapi (or $OPENAPI_TOKEN)")
         p.add_argument("--no-memory", action="store_true", help="run without memory")
         p.add_argument("--mode", default=None, choices=sorted(MODES),
                        help="how the agent works: chat keeps the thread, research "
@@ -824,6 +870,22 @@ def build_parser() -> argparse.ArgumentParser:
                      help="send: the context id of a conversation to carry on")
     common(a2a)
 
+    api = sub.add_parser(
+        "openapi", help="show the tools an OpenAPI document becomes, or call one")
+    api.add_argument("spec", help="the OpenAPI file or URL")
+    api.add_argument("--base-url", default=None, help="where the API is, if the "
+                                                      "document does not say")
+    api.add_argument("--openapi-token", "--token", dest="openapi_token", default=None,
+                     help="a bearer token (or $OPENAPI_TOKEN)")
+    api.add_argument("--api-key", default=None,
+                     help="the key for the document's apiKey scheme")
+    api.add_argument("--call", default=None, metavar="TOOL",
+                     help="call this operation and print what it returns")
+    api.add_argument("--arg", action="append", default=[], metavar="NAME=VALUE",
+                     help="an argument for --call (repeatable)")
+    api.add_argument("--json", action="store_true",
+                     help="the tools as JSON: names, schemas, requests")
+
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
     providers = sub.add_parser(
@@ -913,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_workflow(args))
         if args.command == "a2a":
             return asyncio.run(_a2a(args))
+        if args.command == "openapi":
+            return asyncio.run(_openapi(args))
         if args.command == "models":
             return _models(args)
         if args.command == "providers":

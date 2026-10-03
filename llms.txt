@@ -53,6 +53,7 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [15_handoffs](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/15_handoffs.py): Handoffs: a front desk hands the conversation to a specialist, who answers the customer directly, keeps the next turn, and hands back.
 - [16_workflows](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/16_workflows.py): A declared workflow in YAML: parallel lookups, a foreach, a branch, and a write-and-review loop, with shared state between the steps.
 - [17_a2a](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/17_a2a.py): A2A: an agent served over the agent-to-agent protocol on a real socket, called by a client, streamed, and used as another agent's sub-agent.
+- [18_openapi](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/18_openapi.py): OpenAPI → tools: an agent given an API's openapi.json calls its operations, with a key it never sees and an approval before a write.
 
 ## Optional
 

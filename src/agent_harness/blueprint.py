@@ -59,7 +59,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from .errors import ConfigurationError
 from .runtime.budget import Budget
@@ -136,6 +136,10 @@ class Blueprint(BaseModel):
     sessions: str | dict[str, Any] | None = None
     #: Declared workflows over these agents, by name. See `agent_harness.workflow`.
     workflows: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: APIs whose operations become tools, by name: an OpenAPI file or URL, or
+    #: {spec: ..., base_url: ..., token_env: SHOP_TOKEN, include: [...], writes: ask}.
+    openapi: dict[str, Any] = Field(default_factory=dict)
+    _apis: list[Any] | None = PrivateAttr(default=None)
     path: str | None = None
 
     @model_validator(mode="before")
@@ -210,6 +214,22 @@ class Blueprint(BaseModel):
             return re.sub(r"\{(" + names + r")\}",
                           lambda m: self.prompts[m.group(1)], text)
 
+    def api_toolkits(self) -> list[Any]:
+        """The toolkits the `openapi:` section declares. Read once."""
+        if self._apis is None:
+            from .toolkits.openapi import toolkits_from_config
+
+            base = Path(self.path).parent if self.path else None
+            self._apis = toolkits_from_config(self.openapi, base)
+        return self._apis
+
+    def _registry(self, tools: Any) -> ToolRegistry:
+        """The tools you passed, and the ones the file's APIs provide."""
+        registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
+        if not self.openapi:
+            return registry
+        return ToolRegistry([*registry, *(t for kit in self.api_toolkits() for t in kit)])
+
     def _guardrails(self, value: str | dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
             return None
@@ -275,7 +295,7 @@ class Blueprint(BaseModel):
         if entry.a2a is not None:
             built[name] = self._remote(name, entry, harness)
             return built[name]
-        registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
+        registry = self._registry(tools)
 
         kwargs: dict[str, Any] = {
             "instructions": self.render(entry.instructions),
@@ -393,7 +413,7 @@ class Blueprint(BaseModel):
                 f"no workflow {name!r} in this blueprint; declared: "
                 f"{', '.join(sorted(self.workflows)) or 'none'}")
         return Workflow({"name": name, **self.workflows[name]}, agents=agents,
-                        tools=tools, harness=harness, blueprint=self)
+                        tools=self._registry(tools), harness=harness, blueprint=self)
 
     def memory_store(self) -> Any:
         """The store the file declares, if it declares one."""

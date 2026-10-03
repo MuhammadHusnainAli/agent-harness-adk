@@ -16,6 +16,7 @@ from .documents import (
     parse_text,
     supported_formats,
 )
+from .openapi import OpenAPIToolkit, openapi_tools
 from .web import http_fetch, make_fetch_tool, make_http_tool
 
 __all__ = [
@@ -38,4 +39,6 @@ __all__ = [
     "make_chart_tool",
     "make_report_tool",
     "make_python_tool",
+    "OpenAPIToolkit",
+    "openapi_tools",
 ]

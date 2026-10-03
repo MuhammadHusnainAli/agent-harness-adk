@@ -86,6 +86,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/17_a2a.py",
      "A2A: an agent served over the agent-to-agent protocol on a real socket, "
      "called by a client, streamed, and used as another agent's sub-agent."),
+    ("examples/18_openapi.py",
+     "OpenAPI → tools: an agent given an API's openapi.json calls its "
+     "operations, with a key it never sees and an approval before a write."),
 ]
 
 
