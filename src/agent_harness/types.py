@@ -39,6 +39,7 @@ __all__ = [
     "Artifact",
     "Todo",
     "Source",
+    "HandoffRecord",
     "RunResult",
     "new_id",
 ]
@@ -312,7 +313,7 @@ class Usage(BaseModel):
 
 StopReason = Literal[
     "end_turn", "tool_use", "max_tokens", "stop_sequence", "max_steps", "error",
-    "stopped", "budget",
+    "stopped", "budget", "handoff",
 ]
 
 
@@ -345,7 +346,7 @@ class StreamEvent(BaseModel):
 
     type: Literal[
         "run_start", "step_start", "text", "thinking", "tool_call", "tool_result",
-        "step_end", "run_end", "error", "delegation", "progress",
+        "step_end", "run_end", "error", "delegation", "progress", "handoff",
     ]
     text: str = ""
     agent: str = ""
@@ -429,6 +430,20 @@ class Source(BaseModel):
         return f"[{self.id}] {label}"
 
 
+class HandoffRecord(BaseModel):
+    """One time a conversation changed hands: from whom, to whom, and why."""
+
+    source: str
+    target: str
+    reason: str = ""
+    step: int = 0
+    run_id: str = ""
+    ts: float = Field(default_factory=time.time)
+
+    def line(self) -> str:
+        return f"{self.source} → {self.target}{f': {self.reason}' if self.reason else ''}"
+
+
 class RunResult(BaseModel):
     """The one object a caller gets back from `agent.run()`."""
 
@@ -458,6 +473,11 @@ class RunResult(BaseModel):
     #: The sandbox the run worked in, if it worked in one. With `session_id`,
     #: this is what picks the conversation back up where it left off.
     sandbox_id: str = ""
+    #: Each time the conversation changed hands during this run. `agent` is
+    #: whoever answered in the end; `active_agent` is who has the conversation
+    #: on the next turn ("" for an agent with nowhere to hand off to).
+    handoffs: list[HandoffRecord] = Field(default_factory=list)
+    active_agent: str = ""
     #: Things that went wrong around the run without stopping it — a session
     #: that could not be saved, say. The answer is still the answer.
     warnings: list[str] = Field(default_factory=list)

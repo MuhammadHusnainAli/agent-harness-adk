@@ -40,6 +40,7 @@ from .errors import (
 )
 from .guardrails import AgentGuardrails
 from .guardrails.checks import CompletionContext
+from .handoff import Handoff, Relay
 from .harness import Harness
 from .llm_providers import resolve_provider
 from .llm_providers.base import CompletionRequest, Provider
@@ -58,6 +59,7 @@ from .skills import Skill, SkillRegistry
 from .tools import Tool, ToolContext, ToolRegistry
 from .types import (
     Artifact,
+    HandoffRecord,
     Message,
     ModelResponse,
     RunResult,
@@ -180,6 +182,8 @@ class Agent:
         tools: Iterable[Tool | Callable[..., Any]] = (),
         skills: SkillRegistry | Iterable[Skill | str] | str | None = None,
         subagents: Sequence[Any] = (),
+        handoffs: Sequence[Any] = (),
+        max_handoffs: int = 5,
         runtime_agents: bool | str | None = None,
         max_runtime_agents: int | None = None,
         runtime_agent_tools: Iterable[str] | None = None,
@@ -229,7 +233,8 @@ class Agent:
             "repetition_penalty": repetition_penalty, "seed": seed, "cache": cache,
             "user": user, "model_options": model_options,
             "tools": list(tools), "skills": skills,
-            "subagents": list(subagents), "runtime_agents": runtime_agents,
+            "subagents": list(subagents), "handoffs": list(handoffs),
+            "max_handoffs": max_handoffs, "runtime_agents": runtime_agents,
             "max_runtime_agents": max_runtime_agents,
             "runtime_agent_tools": runtime_agent_tools, "memory": memory,
             "trace": trace, "harness": harness, "hooks": hooks, "policy": policy,
@@ -301,6 +306,8 @@ class Agent:
                          if getattr(t, "name", getattr(t, "__name__", "")) in wanted]
             if active.subagents is not None:
                 subagents = list(active.subagents)
+            if active.handoffs is not None:
+                handoffs = list(active.handoffs)
         # --- mode ---------------------------------------------------------
         # A mode fills in only what was left unset, so anything said explicitly
         # — here, or by the active version — still wins.
@@ -452,6 +459,20 @@ class Agent:
         self._subagents: dict[str, Agent] = {}
         for entry in subagents:
             self.add_subagent(entry)
+
+        # --- handoffs -----------------------------------------------------
+        #: Who this agent may give the conversation to, by name.
+        self._handoffs: dict[str, Handoff] = {}
+        try:
+            self.max_handoffs = int(max_handoffs)
+        except (TypeError, ValueError):
+            self.max_handoffs = -1
+        if self.max_handoffs < 0:
+            raise ConfigurationError(
+                f"{name}: max_handoffs must be a whole number, 0 or more — got "
+                f"{max_handoffs!r}")
+        for entry in handoffs:
+            self.add_handoff(entry)
 
         # --- run-time agents ----------------------------------------------
         self.runtime_agents = _enabled(runtime_agents)
@@ -761,6 +782,46 @@ class Agent:
     def subagents(self) -> dict[str, Agent]:
         return dict(self._subagents)
 
+    def add_handoff(self, entry: Any) -> Handoff:
+        """Let this agent hand the conversation to another: an Agent, or a
+        `Handoff` saying how. Two agents that hand to each other are built
+        first and introduced afterwards — `billing.add_handoff(triage)`."""
+        handoff = Handoff.of(entry)
+        if handoff.agent is self or handoff.name == self.name:
+            raise ConfigurationError(
+                f"{self.name} cannot hand the conversation to itself")
+        held = self.tools.get("handoff") if "handoff" in self.tools else None
+        if held is not None and "handoff" not in held.tags:
+            raise ConfigurationError(
+                f"{self.name} already has a tool called 'handoff'; rename it to "
+                "give this agent handoffs")
+        self._handoffs[handoff.name] = handoff
+        # A version of this agent built later hands off to the same places.
+        self._base_kwargs["handoffs"] = list(self._handoffs.values())
+        # Rebuilt for the same reason `delegate` is: its schema is the roster.
+        self.tools.add(self._handoff_tool())
+        return handoff
+
+    @property
+    def handoffs(self) -> dict[str, Handoff]:
+        return dict(self._handoffs)
+
+    def handoff_agent(self, name: str) -> Agent | None:
+        """The agent called `name` that a conversation starting here can end up
+        with — this one, or any it can reach by handing off. None if there is
+        no such agent."""
+        seen: set[int] = set()
+        queue: list[Agent] = [self]
+        while queue:
+            agent = queue.pop(0)
+            if id(agent) in seen:
+                continue
+            seen.add(id(agent))
+            if agent.name == name:
+                return agent
+            queue.extend(h.agent for h in agent._handoffs.values())
+        return None
+
     async def _summarize(self, prompt: str) -> str:
         """A single cheap model call used for compaction and memory distillation."""
         model, _ = self.harness.router.pick(tier="fast")
@@ -797,7 +858,7 @@ class Agent:
         if version is not None and version != self._version:
             return await self.use(version).run(task, **kwargs)
         result: RunResult | None = None
-        async for event in self._drive(task, token_stream=False, **kwargs):
+        async for event in self._converse(task, token_stream=False, **kwargs):
             if event.type == "run_end":
                 result = event.data.get("result")
         if result is None:  # pragma: no cover - the loop always emits run_end
@@ -820,7 +881,108 @@ class Agent:
         """Token-by-token events, ending with a `run_end` event carrying the result."""
         if version is not None and version != self._version:
             return self.use(version).stream(task, **kwargs)
-        return self._drive(task, token_stream=True, **kwargs)
+        return self._converse(task, token_stream=True, **kwargs)
+
+    async def _converse(self, task: str | Message, *, token_stream: bool = False,
+                        **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        """One run, as the caller sees it — however many agents it takes.
+
+        An agent with nowhere to hand off to is simply driven. Otherwise the
+        conversation goes to whoever has it (it may have been handed on in an
+        earlier turn), and each time it is handed on in this one the next agent
+        is driven on the same history and the same session. The caller still
+        sees one `run_start`, one `run_end`, and a `handoff` event in between.
+        """
+        if not self._handoffs:
+            async for event in self._drive(task, token_stream=token_stream, **kwargs):
+                yield event
+            return
+
+        messages, session = kwargs.get("messages"), kwargs.get("session")
+        threaded = (self.conversational or self._following) and messages is None
+        one_off = messages is not None and session is None
+        relay = Relay(entry=self.name, limit=self.max_handoffs,
+                      store=self.harness.sessions, persist=self.persist_session,
+                      keeper=self.name)
+        # What every agent in the chain runs under; the rest of what the caller
+        # passed — a model, a step ceiling, a memory — was said about this one.
+        shared = {key: kwargs[key] for key in ("guard", "subagent_memory", "notebook")
+                  if key in kwargs}
+
+        agent, call = self, dict(kwargs)
+        if messages is None and (threaded or session is not None):
+            # A conversation being continued: who was it left with?
+            held = await self._session(session, threaded=threaded)
+            if session is not None:
+                call["session"] = held         # loaded once, not once per agent
+            active = (held.metadata.get("handoff") or {}).get("active") or self.name
+            holder = self.handoff_agent(active) if active != self.name else self
+            relay.session = held
+            if holder is None or not relay.owner_ok(holder):
+                # Gone from the configuration, or acting for somebody else:
+                # the conversation comes back to the agent that was asked.
+                self.harness.audit.record(self.name, "handoff", target=active,
+                                          decision="reclaim", session=held.id)
+                await self.harness.journal.write(
+                    "handoff", f"{active} had this conversation but cannot be "
+                    f"given it; {self.name} takes it back", agent=self.name)
+            elif holder is not self:
+                agent, relay.keeper = holder, holder.name
+                call = {**shared, "session": held,
+                        "messages": close_open_tool_calls(list(held.messages)),
+                        **{key: kwargs[key] for key in ("run_id", "attachments")
+                           if key in kwargs}}
+
+        task_text = task.text if isinstance(task, Message) else str(task)
+        segments: list[RunResult] = []
+        final: RunResult | None = None
+        while True:
+            final = None
+            async for event in agent._drive(task if not segments else task_text,
+                                            token_stream=token_stream,
+                                            _relay=relay, **call):
+                if event.type == "run_end":
+                    final = event.data.get("result")
+                elif event.type != "run_start" or not segments:
+                    yield event
+            if final is None:  # pragma: no cover - the loop always emits run_end
+                raise HarnessError("the agent loop produced no result")
+            pending, relay.pending = relay.pending, None
+            if pending is None:
+                break
+            segments.append(final)
+            target = pending.handoff.agent
+            yield StreamEvent(type="handoff", agent=agent.name, text=target.name,
+                              step=final.steps,
+                              data={"from": agent.name, "to": target.name,
+                                    "reason": pending.reason})
+            view, relay.rewrote = pending.handoff.view(
+                final.messages, source=agent, reason=pending.reason)
+            relay.takeover = True
+            call = {**shared, "messages": view,
+                    "session": None if one_off else relay.session}
+            agent = target
+
+        for earlier in reversed(segments):
+            final.usage = earlier.usage + final.usage
+            final.steps += earlier.steps
+            final.tool_calls[:0] = earlier.tool_calls
+            final.children[:0] = earlier.children
+            have = {(a.name, a.path) for a in final.artifacts}
+            final.artifacts[:0] = [a for a in earlier.artifacts
+                                   if (a.name, a.path) not in have]
+            final.warnings[:0] = earlier.warnings
+            final.sandbox_id = final.sandbox_id or earlier.sandbox_id
+        final.handoffs = list(relay.hops)
+        final.active_agent = relay.keeper or final.agent
+        # The conversation this agent carries is the one the last of them saved.
+        if relay.session is not None and messages is None:
+            if threaded:
+                self._thread = relay.session
+            elif session is None:
+                self._log = relay.session
+        yield StreamEvent(type="run_end", agent=final.agent, step=final.steps,
+                          text=final.output, data={"result": final})
 
     async def _drive(
         self,
@@ -838,8 +1000,13 @@ class Agent:
         notebook: Notebook | None = None,
         sandbox_id: str | None = None,
         attachments: Iterable[Any] = (),
+        _relay: Relay | None = None,
     ) -> AsyncIterator[StreamEvent]:
         harness = self.harness
+        relay = _relay
+        # Handed the conversation mid-run: there is nothing new from the user,
+        # only the history to carry on from.
+        takeover = relay is not None and relay.takeover
         run_id = run_id or new_id("run")
         guard = guard or (BudgetGuard(self.budget, parent=harness.guard)
                           if self.budget else harness.guard)
@@ -855,6 +1022,8 @@ class Agent:
         one_off = messages is not None and session is None
         session_obj = (self._may_have(Session(agent=self.name)) if one_off
                        else await self._session(session, threaded=threaded))
+        if relay is not None:
+            relay.attach(session_obj)
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
         task_text = task_message.text
@@ -866,9 +1035,17 @@ class Agent:
         if profile is not None:
             result.mode, result.depth = profile.name, profile.depth
             if notebook is None and profile.keeps_notebook:
-                notebook = Notebook(ledger=profile.sources,
-                                    tracking=profile.sources
-                                    and profile.verify_sources)
+                carried = relay.notebook if takeover else None
+                if carried is not None and bool(carried.ledger) == bool(profile.sources):
+                    # Taking the conversation over is taking the work over: the
+                    # same todo list, the same numbered sources.
+                    notebook = carried
+                else:
+                    notebook = Notebook(ledger=profile.sources,
+                                        tracking=profile.sources
+                                        and profile.verify_sources)
+        if relay is not None and notebook is not None:
+            relay.notebook = notebook
         if notebook is not None:
             # The same lists, not copies: what a tool writes shows on the result.
             result.todos, result.sources = notebook.todos, notebook.sources
@@ -891,23 +1068,34 @@ class Agent:
             else:
                 history = []
             earlier = [] if continuing else list(session_obj.messages)
+            if relay is not None:
+                # Every agent in a chain adds to the one record the first found.
+                if takeover:
+                    earlier = relay.earlier
+                else:
+                    relay.earlier = earlier
             began_at = len(history)
-            rewritten = False
+            # A history narrowed on the way over no longer lines up with what
+            # the session holds.
+            rewritten = takeover and relay.rewrote
 
-            try:
-                task_text = self.content_guardrails.check(task_text, where="input",
-                                                          label="task")
-            except GuardrailTripped as exc:
-                result.error = f"{type(exc).__name__}: {exc}"
-                result.stop_reason = "error"
-                yield StreamEvent(type="run_end", agent=self.name,
-                                  data={"result": result})
-                return
+            if not takeover:
+                # What a takeover continues was checked by the agent it came to.
+                try:
+                    task_text = self.content_guardrails.check(
+                        task_text, where="input", label="task")
+                except GuardrailTripped as exc:
+                    result.error = f"{type(exc).__name__}: {exc}"
+                    result.stop_reason = "error"
+                    yield StreamEvent(type="run_end", agent=self.name,
+                                      data={"result": result})
+                    return
 
             task_message = Message.user(task_text)
-            history.append(task_message)
-            if memory is not None:
-                memory.session.add_message(task_message)
+            if not takeover:
+                history.append(task_message)
+                if memory is not None:
+                    memory.session.add_message(task_message)
             if notebook is not None:
                 notebook.saw(task_text)
 
@@ -1065,7 +1253,7 @@ class Agent:
                         outcomes = await self._execute_tools(
                             calls, run_id=run_id, step=step, guard=guard,
                             memory=memory, subagent_memory=subagent_memory,
-                            result=result, notebook=notebook,
+                            result=result, notebook=notebook, relay=relay,
                         )
                         for call, outcome in zip(calls, outcomes, strict=False):
                             result.tool_calls.append(ToolCall(
@@ -1091,6 +1279,13 @@ class Agent:
                                               step=step, text=notebook.todo_summary(),
                                               data=notebook.progress())
                         yield StreamEvent(type="step_end", agent=self.name, step=step)
+                        if relay is not None and relay.pending is not None:
+                            # The conversation is someone else's now. This
+                            # agent gives no answer, so nothing that judges an
+                            # answer — the contract, the mode, the completion
+                            # checks — is asked of it.
+                            result.stop_reason = "handoff"
+                            break
                         continue
 
                     # No tool calls — this is the answer.
@@ -1165,11 +1360,12 @@ class Agent:
                         f"{self.name} did not finish within {steps_allowed} steps"
                     )
 
-                if profile is not None and self.output_type is None:
-                    final_text = profile.close(final_text, notebook)
-                final_text = self.content_guardrails.check(final_text, where="output",
-                                                           label=self.name)
-                result.output = final_text
+                if result.stop_reason != "handoff":
+                    if profile is not None and self.output_type is None:
+                        final_text = profile.close(final_text, notebook)
+                    final_text = self.content_guardrails.check(
+                        final_text, where="output", label=self.name)
+                    result.output = final_text
 
             except BudgetExceeded as exc:
                 # A budget is a ceiling, not a failure. By default the run ends
@@ -1215,6 +1411,11 @@ class Agent:
                                             run_id=run_id)
                 yield StreamEvent(type="error", agent=self.name, text=result.error)
 
+            if relay is not None:
+                if result.stop_reason != "handoff":
+                    relay.cancel()         # asked for, but the run did not get there
+                relay.stamp(session_obj, self.name,
+                            never_started=bool(result.error) and result.steps == 0)
             harness.control.leave(run_id)
             harness.audit.record(
                 self.name, "run_end", target=task_text[:120], run_id=run_id,
@@ -1251,13 +1452,23 @@ class Agent:
                 await self._remember_sandbox(session_obj, result, produced)
             if memory is not None:
                 result.artifacts.extend(memory.session.artifacts)
-                session_obj.artifacts = list(memory.session.artifacts)
+                mine = list(memory.session.artifacts)
+                if relay is not None:
+                    # Several agents write to this session; each keeps the rest.
+                    names = {a.name for a in mine}
+                    mine = [*(a for a in session_obj.artifacts
+                              if a.name not in names), *mine]
+                session_obj.artifacts = mine
             if result.artifacts:
                 harness.deliverables.extend(result.artifacts, run_id=run_id)
-            if self.persist_session and not one_off:
+            if (relay.persist if relay is not None else self.persist_session) \
+                    and not one_off:
                 session_obj = await self._save_session(
                     session_obj, result, added=history[began_at:],
-                    rewritten=rewritten, run_id=run_id)
+                    rewritten=rewritten, run_id=run_id,
+                    store=relay.store if relay is not None else None)
+            if relay is not None:
+                relay.session = session_obj
             if threaded:
                 self._thread = session_obj
             elif session is None and not one_off:
@@ -1390,13 +1601,14 @@ class Agent:
         subagent_memory: Any,
         result: RunResult,
         notebook: Notebook | None = None,
+        relay: Relay | None = None,
     ) -> list[ToolOutcome]:
         """Run every tool the model asked for, in parallel, under the rails."""
         ctx = ToolContext(
             agent=self.name, run_id=run_id, step=step, workspace=self.workspace,
             memory=memory, harness=self.harness,
             state={"result": result, "guard": guard, "subagent_memory": subagent_memory,
-                   "notebook": notebook},
+                   "notebook": notebook, "relay": relay},
         )
 
         async def one(call: ToolUseBlock) -> ToolOutcome:
@@ -1780,6 +1992,118 @@ class Agent:
             handback += f"\n\nArtefacts produced: {names}"
         return handback
 
+    # ------------------------------------------------------------------
+    # handoff
+    # ------------------------------------------------------------------
+    def _handoff_tool(self) -> Tool:
+        agent = self
+
+        async def handoff(agent_name: str, reason: str = "",
+                          ctx: ToolContext | None = None) -> str:
+            return await agent._hand_off(agent_name, reason, ctx)
+
+        handoff.__name__ = "handoff"
+        return Tool(
+            handoff,
+            name="handoff",
+            description=(
+                "Hand this conversation to another agent, who takes over and "
+                "answers the user directly from here on. Use it when what the "
+                "user needs is that agent's job rather than yours. This is not "
+                "for getting a task done and reported back to you — once you "
+                "hand off, you are out of the conversation, so do not answer "
+                "the question yourself as well."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "enum": sorted(agent._handoffs),
+                        "description": "; ".join(
+                            f"{n}: {h.description}"
+                            for n, h in agent._handoffs.items()),
+                    },
+                    "reason": {"type": "string",
+                               "description": "One line: why this agent, and "
+                                              "what the user needs from it."},
+                },
+                "required": ["agent_name"],
+            },
+            # "delegation" keeps it off every sub-agent built from this agent's
+            # tools: a helper has no conversation of its own to give away.
+            tags=["builtin", "delegation", "handoff"],
+        )
+
+    async def _hand_off(self, agent_name: str, reason: str = "",
+                        ctx: ToolContext | None = None) -> str:
+        """Ask for the conversation to go to another agent once this step ends.
+
+        Nothing changes hands here: the loop finishes the step, then the run
+        carries on as the other agent. A refusal is an error the model reads,
+        so it can answer the user itself instead.
+        """
+        run_id = ctx.run_id if ctx else ""
+        relay: Relay | None = ctx.state.get("relay") if ctx else None
+        handoff = self._handoffs.get(agent_name)
+        if handoff is None:
+            known = ", ".join(sorted(self._handoffs)) or "none"
+            raise ToolError(f"no agent named {agent_name!r} to hand off to. "
+                            f"Available: {known}", tool="handoff")
+        if relay is None:
+            raise ToolError("there is no conversation to hand over here — answer "
+                            "it yourself", tool="handoff")
+        if relay.pending is not None:
+            raise ToolError("this conversation is already being handed to "
+                            f"{relay.pending.handoff.name}", tool="handoff")
+        if len(relay.hops) >= relay.limit:
+            raise ToolError(
+                f"this conversation has already changed hands {len(relay.hops)} "
+                f"times in this turn, which is the limit ({relay.limit}). "
+                "Answer the user yourself.", tool="handoff")
+        if not self.harness.control.may_start():
+            raise ToolError("the run was stopped: "
+                            f"{self.harness.control.state.reason or 'no reason given'}",
+                            tool="handoff")
+        target = handoff.agent
+        if not relay.owner_ok(target):
+            self.harness.audit.record(self.name, "handoff", target=target.name,
+                                      decision="deny", run_id=run_id,
+                                      reason="acting for a different user")
+            raise ToolError(f"{target.name} is acting for a different user and "
+                            "cannot be given this conversation", tool="handoff")
+
+        # Claimed before anything is awaited, so two handoffs asked for in one
+        # turn cannot both be granted.
+        relay.claim(handoff, reason)
+        record = HandoffRecord(source=self.name, target=target.name, reason=reason,
+                               step=ctx.step if ctx else 0, run_id=run_id)
+        try:
+            asked = await self.hooks.emit("handoff", agent=target.name, run_id=run_id,
+                                          source=self.name, parent=self.name,
+                                          reason=reason, record=record)
+            if asked.blocked:
+                raise PermissionDenied(asked.reason, tool="handoff",
+                                       reason=asked.reason)
+            await handoff.announce(record)
+        except Exception as exc:
+            relay.release()
+            self.harness.audit.record(self.name, "handoff", target=target.name,
+                                      decision="deny", run_id=run_id, reason=str(exc))
+            raise ToolError(f"the handoff to {target.name} was not permitted: {exc}",
+                            tool="handoff") from None
+
+        relay.confirm(record)
+        self.harness.audit.record(self.name, "handoff", target=target.name,
+                                  decision="allow", run_id=run_id, reason=reason[:200])
+        await self.harness.journal.write(
+            "handoff", f"handed the conversation to {target.name}"
+            + (f": {reason[:200]}" if reason else ""), agent=self.name, run_id=run_id)
+        why = f": {reason}" if reason else ""
+        # Read by the agent taking over — it is the last thing in its history.
+        return (f"[{self.name} handed this conversation to {target.name}{why}. "
+                f"{target.name} has it now and answers the user directly.]")
+
     def as_tool(self, name: str | None = None, description: str | None = None,
                 *, cacheable: bool = False) -> Tool:
         """Expose this agent as a tool another agent can call."""
@@ -1838,7 +2162,7 @@ class Agent:
 
     async def _save_session(self, session: Session, result: RunResult, *,
                             added: list[Message], rewritten: bool,
-                            run_id: str) -> Session:
+                            run_id: str, store: Any = None) -> Session:
         """Save the conversation without losing anyone's turn — or the answer.
 
         If another request saved this session while this run was working, the
@@ -1846,17 +2170,21 @@ class Agent:
         is there now. When they cannot be — the history was compacted along the
         way, so "this run's messages" no longer lines up — the run is kept as a
         fork, and the result says which session it ended up in.
+
+        `store` is where: a conversation that was handed to this agent stays in
+        the store of the agent it came to.
         """
         harness = self.harness
+        sessions = store if store is not None else harness.sessions
         try:
             try:
-                return await harness.sessions.save(session)
+                return await sessions.save(session)
             except SessionConflict:
                 pass
             for _ in range(3):
                 if rewritten:
                     break
-                latest = self._may_have(await harness.sessions.load(session.id))
+                latest = self._may_have(await sessions.load(session.id))
                 if latest is session:
                     break
                 latest.messages = [*close_open_tool_calls(list(latest.messages)), *added]
@@ -1867,7 +2195,7 @@ class Agent:
                 latest.artifacts = [*(a for a in latest.artifacts if a.name not in names),
                                     *session.artifacts]
                 try:
-                    saved = await harness.sessions.save(latest)
+                    saved = await sessions.save(latest)
                 except SessionConflict:
                     continue
                 harness.audit.record(self.name, "session_merged", target=session.id,
@@ -1880,7 +2208,7 @@ class Agent:
             forked = session.model_copy(update={
                 "id": new_id("ses"), "parent_id": session.id, "version": 0,
                 "title": f"{session.title} (fork)" if session.title else ""})
-            saved = await harness.sessions.save(forked)
+            saved = await sessions.save(forked)
             result.session_id = saved.id
             result.warnings.append(
                 f"session {session.id} was changed by another request while this "

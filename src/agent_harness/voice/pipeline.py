@@ -142,6 +142,8 @@ class VoiceAgent:
         self.turns: list[dict[str, Any]] = []
         self._session_id = session
         self._session: Session | None = None
+        #: Who has the conversation, once it has been handed on.
+        self._holder = ""
         self._saved = 0
         self._carry = b""
         self._turn: asyncio.Task[Any] | None = None
@@ -180,6 +182,7 @@ class VoiceAgent:
                     await self.agent.harness.sessions.load(self._session_id))
                 self._session = loaded
                 self.history = close_open_tool_calls(list(loaded.messages))
+                self._holder = (loaded.metadata.get("handoff") or {}).get("active", "")
                 self._saved = len(self.history)
             else:
                 self._session = self.agent._may_have(Session(agent=self.agent.name))
@@ -191,6 +194,10 @@ class VoiceAgent:
         if not added and usage is None:
             return
         session.messages = list(self.history)
+        if self._holder:
+            session.metadata["handoff"] = {
+                **(session.metadata.get("handoff") or {"entry": self.agent.name}),
+                "active": self._holder}
         if not session.title and added:
             session.title = " ".join(added[0].text.split())[:80]
         carrier = RunResult(agent=self.agent.name, session_id=session.id,
@@ -248,7 +255,9 @@ class VoiceAgent:
             result: RunResult | None = None
             chunker = SpeechChunker()
             try:
-                async for event in self.agent.stream(text, messages=list(self.history)):
+                speaker = (self.agent.handoff_agent(self._holder)
+                           if self._holder else None) or self.agent
+                async for event in speaker.stream(text, messages=list(self.history)):
                     if event.type == "text" and event.text:
                         timing.setdefault("first_token", time.monotonic())
                         await events.put(VoiceEvent("text", text=event.text))
@@ -325,6 +334,7 @@ class VoiceAgent:
             answer = " ".join(state["spoken"])
             if result is not None and not result.error:
                 self.history = list(result.messages)
+                self._holder = result.active_agent or self._holder
             else:
                 self.history = [*self.history, Message.user(text),
                                 Message.assistant(answer or self.error_line)]

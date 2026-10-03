@@ -414,7 +414,8 @@ class RealtimeAgent:
         self._saved = len(self.history)
 
     async def _instructions(self) -> str:
-        system = await self.agent.assembler.build(tool_names=self.agent.tools.names)
+        system = await self.agent.assembler.build(tool_names=[
+            t.name for t in self.agent.tools if "handoff" not in t.tags])
         if not self.history:
             return system
         # A realtime model starts with no memory of an earlier call; the
@@ -441,7 +442,9 @@ class RealtimeAgent:
         await self._open()
         run_id = new_id("run")
         instructions = await self._instructions()
-        tools = agent.tools.schemas()
+        # A handoff swaps who is driving the loop, and here the model drives
+        # itself: it is not offered one.
+        tools = [t.to_schema() for t in agent.tools if "handoff" not in t.tags]
 
         # Where this connection goes is somebody's business: the same check a
         # model call gets, so a residency policy covers a voice call too.

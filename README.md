@@ -889,6 +889,82 @@ Bench.standard().names
 #  'planner', 'report_writer', 'research', 'validator']
 ```
 
+## Handoffs: another agent takes over
+
+A sub-agent is given a task and reports back to the agent that asked. A handoff
+gives the **conversation** away: the other agent sees what was said, answers the
+user itself, and is still the one answering on the next turn.
+
+```python
+from agent_harness import Agent, Handoff
+
+billing = Agent("billing", "Handle charges, refunds and invoices.",
+                description="Charges, refunds and invoices.", tools=[issue_refund])
+triage = Agent("triage", "Work out what the customer needs.", mode="chat",
+               handoffs=[billing])
+billing.add_handoff(triage)                    # and back again
+
+result = await triage.run("I was charged twice for order 4182.")
+result.agent           # "billing" — who answered
+result.handoffs        # [triage → billing: "charged twice, order 4182"]
+result.active_agent    # "billing" — who gets the next turn
+
+await triage.run("When will I see the money?")     # billing answers; triage is not asked
+```
+
+A `handoff` tool appears on any agent with somewhere to hand off to, listing
+each agent and its `description` — that is what the model chooses by. You keep
+calling the agent you started with; the session remembers who has the
+conversation, so another process picking the chat up by its id finds the same
+agent holding it.
+
+What the agent taking over sees is up to the `Handoff`:
+
+```python
+Handoff(billing)                         # everything, tool calls and results included
+Handoff(billing, history="text")         # what was said, not what was looked up
+Handoff(billing, history="fresh")        # only the user's last message
+Handoff(billing, history=my_filter)      # your own: list[Message] in, list[Message] out
+Handoff(billing, sticky=False)           # answers this turn; the next goes back
+Handoff(billing, description="Anything about money.", on_handoff=notify)
+```
+
+A narrowed history is the conversation from then on — it is what gets saved —
+which is the point of narrowing it. `on_handoff` is called with the
+`HandoffRecord` before the other agent starts, and may raise to refuse.
+
+The rules around it:
+
+- **One run, one result.** A stream has one `run_start`, one `run_end`, and a
+  `handoff` event where the conversation changed hands; events carry the name of
+  the agent they came from. Usage, steps, tool calls and artefacts from every
+  agent are on the one `RunResult`.
+- **One session.** Every agent in the chain writes to the same session, in the
+  store of the agent you called — even if they were built on different harnesses.
+- **It cannot go round for ever.** `Agent(max_handoffs=5)` is the ceiling for one
+  run; past it the tool says so and the agent holding the conversation answers.
+  Two handoffs asked for in one turn: the first is granted.
+- **A refusal is something the model reads.** A `handoff` hook can block it
+  (`ctx.block("billing is closed")`), and so can the permission gate, an agent's
+  `forbid_tools`, and governance — which asks of a handoff what it asks of a
+  delegation, and refuses an agent it has never registered. The agent then
+  answers the user itself.
+- **The agent handing off gives no answer**, so its output contract, its mode's
+  requirements and its completion guardrails are not asked of it. The agent that
+  answers is held to its own.
+- **Nobody is left holding a conversation they cannot have.** An agent that
+  could not start, is no longer in the configuration, or is acting for a
+  different user gives the conversation back to the agent you called.
+- **The details that would break a provider are handled.** An agent with no tools
+  is given the conversation as text; reasoning blocks are dropped when the model
+  changes; a research or cowork agent taking over from one in the same mode
+  carries on its todo list and its numbered sources.
+- **Each agent keeps its own** instructions, model, tools, memory, budget and
+  workspace. Give two agents the same `Workspace` if they should share files.
+
+In a voice pipeline the agent that was handed the call keeps it between turns. A
+realtime voice model drives its own loop, so it is not offered the tool.
+
 ## The orchestrator
 
 ```python
@@ -1021,10 +1097,15 @@ agents:
     instructions: "{house_style}"
     tools: [order_status, lookup]
     subagents: [researcher]
+    handoffs: [billing]          # or {agent: billing, history: text, sticky: false}
     guardrails: strict
     versions:
       v1: {instructions: Answer order questions., tools: [order_status]}
       v2: {instructions: "{house_style}"}
+  billing:
+    description: Refunds and invoices.
+    tools: [lookup]
+    handoffs: [support]
 ```
 
 ```python
@@ -1659,6 +1740,8 @@ async for event in agent.stream("Summarise the incident"):
         print(f"\n· {event.data['tool']}")
     elif event.type == "progress":       # a mode's todo list or ledger changed
         print(f"\n· {event.text}", event.data["todos"])
+    elif event.type == "handoff":        # another agent has the conversation now
+        print(f"\n· {event.data['from']} → {event.data['to']}")
     elif event.type == "run_end":
         result = event.data["result"]
 ```

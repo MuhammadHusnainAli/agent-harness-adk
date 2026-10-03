@@ -77,6 +77,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/14_voice.py",
      "A voice agent: voice-activity detection, a spoken answer that starts "
      "before the model finishes, a tool call, and an interruption."),
+    ("examples/15_handoffs.py",
+     "Handoffs: a front desk hands the conversation to a specialist, who answers "
+     "the customer directly, keeps the next turn, and hands back."),
 ]
 
 

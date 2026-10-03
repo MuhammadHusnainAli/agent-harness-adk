@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Handoffs — `Agent(handoffs=[...])`**
+- Another agent takes over the conversation: it sees what was said, answers the
+  user itself, and keeps the conversation on the turns that follow. A `handoff`
+  tool appears on any agent with somewhere to hand off to; `Agent.add_handoff`
+  introduces two agents that hand to each other.
+- `Handoff(agent, description=, history=, sticky=, on_handoff=)`. `history` is
+  `"full"`, `"text"` (no tool calls or results), `"fresh"` (the user's last
+  message) or a function; `sticky=False` hands over one turn only.
+- `RunResult.handoffs` (`HandoffRecord`: source, target, reason), `.agent` for
+  who answered and `.active_agent` for who has the next turn; usage, steps, tool
+  calls and artefacts of every agent are merged onto the one result. A `handoff`
+  stream event, and a `"handoff"` stop reason on the handing agent's own record.
+- The session records who holds the conversation
+  (`session.metadata["handoff"]`), so any process continuing it by id reaches
+  the same agent. Every agent in a chain saves to the entry agent's store.
+- `Agent(max_handoffs=5)` caps handoffs per run. A `handoff` hook event can
+  block one; the permission gate, `forbid_tools` and governance (as a
+  delegation) apply. A refused handoff is a tool error the model reads.
+- An agent that cannot start, is gone from the configuration, or acts for a
+  different user gives the conversation back to the agent that was called.
+- `handoffs:` in blueprints (by agent name, cycles allowed) and in
+  `AgentVersion`; `Agent.handoff_agent(name)`; the CLI chat prints who answered.
+- A voice pipeline keeps the call with whoever was handed it.
+- `examples/15_handoffs.py`.
+
 **Modes — `Agent(mode=..., depth=...)`**
 - `mode="chat" | "research" | "cowork"`, chosen where the agent is created, and
   `depth="fast" | "balanced" | "deep"` for how hard it works. An agent with no

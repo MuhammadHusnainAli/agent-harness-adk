@@ -901,6 +901,82 @@ Bench.standard().names
 #  'planner', 'report_writer', 'research', 'validator']
 ```
 
+## Handoffs: another agent takes over
+
+A sub-agent is given a task and reports back to the agent that asked. A handoff
+gives the **conversation** away: the other agent sees what was said, answers the
+user itself, and is still the one answering on the next turn.
+
+```python
+from agent_harness import Agent, Handoff
+
+billing = Agent("billing", "Handle charges, refunds and invoices.",
+                description="Charges, refunds and invoices.", tools=[issue_refund])
+triage = Agent("triage", "Work out what the customer needs.", mode="chat",
+               handoffs=[billing])
+billing.add_handoff(triage)                    # and back again
+
+result = await triage.run("I was charged twice for order 4182.")
+result.agent           # "billing" — who answered
+result.handoffs        # [triage → billing: "charged twice, order 4182"]
+result.active_agent    # "billing" — who gets the next turn
+
+await triage.run("When will I see the money?")     # billing answers; triage is not asked
+```
+
+A `handoff` tool appears on any agent with somewhere to hand off to, listing
+each agent and its `description` — that is what the model chooses by. You keep
+calling the agent you started with; the session remembers who has the
+conversation, so another process picking the chat up by its id finds the same
+agent holding it.
+
+What the agent taking over sees is up to the `Handoff`:
+
+```python
+Handoff(billing)                         # everything, tool calls and results included
+Handoff(billing, history="text")         # what was said, not what was looked up
+Handoff(billing, history="fresh")        # only the user's last message
+Handoff(billing, history=my_filter)      # your own: list[Message] in, list[Message] out
+Handoff(billing, sticky=False)           # answers this turn; the next goes back
+Handoff(billing, description="Anything about money.", on_handoff=notify)
+```
+
+A narrowed history is the conversation from then on — it is what gets saved —
+which is the point of narrowing it. `on_handoff` is called with the
+`HandoffRecord` before the other agent starts, and may raise to refuse.
+
+The rules around it:
+
+- **One run, one result.** A stream has one `run_start`, one `run_end`, and a
+  `handoff` event where the conversation changed hands; events carry the name of
+  the agent they came from. Usage, steps, tool calls and artefacts from every
+  agent are on the one `RunResult`.
+- **One session.** Every agent in the chain writes to the same session, in the
+  store of the agent you called — even if they were built on different harnesses.
+- **It cannot go round for ever.** `Agent(max_handoffs=5)` is the ceiling for one
+  run; past it the tool says so and the agent holding the conversation answers.
+  Two handoffs asked for in one turn: the first is granted.
+- **A refusal is something the model reads.** A `handoff` hook can block it
+  (`ctx.block("billing is closed")`), and so can the permission gate, an agent's
+  `forbid_tools`, and governance — which asks of a handoff what it asks of a
+  delegation, and refuses an agent it has never registered. The agent then
+  answers the user itself.
+- **The agent handing off gives no answer**, so its output contract, its mode's
+  requirements and its completion guardrails are not asked of it. The agent that
+  answers is held to its own.
+- **Nobody is left holding a conversation they cannot have.** An agent that
+  could not start, is no longer in the configuration, or is acting for a
+  different user gives the conversation back to the agent you called.
+- **The details that would break a provider are handled.** An agent with no tools
+  is given the conversation as text; reasoning blocks are dropped when the model
+  changes; a research or cowork agent taking over from one in the same mode
+  carries on its todo list and its numbered sources.
+- **Each agent keeps its own** instructions, model, tools, memory, budget and
+  workspace. Give two agents the same `Workspace` if they should share files.
+
+In a voice pipeline the agent that was handed the call keeps it between turns. A
+realtime voice model drives its own loop, so it is not offered the tool.
+
 ## The orchestrator
 
 ```python
@@ -1033,10 +1109,15 @@ agents:
     instructions: "{house_style}"
     tools: [order_status, lookup]
     subagents: [researcher]
+    handoffs: [billing]          # or {agent: billing, history: text, sticky: false}
     guardrails: strict
     versions:
       v1: {instructions: Answer order questions., tools: [order_status]}
       v2: {instructions: "{house_style}"}
+  billing:
+    description: Refunds and invoices.
+    tools: [lookup]
+    handoffs: [support]
 ```
 
 ```python
@@ -1671,6 +1752,8 @@ async for event in agent.stream("Summarise the incident"):
         print(f"\n· {event.data['tool']}")
     elif event.type == "progress":       # a mode's todo list or ledger changed
         print(f"\n· {event.text}", event.data["todos"])
+    elif event.type == "handoff":        # another agent has the conversation now
+        print(f"\n· {event.data['from']} → {event.data['to']}")
     elif event.type == "run_end":
         result = event.data["result"]
 ```
@@ -1798,6 +1881,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Handoffs — `Agent(handoffs=[...])`**
+- Another agent takes over the conversation: it sees what was said, answers the
+  user itself, and keeps the conversation on the turns that follow. A `handoff`
+  tool appears on any agent with somewhere to hand off to; `Agent.add_handoff`
+  introduces two agents that hand to each other.
+- `Handoff(agent, description=, history=, sticky=, on_handoff=)`. `history` is
+  `"full"`, `"text"` (no tool calls or results), `"fresh"` (the user's last
+  message) or a function; `sticky=False` hands over one turn only.
+- `RunResult.handoffs` (`HandoffRecord`: source, target, reason), `.agent` for
+  who answered and `.active_agent` for who has the next turn; usage, steps, tool
+  calls and artefacts of every agent are merged onto the one result. A `handoff`
+  stream event, and a `"handoff"` stop reason on the handing agent's own record.
+- The session records who holds the conversation
+  (`session.metadata["handoff"]`), so any process continuing it by id reaches
+  the same agent. Every agent in a chain saves to the entry agent's store.
+- `Agent(max_handoffs=5)` caps handoffs per run. A `handoff` hook event can
+  block one; the permission gate, `forbid_tools` and governance (as a
+  delegation) apply. A refused handoff is a tool error the model reads.
+- An agent that cannot start, is gone from the configuration, or acts for a
+  different user gives the conversation back to the agent that was called.
+- `handoffs:` in blueprints (by agent name, cycles allowed) and in
+  `AgentVersion`; `Agent.handoff_agent(name)`; the CLI chat prints who answered.
+- A voice pipeline keeps the call with whoever was handed it.
+- `examples/15_handoffs.py`.
 
 **Modes — `Agent(mode=..., depth=...)`**
 - `mode="chat" | "research" | "cowork"`, chosen where the agent is created, and
@@ -2945,8 +3053,8 @@ For answers to common questions about this code of conduct, see the FAQ at
 
 ### `Agent`  (class)
 One accountable agent: a model, a prompt, its tools, and its sub-agents.
-Methods: `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `call_tool(self, name: str, args: dict[str, Any] | None = None, *, run_id: str = , step: int = 0, guard: BudgetGuard | None = None, result: RunResult | None = None) -> ToolOutcome`, `close_session(self, summary: str | None = None) -> str`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `resume(self, session: str, *, sandbox_id: str | None = None) -> Session`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
-Properties: available_versions, content_guardrails, conversational, depth, factory, provider, runtime_agents_remaining, subagents, version
+Methods: `add_handoff(self, entry: Any) -> Handoff`, `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `call_tool(self, name: str, args: dict[str, Any] | None = None, *, run_id: str = , step: int = 0, guard: BudgetGuard | None = None, result: RunResult | None = None) -> ToolOutcome`, `close_session(self, summary: str | None = None) -> str`, `handoff_agent(self, name: str) -> Agent | None`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `resume(self, session: str, *, sandbox_id: str | None = None) -> Session`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
+Properties: available_versions, content_guardrails, conversational, depth, factory, handoffs, provider, runtime_agents_remaining, subagents, version
 
 ### `Harness`  (class)
 Shared runtime services. Everything has a working default.
@@ -2974,7 +3082,7 @@ Fields: accepted, score, problems, gaps, summary
 ### `AgentVersion`  (class)
 One version of an agent's configuration. Every field is optional.
 Methods: `of(value: AgentVersion | dict[str, Any]) -> AgentVersion`, `overrides(self) -> dict[str, Any]`
-Fields: instructions, description, model, mode, depth, tier, effort, temperature, max_tokens, max_steps, thinking, thinking_budget, top_p, top_k, min_p, frequency_penalty, presence_penalty, repetition_penalty, seed, tools, subagents, prompts, guardrails, budget
+Fields: instructions, description, model, mode, depth, tier, effort, temperature, max_tokens, max_steps, thinking, thinking_budget, top_p, top_k, min_p, frequency_penalty, presence_penalty, repetition_penalty, seed, tools, subagents, handoffs, prompts, guardrails
 
 ### `Blueprint`  (class)
 A file's worth of declarations, and the agents it can build.
@@ -2984,7 +3092,7 @@ Fields: version, defaults, prompts, guardrails, subagents, agents, memory, sessi
 
 ### `AgentEntry`  (class)
 One agent, as declared in the file.
-Fields: instructions, description, model, mode, depth, tier, effort, temperature, max_tokens, thinking, thinking_budget, top_p, top_k, min_p, frequency_penalty, presence_penalty, repetition_penalty, seed, max_steps, tools, skills, subagents, memory, trace
+Fields: instructions, description, model, mode, depth, tier, effort, temperature, max_tokens, thinking, thinking_budget, top_p, top_k, min_p, frequency_penalty, presence_penalty, repetition_penalty, seed, max_steps, tools, skills, subagents, handoffs, memory
 
 ### `Mode`  (class)
 A way of working, resolved at one depth. Build one with `chat()`, `research()` or `cowork()`; `dataclasses.replace` changes a single field.
@@ -3613,7 +3721,7 @@ Fields: message, stop_reason, usage, model, provider, latency_ms, raw
 ### `RunResult`  (class)
 The one object a caller gets back from `agent.run()`.
 Properties: cost_usd, ok
-Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id, warnings
+Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id, handoffs, active_agent, warnings
 
 ### `StreamEvent`  (class)
 One beat of a streaming run: a token, a tool call, a step boundary.
@@ -3746,7 +3854,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`
 
 ---
 
@@ -5083,6 +5191,112 @@ async def main() -> None:
     print("what the agent remembers of the answer it was cut off in:")
     cut = next(m.text for m in voice.history if "interrupted here" in m.text)
     print(f"  {cut}")
+    await harness.aclose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/15_handoffs.py
+
+Handoffs: a front desk hands the conversation to a specialist, who answers the customer directly, keeps the next turn, and hands back.
+
+```python
+"""Handoffs: another agent takes over the conversation, and keeps it.
+
+A front desk works out what the customer needs and hands the conversation to
+the specialist whose job it is. The specialist answers the customer directly,
+is still there on the next turn, and hands back when the subject changes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from _common import pick_provider
+
+from agent_harness import Agent, FakeProvider, Handoff, Harness, tool, tool_call
+
+
+@tool
+def find_charges(order: str) -> str:
+    """List what an order was charged.
+
+    Args:
+        order: the order number.
+    """
+    return f"order {order}: 40.00 EUR on 2 May, 40.00 EUR on 2 May (duplicate)"
+
+
+@tool
+def issue_refund(order: str, amount: float) -> str:
+    """Refund part of an order.
+
+    Args:
+        order: the order number.
+        amount: how much to give back, in EUR.
+    """
+    return f"refunded {amount:.2f} EUR on order {order}"
+
+
+async def main() -> None:
+    provider, model = pick_provider()
+    scripted = provider is not None
+    harness = Harness()
+
+    def scripts(*turns: object) -> FakeProvider | None:
+        return FakeProvider(list(turns)) if scripted else None
+
+    billing = Agent(
+        "billing",
+        "You handle charges, refunds and invoices. Look the charges up before you "
+        "refund anything. Anything else is not yours: hand it back to triage.",
+        description="Charges, refunds and invoices.",
+        tools=[find_charges, issue_refund], model=model, harness=harness,
+        provider=scripts(
+            tool_call("find_charges", order="4182"),
+            tool_call("issue_refund", order="4182", amount=40.0),
+            "You were charged twice for order 4182. I have refunded 40.00 EUR.",
+            "It reaches your card in three to five working days.",
+            tool_call("handoff", agent_name="triage", reason="asks about opening hours"),
+        ),
+    )
+    triage = Agent(
+        "triage",
+        "You are the front desk. Answer general questions yourself. Hand anything "
+        "about money to billing — do not try to answer it.",
+        mode="chat", model=model, harness=harness,
+        # `history="text"`: billing gets what was said, not the front desk's
+        # own tool calls. `"full"` (the default) hands over everything.
+        handoffs=[Handoff(billing, history="text")],
+        provider=scripts(
+            tool_call("handoff", agent_name="billing", reason="charged twice, order 4182"),
+            "We are open 9 to 5, Monday to Friday.",
+        ),
+    )
+    billing.add_handoff(triage)          # and back again
+
+    for said in ("I was charged twice for order 4182.",
+                 "When will I see the money?",
+                 "Thanks. What are your opening hours?"):
+        print(f"you      › {said}")
+        async for event in triage.stream(said):
+            if event.type == "handoff":
+                print(f"           ({event.data['from']} → {event.data['to']}: "
+                      f"{event.data['reason']})")
+            elif event.type == "tool_result" and event.data["tool"] != "handoff":
+                print(f"           · {event.agent} {event.data['tool']} → {event.text}")
+            elif event.type == "run_end":
+                result = event.data["result"]
+        print(f"{result.agent:<8} › {result.output}")
+        print(f"           [{result.steps} steps · next turn goes to "
+              f"{result.active_agent}]\n")
+
+    session = await harness.sessions.load(result.session_id)
+    print("the one session holds it all:",
+          " · ".join(f"{hop['source']} → {hop['target']}"
+                     for hop in session.metadata["handoff"]["trail"]))
     await harness.aclose()
 
 

@@ -200,6 +200,9 @@ class Governance:
             ("model_egress", self._on_egress), ("post_model", self._on_post_model),
             ("pre_tool", self._on_pre_tool), ("post_tool", self._on_post_tool),
             ("subagent_start", self._on_subagent_start),
+            # Giving the conversation away is giving authority away: the same
+            # questions are asked of it as of a delegation.
+            ("handoff", self._on_subagent_start),
             ("memory_write", self._on_memory_write),
         ):
             harness.hooks.add(event, self._guarded(event, handler))

@@ -82,6 +82,8 @@ class AgentVersion(BaseModel):
     #: them all; `[]` takes them all away.
     tools: list[str] | None = None
     subagents: list[Any] | None = None
+    #: Agents (or `Handoff`s) this version may hand the conversation to.
+    handoffs: list[Any] | None = None
     prompts: dict[str, str] = Field(default_factory=dict)
     guardrails: dict[str, Any] | Any = None
     budget: Any = None
@@ -96,7 +98,8 @@ class AgentVersion(BaseModel):
         out: dict[str, Any] = {}
         for field in type(self).model_fields:
             value = getattr(self, field)
-            if value is None or field in {"notes", "prompts", "tools", "subagents"}:
+            if value is None or field in {"notes", "prompts", "tools", "subagents",
+                                              "handoffs"}:
                 continue
             if field in OVERRIDABLE or field in {"guardrails", "budget"}:
                 out[field] = value

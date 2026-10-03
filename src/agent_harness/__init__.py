@@ -93,6 +93,7 @@ from .guardrails import (
     ToxicityDetector,
     Violation,
 )
+from .handoff import Handoff
 from .harness import Harness
 from .llm_providers import (
     AnthropicProvider,
@@ -216,6 +217,7 @@ from .types import (
     Artifact,
     AudioBlock,
     DocumentBlock,
+    HandoffRecord,
     ImageBlock,
     Message,
     ModelResponse,
@@ -273,6 +275,8 @@ __all__ = [
     "Source",
     # sub-agents
     "SubAgentSpec",
+    "Handoff",
+    "HandoffRecord",
     "AgentVersion",
     "Bench",
     "SubAgentFactory",

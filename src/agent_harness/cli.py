@@ -272,7 +272,9 @@ async def _chat(args: argparse.Namespace) -> int:
                 continue
             result = await agent.run(line, session=session)
             session = result.session_id
-            print(f"\n{agent.name} › {result.output or result.error}\n")
+            for hop in result.handoffs:
+                print(f"  · {hop.line()}", file=sys.stderr)
+            print(f"\n{result.agent or agent.name} › {result.output or result.error}\n")
             if _footer(result):
                 print(f"{_footer(result)}\n", file=sys.stderr)
         summary = await agent.close_session()

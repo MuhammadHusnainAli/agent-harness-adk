@@ -24,10 +24,15 @@
         instructions: "{house_style}"
         tools: [order_status, lookup]
         subagents: [researcher]
+        handoffs: [billing]
         guardrails: strict
         versions:
           v1: {instructions: Answer order questions., tools: [order_status]}
           v2: {instructions: "{house_style}"}
+      billing:
+        description: Refunds and invoices.
+        tools: [lookup]
+        handoffs: [support]
 
     guardrails:
       strict:
@@ -41,8 +46,9 @@ agent = blueprint.build("support", tools=[order_status, lookup])
 
 Tools cannot come from a file — they are code. Either hand them in, or let the
 file name them as import paths (`myapp.tools:order_status`) and they are
-imported. Everything else — prompts, sub-agents, budgets, guardrails, versions —
-is declaration, and belongs in the file where it can be reviewed and diffed.
+imported. Everything else — prompts, sub-agents, handoffs, budgets, guardrails,
+versions — is declaration, and belongs in the file where it can be reviewed and
+diffed.
 """
 
 from __future__ import annotations
@@ -90,6 +96,9 @@ class AgentEntry(BaseModel):
     tools: list[str] | None = None
     skills: str | list[str] | None = None
     subagents: list[str] = Field(default_factory=list)
+    #: Other agents in this file it may hand the conversation to: a name, or
+    #: {agent: billing, history: text, sticky: false, description: ...}.
+    handoffs: list[str | dict[str, Any]] = Field(default_factory=list)
     memory: bool | None = None
     trace: dict[str, Any] | str | None = None
     budget: dict[str, Any] | Budget | None = None
@@ -231,8 +240,17 @@ class Blueprint(BaseModel):
     # ---- building ------------------------------------------------------------
     def build(self, name: str, *, tools: Any = (), harness: Any = None,
               **overrides: Any) -> Any:
-        """Build one declared agent."""
+        """Build one declared agent — and, with it, every agent it can hand the
+        conversation to, on the same harness."""
+        return self._build(name, {}, tools=tools, harness=harness, **overrides)
+
+    def _build(self, name: str, built: dict[str, Any], *, tools: Any = (),
+               harness: Any = None, **overrides: Any) -> Any:
         from .agent import Agent
+        from .handoff import Handoff
+
+        if name in built:
+            return built[name]
 
         if name not in self.agents:
             raise ConfigurationError(
@@ -283,7 +301,26 @@ class Blueprint(BaseModel):
         kwargs.update(overrides)
         if harness is not None:
             kwargs["harness"] = harness
-        return Agent(name, **kwargs)
+        agent = built[name] = Agent(name, **kwargs)
+
+        # Introduced after it is built, so two agents may hand off to each
+        # other. What was said about this agent alone is not said of them —
+        # only where they run and what they call.
+        common = {key: overrides[key] for key in ("provider",) if key in overrides}
+        for item in entry.handoffs:
+            options = {"agent": item} if isinstance(item, str) else dict(item)
+            target = options.pop("agent", None)
+            if not target:
+                raise ConfigurationError(
+                    f"{name}: a handoff needs an `agent` — got {item!r}")
+            if target not in self.agents:
+                raise ConfigurationError(
+                    f"{name} hands off to {target!r}, which is not an agent in this "
+                    f"blueprint; declared: {', '.join(sorted(self.agents)) or 'none'}")
+            agent.add_handoff(Handoff(
+                self._build(target, built, tools=tools, harness=agent.harness,
+                            **common), **options))
+        return agent
 
     def _version(self, spec: dict[str, Any]) -> AgentVersion:
         version = AgentVersion.of(dict(spec))
@@ -302,7 +339,9 @@ class Blueprint(BaseModel):
         from .harness import Harness
 
         shared = harness if harness is not None else Harness()
-        return {name: self.build(name, tools=tools, harness=shared, **overrides)
+        built: dict[str, Any] = {}
+        return {name: self._build(name, built, tools=tools, harness=shared,
+                                  **overrides)
                 for name in self.agents}
 
     def memory_store(self) -> Any:

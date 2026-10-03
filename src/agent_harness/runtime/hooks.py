@@ -15,6 +15,10 @@ chain has picked the backend, so a handler sees where the data is really going
 (provider, model, region). Blocking it skips that backend and moves on to the
 next model in the chain; replacing it swaps the request sent to that backend
 only, leaving the agent's own history untouched.
+
+`handoff` fires when an agent asks to give the conversation to another one —
+`agent` is the one that would take over, `data["source"]` the one giving it up.
+Blocking it keeps the conversation where it is.
 """
 
 from __future__ import annotations
@@ -29,12 +33,13 @@ __all__ = ["HookEvent", "HookContext", "HookEngine"]
 HookEvent = Literal[
     "run_start", "run_end", "step_start", "step_end",
     "pre_model", "post_model", "model_egress", "pre_tool", "post_tool",
-    "subagent_start", "subagent_end", "memory_write", "error",
+    "subagent_start", "subagent_end", "handoff", "memory_write", "error",
 ]
 
 EVENTS: tuple[str, ...] = (
     "run_start", "run_end", "step_start", "step_end", "pre_model", "post_model",
-    "model_egress", "pre_tool", "post_tool", "subagent_start", "subagent_end", "memory_write", "error",
+    "model_egress", "pre_tool", "post_tool", "subagent_start", "subagent_end", "handoff",
+    "memory_write", "error",
 )
 
 
