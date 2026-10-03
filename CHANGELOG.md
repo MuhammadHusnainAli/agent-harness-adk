@@ -8,6 +8,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Web search — `web_search`, `WebSearch`**
+- `web_search` in `agent_harness.toolkits`: a search tool that works with any
+  model. It uses the engine whose key is in the environment — Tavily, Brave,
+  Exa, Serper, Google Programmable Search, or a SearXNG instance — and
+  DuckDuckGo, which needs no key, when none is set. Every engine is spoken to
+  over HTTP; no dependency is added.
+- The model passes `query`, `limit`, `recency` (`day`, `week`, `month`, `year`)
+  and `domains`, and reads back title, URL, snippet and publication date.
+- `WebSearch(engine, ...)` to choose: one engine or a list to fall back through,
+  `allowed_domains`, `blocked_domains`, `limit`, `max_limit`, `region`,
+  `language`, `safe_search`, `snippet_chars`. `search.search(...)` to call it
+  yourself, `search.as_tool()`, `search.stats`, `search.last_engine`;
+  `make_search_tool(...)` for the tool in one call.
+- Retries with back-off on 429, 5xx, timeouts and dropped connections,
+  honouring `Retry-After`; a refused key, an exhausted quota or a rejected query
+  is not retried. An engine that fails, or finds nothing, is passed over for the
+  next; one that keeps failing is left alone for a minute. `timeout` bounds a
+  request and `deadline` the whole search.
+- Results are stripped of markup and tracking parameters, de-duplicated, and
+  held to the domain policy whatever the engine returned. Answers are cached for
+  `cache_ttl` seconds and identical concurrent questions are one request.
+- A failed search is a tool error naming each engine and why, with keys
+  redacted.
+- An engine of your own: a function of a `SearchQuery`, or a `SearchEngine`
+  subclass. `search_engines()` lists what ships and what is set up;
+  `AGENT_HARNESS_SEARCH` names the engines for a search that was given none.
+- `agent-harness search [QUERY] [--engine NAME] [--limit N] [--recency R]
+  [--domain D] [--json]`, and `--tools` now includes `web_search`.
+- `examples/20_web_search.py`.
+
 **Agents as an MCP server — `MCPAgentServer`**
 - `MCPAgentServer(agents)` serves agents as MCP tools: each agent is one tool
   taking a `task`. An ASGI application over MCP's streamable HTTP, a built-in

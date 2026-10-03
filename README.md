@@ -611,6 +611,7 @@ Built-ins in `agent_harness.toolkits`:
 |---|---|
 | `now`, `calculate` | exact arithmetic, no `eval` |
 | `make_corpus_search` | keyword search over documents you hand it |
+| `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
@@ -618,6 +619,90 @@ Built-ins in `agent_harness.toolkits`:
 
 A workspace brings `fs_read`, `fs_write`, `fs_list`, `fs_delete` and — only when
 you ask for it — `shell`. A sandbox is a workspace too, and comes with its shell.
+
+## Web search
+
+```python
+from agent_harness import Agent
+from agent_harness.toolkits import http_fetch, web_search
+
+analyst = Agent("analyst", mode="research", tools=[web_search, http_fetch])
+```
+
+`web_search` works with any model, because the search is made here and not by
+the model's vendor. It uses whichever engine has a key in the environment, and
+DuckDuckGo — which needs none — when no key is set:
+
+| Engine | Set | Notes |
+|---|---|---|
+| `tavily` | `TAVILY_API_KEY` | domain filters applied by the engine |
+| `brave` | `BRAVE_API_KEY` | |
+| `exa` | `EXA_API_KEY` | domain filters applied by the engine |
+| `serper` | `SERPER_API_KEY` | Google results |
+| `google` | `GOOGLE_SEARCH_API_KEY` + `GOOGLE_CSE_ID` | Programmable Search Engine |
+| `searxng` | `SEARXNG_URL` | an instance of your own, with the JSON format on |
+| `duckduckgo` | nothing | the HTML results page: fine to start with, throttled under load |
+
+The model gets four arguments — `query`, `limit`, `recency` (`day`, `week`,
+`month`, `year`) and `domains` — and reads back title, URL, snippet and the
+date when the engine knows it. To choose the engines and the policy yourself:
+
+```python
+from agent_harness import WebSearch
+
+search = WebSearch(
+    ["brave", "duckduckgo"],              # asked in order; the next when one fails
+    allowed_domains=["*.gov", "europa.eu"],   # a plain name covers its subdomains
+    blocked_domains=["pinterest.com"],
+    limit=5, max_limit=10, region="gb", language="en", safe_search="strict",
+)
+hits = await search.search("heat pump subsidy", recency="year")   # call it yourself
+agent = Agent("analyst", tools=[search.as_tool()])
+
+search.last_engine      # 'brave'
+search.stats            # {'brave': {'answered': 1, 'failed': 0, 'last_error': ''}}
+```
+
+What happens when a search goes wrong is decided here, not left to the model:
+
+- **Retries.** A 429, a 5xx, a timeout or a dropped connection is tried again
+  with back-off, and `Retry-After` is honoured up to ten seconds. A refused key,
+  an exhausted quota or a rejected query is not retried.
+- **Fallback.** An engine that cannot answer — or, unless
+  `fallback_on_empty=False`, finds nothing — is passed over for the next one.
+- **Circuit breaker.** After `failure_threshold=3` failures in a row an engine
+  is left alone for `cooldown=60` seconds, then probed once.
+- **Time.** `timeout=15` seconds a request, `deadline=45` seconds the whole
+  search, retries and fallbacks included.
+- **Results.** Markup and entities removed, tracking parameters stripped, the
+  same page listed once, snippets cut at `snippet_chars`. The domain policy is
+  applied to what comes back, whatever the engine was asked — and the model can
+  narrow a search to some domains but not reach past `allowed_domains`.
+- **Cache.** The same question within `cache_ttl=300` seconds is answered from
+  memory, and two identical questions asked at once are one request.
+- **Errors.** When every engine fails the model reads which and why —
+  `web search failed — brave: out of quota; duckduckgo: timed out` — and no key
+  ever appears in that message.
+
+An engine that is not on the list is a function, sync or async, or a
+`SearchEngine` subclass when it is an HTTP service:
+
+```python
+from agent_harness.toolkits import SearchQuery
+
+async def intranet(query: SearchQuery):
+    rows = await wiki.find(query.text, top=query.limit)
+    return [{"title": r.name, "url": r.link, "snippet": r.summary} for r in rows]
+
+search = WebSearch([intranet, "tavily"])
+```
+
+In a blueprint the tool is `agent_harness.toolkits:web_search`, with
+`AGENT_HARNESS_SEARCH=brave,duckduckgo` choosing the engines. `agent-harness
+search` lists the engines and which are set up; `agent-harness search "heat
+pump subsidy" --recency year` runs one. Snippets are text from the open web:
+treat them as you treat any fetched page, as something the agent reads and not
+something it obeys. `examples/20_web_search.py` runs all of this offline.
 
 ## OpenAPI → tools
 
@@ -2201,6 +2286,8 @@ agent-harness run "what does this say?" --attach contract.pdf --attach call.mp3
 agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
+agent-harness search "heat pump subsidy" --recency year --engine brave
+agent-harness search                    # the search engines, and which are set up
 agent-harness models
 agent-harness sessions --state .harness
 agent-harness journal --state .harness

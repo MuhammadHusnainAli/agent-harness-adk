@@ -17,6 +17,15 @@ from .documents import (
     supported_formats,
 )
 from .openapi import OpenAPIToolkit, openapi_tools
+from .search import (
+    SearchEngine,
+    SearchQuery,
+    SearchResult,
+    WebSearch,
+    make_search_tool,
+    search_engines,
+    web_search,
+)
 from .web import http_fetch, make_fetch_tool, make_http_tool
 
 __all__ = [
@@ -28,6 +37,13 @@ __all__ = [
     "http_fetch",
     "make_fetch_tool",
     "make_http_tool",
+    "web_search",
+    "make_search_tool",
+    "WebSearch",
+    "SearchEngine",
+    "SearchQuery",
+    "SearchResult",
+    "search_engines",
     "parse_document",
     "parse_text",
     "supported_formats",

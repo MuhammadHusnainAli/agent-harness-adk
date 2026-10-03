@@ -252,7 +252,8 @@ _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
          "StepResult": "workflow",
          "A2AServer": "a2a", "A2AClient": "a2a", "RemoteAgent": "a2a",
          "A2AError": "a2a",
-         "OpenAPIToolkit": "toolkits.openapi", "openapi_tools": "toolkits.openapi"}
+         "OpenAPIToolkit": "toolkits.openapi", "openapi_tools": "toolkits.openapi",
+         "WebSearch": "toolkits.search", "make_search_tool": "toolkits.search"}
 
 
 def __getattr__(name: str):
@@ -517,6 +518,8 @@ __all__ = [
     "A2AError",
     "OpenAPIToolkit",
     "openapi_tools",
+    "WebSearch",
+    "make_search_tool",
     "PermissionDenied",
     "BudgetExceeded",
     "GuardrailTripped",

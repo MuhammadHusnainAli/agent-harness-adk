@@ -92,6 +92,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/19_mcp_server.py",
      "Agents served as an MCP server, each behind its own API key: what each "
      "key opens, what is refused, and an agent using another over MCP."),
+    ("examples/20_web_search.py",
+     "Web search: an engine that fails, a fallback that answers, the domain "
+     "policy and the cache, and an agent that answers from what it found."),
 ]
 
 

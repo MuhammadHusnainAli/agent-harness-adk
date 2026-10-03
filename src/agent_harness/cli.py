@@ -43,8 +43,8 @@ async def _console_ask(question: str, options: list[str]) -> str:
 def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
     tools: list[Any] = []
     if args.tools:
-        from .toolkits import basic_tools, http_fetch
-        tools = [*basic_tools(), http_fetch]
+        from .toolkits import basic_tools, http_fetch, web_search
+        tools = [*basic_tools(), web_search, http_fetch]
     for spec in getattr(args, "openapi", None) or []:
         tools += _api(spec, args).tools
     mode: Any = args.mode
@@ -169,6 +169,35 @@ async def _openapi(args: argparse.Namespace) -> int:
         return 0
     finally:
         await toolkit.aclose()
+
+
+async def _search(args: argparse.Namespace) -> int:
+    from .toolkits.search import WebSearch, search_engines
+
+    if not args.query:
+        print(f"{'engine':<12} {'status':<10} needs")
+        for engine in search_engines():
+            print(f"{engine['name']:<12} {'ready' if engine['ready'] else 'not set':<10} "
+                  f"{' + '.join(engine['needs']) or 'nothing'}")
+        print(f"\na search uses: {', '.join(WebSearch().engines)}")
+        return 0
+    search = WebSearch(args.engine or None, cache_ttl=0, max_limit=max(args.limit, 10),
+                       allowed_domains=args.domain or None)
+    results = await search.search(" ".join(args.query), limit=args.limit,
+                                  recency=args.recency)
+    if args.json:
+        print(json.dumps([{**r.to_dict(), "engine": r.engine} for r in results],
+                         indent=2, ensure_ascii=False))
+        return 0
+    if not results:
+        print("no results")
+    for number, result in enumerate(results, 1):
+        date = f"  ({result.published})" if result.published else ""
+        print(f"{number}. {result.title}{date}\n   {result.url}")
+        if result.snippet:
+            print(f"   {result.snippet}")
+    print(f"\nanswered by {search.last_engine}", file=sys.stderr)
+    return 0
 
 
 def _footer(result: Any) -> str:
@@ -378,8 +407,8 @@ async def _workflow(args: argparse.Namespace) -> int:
 
     tools: list[Any] = [_import_tool(path) for path in args.tool]
     if args.tools:
-        from .toolkits import basic_tools, http_fetch
-        tools += [*basic_tools(), http_fetch]
+        from .toolkits import basic_tools, http_fetch, web_search
+        tools += [*basic_tools(), web_search, http_fetch]
     harness = _harness(args)
     try:
         workflow = Workflow.from_file(args.file, tools=tools, harness=harness)
@@ -796,7 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--instructions", default="", help="the agent's instructions")
         p.add_argument("--skills", default=None, help="a directory of skills to load")
         p.add_argument("--tools", action="store_true",
-                       help="give it the built-in tools (time, maths, web fetch)")
+                       help="give it the built-in tools (time, maths, web search "
+                            "and fetch)")
         p.add_argument("--openapi", action="append", default=[], metavar="SPEC",
                        help="an OpenAPI file or URL whose operations become tools "
                             "(repeatable)")
@@ -877,7 +907,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="a tool the steps may call, as package.module:name "
                            "(repeatable)")
     flow.add_argument("--tools", action="store_true",
-                      help="give it the built-in tools (time, maths, web fetch)")
+                      help="give it the built-in tools (time, maths, web search "
+                           "and fetch)")
     flow.add_argument("--check", action="store_true",
                       help="validate the file and print its outline; run nothing")
     flow.add_argument("--json", action="store_true", help="print the full result")
@@ -943,6 +974,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="an argument for --call (repeatable)")
     api.add_argument("--json", action="store_true",
                      help="the tools as JSON: names, schemas, requests")
+
+    search = sub.add_parser(
+        "search", help="search the web, or list the search engines and which are set up")
+    search.add_argument("query", nargs="*", help="what to look for; none lists the engines")
+    search.add_argument("--engine", action="append", default=[], metavar="NAME",
+                        help="the engine to ask (repeatable: the next is asked when "
+                             "one fails)")
+    search.add_argument("--limit", type=int, default=5)
+    search.add_argument("--recency", default=None, choices=["day", "week", "month", "year"])
+    search.add_argument("--domain", action="append", default=[], metavar="DOMAIN",
+                        help="only this site (repeatable)")
+    search.add_argument("--json", action="store_true")
 
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
@@ -1035,6 +1078,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_a2a(args))
         if args.command == "openapi":
             return asyncio.run(_openapi(args))
+        if args.command == "search":
+            return asyncio.run(_search(args))
         if args.command == "mcp-serve":
             return asyncio.run(_mcp_serve(args))
         if args.command == "models":
