@@ -1594,13 +1594,53 @@ result = await boss.run("Summarise how Q3 went, with the numbers cited.")
 ```
 
 1. **Plan** — acceptance tests are written *before* any work starts, then the
-   task graph, then a cost estimate.
+   task graph, then an estimate: what it will cost and how wide it goes
+   (`plan.estimate_usd`, `plan.parallelism`).
 2. **Staff** — reuse from the bench, else build with the factory.
-3. **Run** — dependency-ordered waves, parallel inside each wave, per-task
-   retries, dependent tasks receive only what they depend on.
-4. **Consolidate** — merge, de-duplicate, rank, attribute.
-5. **Review** — an independent critic checks the deliverable against the
-   definition of done; a rejection becomes new tasks and one rework round.
+3. **Run** — tasks run as their dependencies finish, many at once, with
+   per-task retries and deadlines; a task receives only what it depends on.
+4. **Check** — each hand-back is checked against its task's `done_when`. One
+   that falls short is sent back with what it lacked, and when it stays short —
+   or fails, or misses its deadline — the task is **planned again by another
+   route** (`max_replans=2` a job). What waited for it then waits for the new
+   tasks, which are told what the first attempt produced.
+5. **Consolidate** — merge, de-duplicate, rank, attribute. Work that was
+   re-planned is spoken for by what replaced it.
+6. **Review** — independent critics check the deliverable against the
+   definition of done; a rejection becomes new tasks and a rework round.
+
+```python
+Orchestrator(
+    "boss",
+    critics=["the accuracy of every figure", "length and tone"],   # or critics=3
+    accept="all",                  # or "majority"
+    check_tasks=True, max_replans=2,
+    on_over_estimate="stop",       # "warn" (the default) · "stop" · "ignore"
+)
+```
+
+- **Critics** review on their own, without seeing each other's verdict; what
+  two of them both found is said once. A critic that returns nothing usable is
+  asked again and then left out — and if none gives a verdict the deliverable is
+  reported **unreviewed** (`review.reviewed is False`, a warning on the result),
+  never silently accepted.
+- **The estimate is held against the budget.** Before each wave the work still
+  to run is priced — by what this job's own tasks have been costing once some
+  have finished, by the estimate until then — and compared with what the budget
+  has left. `"warn"` says so and carries on; `"stop"` starts nothing it cannot
+  pay for, and hands back what was finished with `stop_reason == "budget"`.
+  After three finished tasks the estimate is what tasks here actually cost.
+- **What it cost is all of it.** `result.cost_usd` is the whole job — the plan,
+  the specs the factory wrote, every check, the consolidation and the review as
+  well as the sub-agents' work — and `result.spend` breaks it down: `work_usd`,
+  `overhead_usd`, and each agent's share.
+- **A job outlives its process.** It is saved to the harness's session store
+  after every wave and every stage. If the process dies,
+  `await boss.resume(result.run_id)` — in any process on the same store —
+  carries on from the last task that finished: finished tasks are not run
+  again, and neither is the plan or a consolidation already made.
+  `boss.job(id)` says where a job stands. Two processes cannot both run one
+  job: the one that finds the other has written to it stops.
 
 `result.data["plan"]` and `result.data["review"]` carry the full record.
 

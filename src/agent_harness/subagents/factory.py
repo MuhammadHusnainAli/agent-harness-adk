@@ -51,13 +51,18 @@ class SubAgentFactory:
         self.bench = bench if bench is not None else Bench.standard()
 
     async def create(self, task: str, *, tools: Iterable[str] = (),
-                     keep: bool = False) -> SubAgentSpec:
-        """Build a spec for `task`. Falls back to a safe generic spec on any problem."""
+                     keep: bool = False, guard: Any = None) -> SubAgentSpec:
+        """Build a spec for `task`. Falls back to a safe generic spec on any problem.
+
+        `guard` is the budget guard the drafting is charged to — the job's, when
+        an orchestrator is the one asking.
+        """
         catalogue = "\n".join(f"- {t}" for t in tools) or "(no tools available)"
         prompt = FACTORY_PROMPT.render(task=task, tools=catalogue)
         spec = self._fallback(task, tools)
 
-        result = await self.builder.run(prompt, messages=[])
+        result = await self.builder.run(
+            prompt, messages=[], **({"guard": guard} if guard is not None else {}))
         if not result.error:
             drafted = _parse_spec(result.output)
             if drafted:

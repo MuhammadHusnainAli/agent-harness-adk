@@ -1606,13 +1606,53 @@ result = await boss.run("Summarise how Q3 went, with the numbers cited.")
 ```
 
 1. **Plan** — acceptance tests are written *before* any work starts, then the
-   task graph, then a cost estimate.
+   task graph, then an estimate: what it will cost and how wide it goes
+   (`plan.estimate_usd`, `plan.parallelism`).
 2. **Staff** — reuse from the bench, else build with the factory.
-3. **Run** — dependency-ordered waves, parallel inside each wave, per-task
-   retries, dependent tasks receive only what they depend on.
-4. **Consolidate** — merge, de-duplicate, rank, attribute.
-5. **Review** — an independent critic checks the deliverable against the
-   definition of done; a rejection becomes new tasks and one rework round.
+3. **Run** — tasks run as their dependencies finish, many at once, with
+   per-task retries and deadlines; a task receives only what it depends on.
+4. **Check** — each hand-back is checked against its task's `done_when`. One
+   that falls short is sent back with what it lacked, and when it stays short —
+   or fails, or misses its deadline — the task is **planned again by another
+   route** (`max_replans=2` a job). What waited for it then waits for the new
+   tasks, which are told what the first attempt produced.
+5. **Consolidate** — merge, de-duplicate, rank, attribute. Work that was
+   re-planned is spoken for by what replaced it.
+6. **Review** — independent critics check the deliverable against the
+   definition of done; a rejection becomes new tasks and a rework round.
+
+```python
+Orchestrator(
+    "boss",
+    critics=["the accuracy of every figure", "length and tone"],   # or critics=3
+    accept="all",                  # or "majority"
+    check_tasks=True, max_replans=2,
+    on_over_estimate="stop",       # "warn" (the default) · "stop" · "ignore"
+)
+```
+
+- **Critics** review on their own, without seeing each other's verdict; what
+  two of them both found is said once. A critic that returns nothing usable is
+  asked again and then left out — and if none gives a verdict the deliverable is
+  reported **unreviewed** (`review.reviewed is False`, a warning on the result),
+  never silently accepted.
+- **The estimate is held against the budget.** Before each wave the work still
+  to run is priced — by what this job's own tasks have been costing once some
+  have finished, by the estimate until then — and compared with what the budget
+  has left. `"warn"` says so and carries on; `"stop"` starts nothing it cannot
+  pay for, and hands back what was finished with `stop_reason == "budget"`.
+  After three finished tasks the estimate is what tasks here actually cost.
+- **What it cost is all of it.** `result.cost_usd` is the whole job — the plan,
+  the specs the factory wrote, every check, the consolidation and the review as
+  well as the sub-agents' work — and `result.spend` breaks it down: `work_usd`,
+  `overhead_usd`, and each agent's share.
+- **A job outlives its process.** It is saved to the harness's session store
+  after every wave and every stage. If the process dies,
+  `await boss.resume(result.run_id)` — in any process on the same store —
+  carries on from the last task that finished: finished tasks are not run
+  again, and neither is the plan or a consolidation already made.
+  `boss.job(id)` says where a job stands. Two processes cannot both run one
+  job: the one that finds the other has written to it stops.
 
 `result.data["plan"]` and `result.data["review"]` carry the full record.
 
@@ -2780,6 +2820,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Orchestrator: checked hand-backs, re-planning, critics, a budget gate, resumable jobs**
+- Each hand-back is checked against its task's `done_when` (`check_tasks=True`).
+  One that falls short is retried with what it lacked; `Task.checked`,
+  `Task.missing`.
+- A task that fails, misses its deadline or stays short of its criterion is
+  planned again by another route (`max_replans=2` a job): the new tasks take its
+  place in the graph, are told what it produced, and it is marked `replaced` and
+  left out of consolidation. `Task.replaces`.
+- `critics=` — a number of independent reviewers, or what each is to look for —
+  and `accept="all" | "majority"`. Gaps are merged and de-duplicated.
+  `Review.verdicts`, `Review.reviewed`.
+- `plan.parallelism`. The estimate counts checks and review, and after three
+  finished tasks uses what tasks actually cost. `on_over_estimate="warn" |
+  "stop" | "ignore"` holds the work still to run against the budget before each
+  wave; `"stop"` starts nothing it cannot pay for (`budget_exceeded ==
+  "estimate"`). `tokens_per_task=`.
+- A job is saved to the session store after every wave and stage.
+  `Orchestrator.resume(job_id)` carries a job that was cut short on from the
+  last finished task, in any process; `Orchestrator.job(job_id)`;
+  `run(job_id=)`; `persist=`. A job is run by one process at a time.
+- `RunResult.spend`: a job's total, the sub-agents' share, the manager's own,
+  and each agent's.
+
 **Knowledge bases and vector stores — `KnowledgeBase`, `vector_store`**
 - `KnowledgeBase(store, embedder=)`: `add(text | path= | url=, id=, title=,
   metadata=)`, `add_many`, `search(query, k=, filter=)`, `delete(id)`,
@@ -3207,6 +3270,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An orchestrator's result reported only its sub-agents' usage — the plan, the
+  factory, consolidation and review were left out — and `cost_usd` counted the
+  sub-agents twice. `usage` is now the manager's own and `cost_usd` the whole
+  job.
+- A deliverable whose reviewer returned nothing usable was reported as
+  accepted. It is now reported as unreviewed.
+- A sub-agent spec's own `budget` was ignored when an orchestrator ran it.
+- The model call that crossed a budget ceiling was charged to the budget but
+  left out of `result.usage`.
+- A task blocked by a failed dependency did not block the tasks waiting on it
+  in turn until the next wave.
 - A blueprint agent whose instructions contain braces that are not a prompt
   reference — a JSON example, say — no longer fails to build.
 - A sqlite URL such as `sqlite:///./memory.db` pointed at the filesystem root,
@@ -4222,21 +4296,21 @@ Properties: compiler, guard, rate, replayer
 
 ### `Orchestrator`  (class)
 Owns the goal, the plan, the budget and the answer.
-Methods: `consolidate(self, plan: Plan, request: str) -> str`, `estimate(self, plan: Plan, *, tokens_per_task: int = 6000) -> float`, `execute(self, plan: Plan, request: str) -> Plan`, `plan(self, request: str) -> Plan`, `report(self) -> dict[str, Any]`, `review(self, plan: Plan, deliverable: str, request: str) -> Review`, `run(self, request: str, *, plan: Plan | None = None) -> RunResult`, `run_sync(self, request: str, **kw: Any) -> RunResult`, `staff(self, task: Task, *, available_tools: Iterable[str] = ()) -> Agent`
+Methods: `consolidate(self, plan: Plan, request: str) -> str`, `estimate(self, plan: Plan, *, tokens_per_task: int | None = None) -> float`, `execute(self, plan: Plan, request: str) -> Plan`, `job(self, job_id: str) -> dict[str, Any]`, `plan(self, request: str) -> Plan`, `report(self) -> dict[str, Any]`, `resume(self, job_id: str) -> RunResult`, `review(self, plan: Plan, deliverable: str, request: str) -> Review`, `run(self, request: str, *, plan: Plan | None = None, job_id: str | None = None, _resume: dict[str, Any] | None = None) -> RunResult`, `run_sync(self, request: str, **kw: Any) -> RunResult`, `staff(self, task: Task, *, available_tools: Iterable[str] = ()) -> Agent`
 
 ### `Plan`  (class)
 A costed plan: the goal, how we will know it is done, and the task graph.
 Methods: `by_id(self, task_id: str) -> Task | None`, `render(self) -> str`, `waves(self) -> list[list[Task]]`
-Fields: goal, definition_of_done, constraints, tasks, estimate_usd, notes
+Fields: goal, definition_of_done, constraints, tasks, estimate_usd, parallelism, notes
 
 ### `Task`  (class)
 One unit of work a single sub-agent can finish alone.
 Properties: usable_output
-Fields: id, statement, depends_on, done_when, agent, reused, status, output, partial, error, cost_usd, attempts
+Fields: id, statement, depends_on, done_when, agent, reused, status, output, partial, error, cost_usd, attempts, checked, missing, replaces
 
 ### `Review`  (class)
 An independent critic's verdict against the definition of done.
-Fields: accepted, score, problems, gaps, summary
+Fields: accepted, score, problems, gaps, summary, reviewed, verdicts
 
 ### `AgentVersion`  (class)
 One version of an agent's configuration. Every field is optional.
@@ -4276,7 +4350,7 @@ Properties: names
 
 ### `SubAgentFactory`  (class)
 Writes a new sub-agent spec at run time when the bench has nothing that fits.
-Methods: `create(self, task: str, *, tools: Iterable[str] = (), keep: bool = False) -> SubAgentSpec`
+Methods: `create(self, task: str, *, tools: Iterable[str] = (), keep: bool = False, guard: Any = None) -> SubAgentSpec`
 
 ### `SpecCompiler`  (class)
 Blueprint in, provider payload out. No network, no side effects.
@@ -4880,7 +4954,7 @@ Fields: message, stop_reason, usage, model, provider, latency_ms, raw
 ### `RunResult`  (class)
 The one object a caller gets back from `agent.run()`.
 Properties: cost_usd, ok
-Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, approval, violations, children, mode, depth, todos, sources, sandbox_id, handoffs, active_agent
+Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, approval, spend, violations, children, mode, depth, todos, sources, sandbox_id, handoffs
 
 ### `StreamEvent`  (class)
 One beat of a streaming run: a token, a tool call, a step boundary.

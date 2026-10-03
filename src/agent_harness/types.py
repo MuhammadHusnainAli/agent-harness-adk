@@ -474,6 +474,10 @@ class RunResult(BaseModel):
     #: "approval"`): the `Approval` that was stored. Its `id` is what is
     #: approved, and what `agent.resume_approval` picks the run back up from.
     approval: Any = None
+    #: For an orchestrator's job: what it cost in all, how much of that was the
+    #: sub-agents' work and how much the manager's own planning, staffing,
+    #: consolidation and review — and each agent's share.
+    spend: dict[str, Any] = Field(default_factory=dict)
     violations: list[str] = Field(default_factory=list)
     children: list[RunResult] = Field(default_factory=list)
     #: The mode the agent ran in, and what that mode kept while it worked.

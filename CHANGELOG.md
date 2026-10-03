@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Orchestrator: checked hand-backs, re-planning, critics, a budget gate, resumable jobs**
+- Each hand-back is checked against its task's `done_when` (`check_tasks=True`).
+  One that falls short is retried with what it lacked; `Task.checked`,
+  `Task.missing`.
+- A task that fails, misses its deadline or stays short of its criterion is
+  planned again by another route (`max_replans=2` a job): the new tasks take its
+  place in the graph, are told what it produced, and it is marked `replaced` and
+  left out of consolidation. `Task.replaces`.
+- `critics=` — a number of independent reviewers, or what each is to look for —
+  and `accept="all" | "majority"`. Gaps are merged and de-duplicated.
+  `Review.verdicts`, `Review.reviewed`.
+- `plan.parallelism`. The estimate counts checks and review, and after three
+  finished tasks uses what tasks actually cost. `on_over_estimate="warn" |
+  "stop" | "ignore"` holds the work still to run against the budget before each
+  wave; `"stop"` starts nothing it cannot pay for (`budget_exceeded ==
+  "estimate"`). `tokens_per_task=`.
+- A job is saved to the session store after every wave and stage.
+  `Orchestrator.resume(job_id)` carries a job that was cut short on from the
+  last finished task, in any process; `Orchestrator.job(job_id)`;
+  `run(job_id=)`; `persist=`. A job is run by one process at a time.
+- `RunResult.spend`: a job's total, the sub-agents' share, the manager's own,
+  and each agent's.
+
 **Knowledge bases and vector stores — `KnowledgeBase`, `vector_store`**
 - `KnowledgeBase(store, embedder=)`: `add(text | path= | url=, id=, title=,
   metadata=)`, `add_many`, `search(query, k=, filter=)`, `delete(id)`,
@@ -435,6 +458,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An orchestrator's result reported only its sub-agents' usage — the plan, the
+  factory, consolidation and review were left out — and `cost_usd` counted the
+  sub-agents twice. `usage` is now the manager's own and `cost_usd` the whole
+  job.
+- A deliverable whose reviewer returned nothing usable was reported as
+  accepted. It is now reported as unreviewed.
+- A sub-agent spec's own `budget` was ignored when an orchestrator ran it.
+- The model call that crossed a budget ceiling was charged to the budget but
+  left out of `result.usage`.
+- A task blocked by a failed dependency did not block the tasks waiting on it
+  in turn until the next wave.
 - A blueprint agent whose instructions contain braces that are not a prompt
   reference — a JSON example, say — no longer fails to build.
 - A sqlite URL such as `sqlite:///./memory.db` pointed at the filesystem root,

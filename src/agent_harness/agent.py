@@ -1417,8 +1417,10 @@ class Agent:
                         # usage is what trips a budget, and work already done should
                         # still be handed back.
                         last_text = response.text or last_text
-                        guard.record(response.usage, agent=self.name, task=task_text[:60])
+                        # On the result first: the call that crosses a ceiling
+                        # was still made, and still cost what it cost.
                         result.usage += response.usage
+                        guard.record(response.usage, agent=self.name, task=task_text[:60])
                         span.set(cost_usd=result.usage.cost_usd)
 
                         post = await self.hooks.emit("post_model", agent=self.name,
