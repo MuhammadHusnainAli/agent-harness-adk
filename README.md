@@ -1965,6 +1965,7 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | Rail | What it does |
 |---|---|
 | `PolicyGate` | allow / ask / deny per action, glob rules, conditional on arguments, approver callback |
+| `Approvals` | a run that needs a person's yes is stored and stops; approved hours later, in any process, it carries on from that step. [More below](#approvals-that-outlive-the-process) |
 | `BudgetGuard` | spend, token, step, tool-call and sub-agent ceilings; child guards roll up to the parent |
 | `RateGuard` | requests- and tokens-per-minute pacing, so you are not rate-limited by the provider |
 | `HookEngine` | 13 events; `pre_tool` can block or rewrite arguments, `post_tool` can rewrite the result, `model_egress` sees the real provider and region of every model call |
@@ -1988,6 +1989,79 @@ Path safety is enforced, not clamped: a workspace tool given `../../etc/passwd`
 refuses rather than resolving it. On this machine `shell` is absent unless the
 workspace was created with `allow_shell=True`, and even then it asks for
 approval. Only a sandbox — its own machine — runs commands without asking.
+
+## Approvals that outlive the process
+
+A tool that asks first — `@tool(permission="ask")`, or a `PolicyGate` rule —
+needs a person. When that person is at the terminal, pass an `approver` and they
+are asked on the spot. When they are not — it is a ticket, a Slack message, a
+manager who is asleep — the run should not wait and should not fail:
+
+```python
+harness = Harness(sessions="postgresql://user:pass@host/agents", approvals=True)
+agent = Agent("support", tools=[find_order, refund], harness=harness)
+
+result = await agent.run("Order 4182 was charged twice. Please fix it.")
+result.stop_reason        # "approval"
+result.approval.id        # "apr_9f2c…" — the run is in the database; nothing is waiting
+```
+
+Ten hours later, in another process, on another machine:
+
+```python
+for waiting in await harness.approvals.pending():
+    print(waiting.id, waiting.describe())   # support wants to run refund(order_id="4182", amount=40)
+
+await harness.approvals.approve("apr_9f2c…", by="maria", note="duplicate confirmed")
+result = await agent.resume_approval("apr_9f2c…")     # or stream_approval(...)
+```
+
+The run picks up in the step it stopped in. What that means, exactly:
+
+- **The approved call runs with the approved arguments.** They were stored; the
+  model is not asked again, so it cannot ask for something else. If anything
+  between the approval and the tool changes them — a hook, say — the call is
+  refused.
+- **Tools that had already run are not run again.** A step often asks for
+  several: the lookup ran, the refund waited. The lookup's answer is kept with
+  the record and reused.
+- **A no is an answer.** `approvals.deny(id, by=, note=)` and the agent reads
+  "declined by omar: over the limit" as the tool's result, and carries on.
+  Several calls waiting in one step are decided together or one at a time
+  (`call=`); the run resumes when all are.
+- **Once.** Resuming takes a claim in a write the store refuses to a second
+  taker. Four workers that see the same approval make one refund. A resume that
+  crashes is marked `failed` and is not retried by itself — the tool may have
+  run; `approvals.release(id)` hands it back once you have checked.
+- **The rest of the run comes with it**: the conversation, the session and its
+  sandbox, a mode's todo list and source ledger, what was spent. It may stop
+  again further on; `result.approval` is then the next one.
+- **Time.** An unanswered request expires (`expires=`, a week by default) and
+  counts as declined; resuming it tells the agent so. If the conversation was
+  continued while the request waited, the resumed run is saved beside it as a
+  fork rather than over it.
+- **Whose.** A request belongs to the user and tenant the run was for: others
+  neither list it nor resume it. `self_approval=False` stops that user
+  approving their own.
+
+Where it is kept is where the chats are: `approvals=True` uses the session
+database (PostgreSQL, MySQL, SQLite, MongoDB, Redis, DynamoDB, a storage
+account), `Harness.local()` a directory, `Harness.on(url)` turns it on by
+itself, and an `ApprovalStore` of your own is four methods.
+`Approvals(store, notify=post_to_slack, expires=86_400)` says who is told and
+for how long. From the shell:
+
+```bash
+agent-harness approvals --state .harness                     # what is waiting
+agent-harness approvals approve apr_9f2c --by maria --note "checked"
+agent-harness approvals resume apr_9f2c --tools              # with the run's own options
+```
+
+A run pauses only where it can be picked up: at the top of a conversation. A
+sub-agent, a workflow's tool step, a voice turn and an agent mid-handoff are
+still refused when nobody is there to ask, as before — and governance's
+`require_approval` rules still wait in the process that asked.
+`examples/23_approvals.py` plays the whole of it over a SQLite file.
 
 ## Governance: the laws your agents run under
 
@@ -2492,6 +2566,8 @@ agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness run "what is on the front page of example.com?" --browser
+agent-harness approvals --state .harness              # runs waiting for a person
+agent-harness approvals approve apr_9f2c --by maria && agent-harness approvals resume apr_9f2c
 agent-harness image "a red fox in snow" --reference fox.jpg --aspect 16:9
 agent-harness run "design a logo for a bakery" --images --workspace ./studio
 agent-harness search "heat pump subsidy" --recency year --engine brave

@@ -313,7 +313,7 @@ class Usage(BaseModel):
 
 StopReason = Literal[
     "end_turn", "tool_use", "max_tokens", "stop_sequence", "max_steps", "error",
-    "stopped", "budget", "handoff",
+    "stopped", "budget", "handoff", "approval",
 ]
 
 
@@ -347,6 +347,7 @@ class StreamEvent(BaseModel):
     type: Literal[
         "run_start", "step_start", "text", "thinking", "tool_call", "tool_result",
         "step_end", "run_end", "error", "delegation", "progress", "handoff",
+        "approval_required",
     ]
     text: str = ""
     agent: str = ""
@@ -379,6 +380,9 @@ class ToolOutcome(BaseModel):
     #: Images (or other media) the tool returned for the model to look at — a
     #: screenshot, say. They follow the tool results in the same turn.
     media: list[Any] = Field(default_factory=list, exclude=True)
+    #: Set instead of a result when the call is waiting for a person: why, and
+    #: the arguments it would run with. The run pauses on it.
+    pending: dict[str, Any] | None = Field(default=None, exclude=True)
 
     def as_block(self) -> ToolResultBlock:
         return ToolResultBlock(
@@ -466,6 +470,10 @@ class RunResult(BaseModel):
     trace_id: str = ""
     error: str | None = None
     budget_exceeded: str | None = None
+    #: Set when the run stopped to wait for a person (`stop_reason ==
+    #: "approval"`): the `Approval` that was stored. Its `id` is what is
+    #: approved, and what `agent.resume_approval` picks the run back up from.
+    approval: Any = None
     violations: list[str] = Field(default_factory=list)
     children: list[RunResult] = Field(default_factory=list)
     #: The mode the agent ran in, and what that mode kept while it worked.

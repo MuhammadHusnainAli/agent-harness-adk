@@ -2,6 +2,15 @@
 
 from ..guardrails import INJECTION_RULES, SECRET_RULES, Guardrails
 from ..guardrails import Rule as GuardrailRule
+from .approvals import (
+    Approval,
+    ApprovalCall,
+    Approvals,
+    ApprovalStore,
+    FileApprovalStore,
+    MemoryApprovalStore,
+    SessionApprovalStore,
+)
 from .audit import AuditEntry, AuditTrail
 from .budget import Budget, BudgetGuard, RateGuard, RateLimit
 from .cache import ResultCache
@@ -26,6 +35,13 @@ from .tracing import Span, Tracer, console_exporter, jsonl_exporter
 from .workspace import DockerWorkspace, Workspace, WorkspaceBroker
 
 __all__ = [
+    "Approval",
+    "ApprovalCall",
+    "Approvals",
+    "ApprovalStore",
+    "FileApprovalStore",
+    "MemoryApprovalStore",
+    "SessionApprovalStore",
     "Budget",
     "BudgetGuard",
     "RateLimit",

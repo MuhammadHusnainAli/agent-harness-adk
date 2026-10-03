@@ -1977,6 +1977,7 @@ print(harness.report())   # spend by agent and task, cache hit rate, concurrency
 | Rail | What it does |
 |---|---|
 | `PolicyGate` | allow / ask / deny per action, glob rules, conditional on arguments, approver callback |
+| `Approvals` | a run that needs a person's yes is stored and stops; approved hours later, in any process, it carries on from that step. [More below](#approvals-that-outlive-the-process) |
 | `BudgetGuard` | spend, token, step, tool-call and sub-agent ceilings; child guards roll up to the parent |
 | `RateGuard` | requests- and tokens-per-minute pacing, so you are not rate-limited by the provider |
 | `HookEngine` | 13 events; `pre_tool` can block or rewrite arguments, `post_tool` can rewrite the result, `model_egress` sees the real provider and region of every model call |
@@ -2000,6 +2001,79 @@ Path safety is enforced, not clamped: a workspace tool given `../../etc/passwd`
 refuses rather than resolving it. On this machine `shell` is absent unless the
 workspace was created with `allow_shell=True`, and even then it asks for
 approval. Only a sandbox — its own machine — runs commands without asking.
+
+## Approvals that outlive the process
+
+A tool that asks first — `@tool(permission="ask")`, or a `PolicyGate` rule —
+needs a person. When that person is at the terminal, pass an `approver` and they
+are asked on the spot. When they are not — it is a ticket, a Slack message, a
+manager who is asleep — the run should not wait and should not fail:
+
+```python
+harness = Harness(sessions="postgresql://user:pass@host/agents", approvals=True)
+agent = Agent("support", tools=[find_order, refund], harness=harness)
+
+result = await agent.run("Order 4182 was charged twice. Please fix it.")
+result.stop_reason        # "approval"
+result.approval.id        # "apr_9f2c…" — the run is in the database; nothing is waiting
+```
+
+Ten hours later, in another process, on another machine:
+
+```python
+for waiting in await harness.approvals.pending():
+    print(waiting.id, waiting.describe())   # support wants to run refund(order_id="4182", amount=40)
+
+await harness.approvals.approve("apr_9f2c…", by="maria", note="duplicate confirmed")
+result = await agent.resume_approval("apr_9f2c…")     # or stream_approval(...)
+```
+
+The run picks up in the step it stopped in. What that means, exactly:
+
+- **The approved call runs with the approved arguments.** They were stored; the
+  model is not asked again, so it cannot ask for something else. If anything
+  between the approval and the tool changes them — a hook, say — the call is
+  refused.
+- **Tools that had already run are not run again.** A step often asks for
+  several: the lookup ran, the refund waited. The lookup's answer is kept with
+  the record and reused.
+- **A no is an answer.** `approvals.deny(id, by=, note=)` and the agent reads
+  "declined by omar: over the limit" as the tool's result, and carries on.
+  Several calls waiting in one step are decided together or one at a time
+  (`call=`); the run resumes when all are.
+- **Once.** Resuming takes a claim in a write the store refuses to a second
+  taker. Four workers that see the same approval make one refund. A resume that
+  crashes is marked `failed` and is not retried by itself — the tool may have
+  run; `approvals.release(id)` hands it back once you have checked.
+- **The rest of the run comes with it**: the conversation, the session and its
+  sandbox, a mode's todo list and source ledger, what was spent. It may stop
+  again further on; `result.approval` is then the next one.
+- **Time.** An unanswered request expires (`expires=`, a week by default) and
+  counts as declined; resuming it tells the agent so. If the conversation was
+  continued while the request waited, the resumed run is saved beside it as a
+  fork rather than over it.
+- **Whose.** A request belongs to the user and tenant the run was for: others
+  neither list it nor resume it. `self_approval=False` stops that user
+  approving their own.
+
+Where it is kept is where the chats are: `approvals=True` uses the session
+database (PostgreSQL, MySQL, SQLite, MongoDB, Redis, DynamoDB, a storage
+account), `Harness.local()` a directory, `Harness.on(url)` turns it on by
+itself, and an `ApprovalStore` of your own is four methods.
+`Approvals(store, notify=post_to_slack, expires=86_400)` says who is told and
+for how long. From the shell:
+
+```bash
+agent-harness approvals --state .harness                     # what is waiting
+agent-harness approvals approve apr_9f2c --by maria --note "checked"
+agent-harness approvals resume apr_9f2c --tools              # with the run's own options
+```
+
+A run pauses only where it can be picked up: at the top of a conversation. A
+sub-agent, a workflow's tool step, a voice turn and an agent mid-handoff are
+still refused when nobody is there to ask, as before — and governance's
+`require_approval` rules still wait in the process that asked.
+`examples/23_approvals.py` plays the whole of it over a SQLite file.
 
 ## Governance: the laws your agents run under
 
@@ -2504,6 +2578,8 @@ agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness run "what is on the front page of example.com?" --browser
+agent-harness approvals --state .harness              # runs waiting for a person
+agent-harness approvals approve apr_9f2c --by maria && agent-harness approvals resume apr_9f2c
 agent-harness image "a red fox in snow" --reference fox.jpg --aspect 16:9
 agent-harness run "design a logo for a bakery" --images --workspace ./studio
 agent-harness search "heat pump subsidy" --recency year --engine brave
@@ -2586,6 +2662,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Approvals that outlive the process — `Harness(approvals=...)`, `agent.resume_approval`**
+- With an approval store on the harness, a tool call that needs a person and
+  has no approver to ask no longer ends in a refusal: the run stops at that
+  step with `stop_reason == "approval"` and `result.approval`, and is stored —
+  the conversation, the waiting call with its exact arguments, and what the
+  other tools of the step returned. An `approval_required` stream event.
+- `harness.approvals`: `pending()`, `list()`, `get()`, `approve(id, by=, note=,
+  call=)`, `deny(...)`, `expire()`, `release()`. `Approvals(store, notify=,
+  expires=, self_approval=, claim_timeout=)`.
+- `agent.resume_approval(id)` and `stream_approval(id)` carry the run on from
+  the step it stopped in, in any process: the approved call runs with the
+  approved arguments and the model is not asked again; a declined or expired
+  one is answered with the reason; tools that had already run are not re-run.
+  The session, its sandbox, a mode's todo list and sources, and the usage so
+  far are carried over. A run may pause again.
+- A record is resumed once: the claim is a write the store refuses to a second
+  taker, across processes. A resume that fails is marked `failed` and is not
+  retried by itself. Arguments that changed since approval are refused.
+- Requests are owned by the run's user and tenant. If the conversation was
+  continued while a request waited, the resumed run is kept as a fork.
+- Stores: `SessionApprovalStore` (any session database — `approvals=True`),
+  `FileApprovalStore` (`Harness.local()`), `MemoryApprovalStore`;
+  `ApprovalStore` to write one. `Harness.on(url)` keeps approvals in the same
+  database. `ApprovalError`.
+- `PolicyGate.needs()`; `PolicyGate.check(approved_by=)`.
+- **Changed:** on `Harness.local()` and `Harness.on()`, a tool that asks when
+  no approver is configured now pauses the run instead of being refused. A
+  plain `Harness()` and any harness with an `approver` behave as before.
+- Not covered: sub-agents, workflow tool steps, voice turns and handoff chains
+  do not pause; governance `require_approval` still waits in-process.
+- `agent-harness approvals [list|show|approve|deny|resume|release] [ID]`, and
+  `run` prints how to approve a run that stopped to ask.
+- `examples/23_approvals.py`.
 
 **Image generation — `ImageGenerator`**
 - `ImageGenerator()` makes images with the engine whose key is set: Gemini
@@ -3955,7 +4065,7 @@ For answers to common questions about this code of conduct, see the FAQ at
 
 ### `Agent`  (class)
 One accountable agent: a model, a prompt, its tools, and its sub-agents.
-Methods: `add_handoff(self, entry: Any) -> Handoff`, `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `call_tool(self, name: str, args: dict[str, Any] | None = None, *, run_id: str = , step: int = 0, guard: BudgetGuard | None = None, result: RunResult | None = None) -> ToolOutcome`, `close_session(self, summary: str | None = None) -> str`, `handoff_agent(self, name: str) -> Agent | None`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `resume(self, session: str, *, sandbox_id: str | None = None) -> Session`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
+Methods: `add_handoff(self, entry: Any) -> Handoff`, `add_skill(self, skill: Skill | str) -> Skill`, `add_subagent(self, entry: Any) -> Agent`, `add_tool(self, item: Tool | Callable[..., Any]) -> Tool`, `as_tool(self, name: str | None = None, description: str | None = None, *, cacheable: bool = False) -> Tool`, `call_tool(self, name: str, args: dict[str, Any] | None = None, *, run_id: str = , step: int = 0, guard: BudgetGuard | None = None, result: RunResult | None = None) -> ToolOutcome`, `close_session(self, summary: str | None = None) -> str`, `handoff_agent(self, name: str) -> Agent | None`, `new_session(self) -> None`, `produce(self, name: str, content: str, **kw: Any) -> Artifact`, `resume(self, session: str, *, sandbox_id: str | None = None) -> Session`, `resume_approval(self, approval: Any, **kwargs: Any) -> RunResult`, `run(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> RunResult`, `run_sync(self, task: str | Message, **kwargs: Any) -> RunResult`, `stream(self, task: str | Message, *, version: str | None = None, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `stream_approval(self, approval: Any, **kwargs: Any) -> AsyncIterator[StreamEvent]`, `use(self, version: str) -> Agent`, `version_spec(self, version: str | None = None) -> AgentVersion | None`
 Properties: available_versions, content_guardrails, conversational, depth, factory, handoffs, provider, runtime_agents_remaining, subagents, version
 
 ### `Harness`  (class)
@@ -4383,7 +4493,7 @@ Properties: active
 
 ### `PolicyGate`  (class)
 Decides whether an action may run, before it runs.
-Methods: `check(self, tool: str, args: dict[str, Any] | None = None, *, tool_permission: Decision | None = None) -> None`, `decide(self, tool: str, args: dict[str, Any] | None = None) -> tuple[Decision, str]`
+Methods: `check(self, tool: str, args: dict[str, Any] | None = None, *, tool_permission: Decision | None = None, approved_by: str | None = None) -> None`, `decide(self, tool: str, args: dict[str, Any] | None = None) -> tuple[Decision, str]`, `needs(self, tool: str, args: dict[str, Any] | None = None, *, tool_permission: Decision | None = None) -> tuple[Decision, str]`
 
 ### `PermissionRule`  (class)
 First matching rule wins. `pattern` globs the tool name.
@@ -4623,7 +4733,7 @@ Fields: message, stop_reason, usage, model, provider, latency_ms, raw
 ### `RunResult`  (class)
 The one object a caller gets back from `agent.run()`.
 Properties: cost_usd, ok
-Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, violations, children, mode, depth, todos, sources, sandbox_id, handoffs, active_agent, warnings
+Fields: output, data, agent, messages, usage, steps, stop_reason, tool_calls, artifacts, session_id, run_id, trace_id, error, budget_exceeded, approval, violations, children, mode, depth, todos, sources, sandbox_id, handoffs, active_agent
 
 ### `StreamEvent`  (class)
 One beat of a streaming run: a token, a tool call, a step boundary.
@@ -4756,7 +4866,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`, `ImageGenerator`, `image_tools`, `GeneratedImage`, `Browser`, `browser_tools`, `computer_tool`, `Computer`, `BrowserComputer`, `DesktopComputer`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `Approvals`, `Approval`, `ApprovalCall`, `ApprovalStore`, `MemoryApprovalStore`, `FileApprovalStore`, `SessionApprovalStore`, `ApprovalError`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`, `ImageGenerator`, `image_tools`, `GeneratedImage`, `Browser`, `browser_tools`, `computer_tool`, `Computer`, `BrowserComputer`, `DesktopComputer`
 
 ---
 
@@ -7021,6 +7131,112 @@ async def main() -> None:
                 print(f"\ndesigner   {result.output}")
                 print("files      " + ", ".join(a.path for a in result.artifacts if a.path))
     await harness.aclose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/23_approvals.py
+
+Approval that survives a restart: a run stops to ask, is stored in a database, is approved by another process ten hours later and carries on.
+
+```python
+"""Human-in-the-loop approval that survives a restart.
+
+An agent wants to make a refund. The refund needs a person's yes, and nobody is
+there — so the run stops at that step and is written to a database. Later, a
+different process (here: a second harness and a second agent, built from
+nothing but the database) records the approval and carries the run on from
+exactly where it stopped: the approved call runs with the approved arguments,
+the lookup that had already run is not run again, and the model is never asked
+to choose the call a second time.
+
+Runs with no API key, against a scripted provider and a SQLite file.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+from pathlib import Path
+
+from agent_harness import Agent, ApprovalError, FakeProvider, Harness, tool, tool_call
+
+LEDGER: list[str] = []          # what actually happened to money
+
+
+@tool
+def find_order(order_id: str) -> str:
+    """Look an order up.
+
+    Args:
+        order_id: the order to find.
+    """
+    LEDGER.append(f"looked up {order_id}")
+    return f"order {order_id}: delivered 28 September, charged twice, 40 EUR each"
+
+
+@tool(permission="ask")
+def refund(order_id: str, amount: float, reason: str) -> str:
+    """Refund a customer. Costs real money, so a person approves it first.
+
+    Args:
+        order_id: the order to refund.
+        amount: how much, in EUR.
+        reason: why.
+    """
+    LEDGER.append(f"refunded {amount:g} EUR on {order_id}")
+    return f"refunded {amount:g} EUR on order {order_id}"
+
+
+def process(database: str, script: list) -> tuple[Harness, Agent]:
+    """What each process builds: a harness on the database, and the agent."""
+    harness = Harness(sessions=database, approvals=True, provider=FakeProvider(script))
+    harness.approvals.notify = lambda a: print(f"notify     → #refunds: {a.describe()}")
+    agent = Agent("support", "Help customers with their orders.",
+                  tools=[find_order, refund], harness=harness, memory=False)
+    return harness, agent
+
+
+async def main() -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        database = f"sqlite:///{Path(folder) / 'agents.db'}"
+
+        # --- Monday, 09:00 — the request comes in ------------------------------
+        harness, agent = process(database, [
+            [tool_call("find_order", order_id="4182"),
+             tool_call("refund", order_id="4182", amount=40, reason="charged twice")]])
+        result = await agent.run("Order 4182 was charged twice. Please fix it.")
+        print(f"run        stopped: {result.stop_reason} at step {result.steps}")
+        print(f"approval   {result.approval.id}")
+        print(f"ledger     {LEDGER}\n")
+        approval_id = result.approval.id
+        await harness.aclose()                    # the process ends; nothing is waiting
+
+        # --- Monday, 19:00 — another process, ten hours later ---------------------
+        harness, agent = process(database, ["I refunded the duplicate 40 EUR charge "
+                                            "on order 4182."])
+        for waiting in await harness.approvals.pending():
+            print(f"waiting    {waiting.id}: {waiting.describe()}")
+        try:
+            await agent.resume_approval(approval_id)
+        except ApprovalError as exc:
+            print(f"too soon   {exc}")
+
+        await harness.approvals.approve(approval_id, by="maria",
+                                        note="duplicate charge confirmed")
+        result = await agent.resume_approval(approval_id)
+        print(f"\nsupport    {result.output}")
+        print(f"ledger     {LEDGER}")              # one lookup, one refund
+        print(f"run        {result.steps} steps in all, same session: "
+              f"{result.session_id}")
+
+        try:
+            await agent.resume_approval(approval_id)
+        except ApprovalError as exc:
+            print(f"once only  {exc}")
+        await harness.aclose()
 
 
 if __name__ == "__main__":

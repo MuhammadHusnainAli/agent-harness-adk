@@ -140,6 +140,11 @@ class OutputContractError(HarnessError):
     """The agent's final answer did not match the declared output type."""
 
 
+class ApprovalError(HarnessError):
+    """An approval could not be given, taken or resumed: it does not exist, is
+    still waiting, was already answered, or was already resumed."""
+
+
 class SessionConflict(HarnessError):
     """Someone else saved this session first.
 

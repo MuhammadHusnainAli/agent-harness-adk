@@ -25,6 +25,7 @@ from .agent import Agent
 from .blueprint import AgentEntry, Blueprint
 from .context import ContextAssembler, ContextCompactor, estimate_tokens
 from .errors import (
+    ApprovalError,
     AuthenticationError,
     BudgetExceeded,
     ConfigurationError,
@@ -163,6 +164,10 @@ from .modes import Mode
 from .orchestrator import Orchestrator, Plan, Review, Task
 from .prompts import Prompt, PromptLibrary
 from .runtime import (
+    Approval,
+    ApprovalCall,
+    Approvals,
+    ApprovalStore,
     AuditEntry,
     AuditTrail,
     Budget,
@@ -173,11 +178,13 @@ from .runtime import (
     ConcurrencyScheduler,
     DeliverableStore,
     DurableSessionStore,
+    FileApprovalStore,
     FileSessionStore,
     Guardrails,
     HookContext,
     HookEngine,
     InMemorySessionStore,
+    MemoryApprovalStore,
     ModelRouter,
     PolicyGate,
     RateGuard,
@@ -189,6 +196,7 @@ from .runtime import (
     RunJournal,
     ServiceHealth,
     Session,
+    SessionApprovalStore,
     SessionStore,
     Span,
     StopController,
@@ -461,6 +469,14 @@ __all__ = [
     "session_provider",
     "session_backends",
     "SessionConflict",
+    "Approvals",
+    "Approval",
+    "ApprovalCall",
+    "ApprovalStore",
+    "MemoryApprovalStore",
+    "FileApprovalStore",
+    "SessionApprovalStore",
+    "ApprovalError",
     "Checkpoint",
     "Checkpointer",
     "Workspace",

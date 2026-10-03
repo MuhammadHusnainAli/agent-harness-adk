@@ -22,8 +22,10 @@ __all__ = ["main"]
 
 def _harness(args: argparse.Namespace) -> Harness:
     stores = {"sessions": args.sessions} if getattr(args, "sessions", None) else {}
+    # A run that has to wait for approval is kept where the chats are: under
+    # --state, or in the database --sessions names.
     harness = (Harness.local(args.state, **stores) if args.state
-               else Harness(**stores))
+               else Harness(**stores, **({"approvals": True} if stores else {})))
     if args.trace:
         harness.tracer.add_exporter(console_exporter())
     if args.approve:
@@ -235,6 +237,82 @@ async def _search(args: argparse.Namespace) -> int:
     return 0
 
 
+def _waiting(approval: Any) -> str:
+    """What to do about a run that stopped to ask."""
+    calls = "\n".join(f"  {c.describe()}" + (f"  — {c.reason}" if c.reason else "")
+                      for c in approval.calls)
+    return (f"waiting for approval {approval.id}:\n{calls}\n"
+            f"  agent-harness approvals approve {approval.id} --by NAME\n"
+            f"  agent-harness approvals resume {approval.id}   (with the same options "
+            "as this run)")
+
+
+async def _approvals(args: argparse.Namespace) -> int:
+    import time
+
+    if not args.state and not getattr(args, "sessions", None):
+        args.state = ".harness"
+    harness = _harness(args)
+    desk = harness.approvals
+    try:
+        if args.action == "list":
+            rows = await desk.list(status=args.status, limit=args.limit)
+            if args.json:
+                print(json.dumps([a.summary() for a in rows], indent=2, default=str))
+                return 0
+            for a in rows:
+                age = (time.time() - a.created) / 3600
+                state = "expired" if a.expired else a.status
+                print(f"{a.id}  {state:<9} {age:5.1f}h  {a.describe()}")
+            if not rows:
+                print("no approvals")
+            return 0
+        if not args.id:
+            raise SystemExit(f"approvals {args.action} takes the approval's id")
+        if args.action == "show":
+            record = await desk.get(args.id)
+            if args.json:
+                print(json.dumps(record.summary(), indent=2, default=str))
+                return 0
+            print(f"{record.id}  {'expired' if record.expired else record.status}\n"
+                  f"agent    {record.agent}\ntask     {record.task[:300]}\n"
+                  f"session  {record.session_id or '(not kept)'}  step {record.step}")
+            for call in record.calls:
+                who = f"  by {call.by}" + (f": {call.note}" if call.note else "")
+                print(f"  [{call.status}] {call.describe()}"
+                      + (who if call.by else "")
+                      + (f"\n      why: {call.reason}" if call.reason else ""))
+            if record.outcome:
+                print(f"outcome  {json.dumps(record.outcome, default=str)}")
+            return 0
+        if args.action in ("approve", "deny"):
+            if not args.by:
+                raise SystemExit(f"approvals {args.action} needs --by: who is deciding")
+            decide = desk.approve if args.action == "approve" else desk.deny
+            record = await decide(args.id, by=args.by, note=args.note, call=args.call)
+            print(f"{record.id} is {record.status}"
+                  + (f"; still waiting on {len(record.waiting)}" if record.waiting else
+                     f" — resume it with: agent-harness approvals resume {record.id}"))
+            return 0
+        if args.action == "release":
+            record = await desk.release(args.id)
+            print(f"{record.id} is {record.status} again and can be resumed")
+            return 0
+        # resume: the agent is built from the same options a run takes.
+        agent = _agent(args, harness)
+        result = await agent.resume_approval(args.id)
+        print(result.output)
+        if result.error:
+            print(f"\nerror: {result.error}", file=sys.stderr)
+        if result.stop_reason == "approval":
+            print(f"\n{_waiting(result.approval)}", file=sys.stderr)
+        print(f"\n[{result.steps} steps · ${result.cost_usd:.4f} · "
+              f"session {result.session_id}]", file=sys.stderr)
+        return 1 if result.error else 0
+    finally:
+        await harness.aclose()
+
+
 def _footer(result: Any) -> str:
     """What a mode left behind, in a line or two for stderr."""
     lines: list[str] = []
@@ -287,6 +365,8 @@ async def _run(args: argparse.Namespace) -> int:
             print(json.dumps(harness.report(), indent=2), file=sys.stderr)
         if _footer(result):
             print(f"\n{_footer(result)}", file=sys.stderr)
+        if result.stop_reason == "approval":
+            print(f"\n{_waiting(result.approval)}", file=sys.stderr)
         where = f" · sandbox {result.sandbox_id}" if result.sandbox_id else ""
         print(f"\n[{result.steps} steps · ${result.cost_usd:.4f} · "
               f"session {result.session_id}{where}]", file=sys.stderr)
@@ -1065,6 +1145,22 @@ def build_parser() -> argparse.ArgumentParser:
     sandboxes.add_argument("--json", action="store_true",
                            help="machine-readable output")
 
+    approvals = sub.add_parser(
+        "approvals", help="runs waiting for a person: list, show, approve, deny, resume")
+    approvals.add_argument("action", nargs="?", default="list",
+                           choices=["list", "show", "approve", "deny", "resume", "release"])
+    approvals.add_argument("id", nargs="?", default=None, help="the approval's id")
+    approvals.add_argument("--by", default=None, help="who is approving or denying")
+    approvals.add_argument("--note", default="", help="why — the agent is told")
+    approvals.add_argument("--call", default=None,
+                           help="decide one call of a request that has several")
+    approvals.add_argument("--status", default=None,
+                           help="list only these: pending, approved, denied, expired, "
+                                "resumed, failed")
+    approvals.add_argument("--limit", type=int, default=50)
+    approvals.add_argument("--json", action="store_true", help="machine-readable")
+    common(approvals)
+
     sessions = sub.add_parser("sessions", help="list or show stored sessions")
     sessions.add_argument("--state", default=None)
     sessions.add_argument("--store", default=None, metavar="URL",
@@ -1134,6 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_a2a(args))
         if args.command == "openapi":
             return asyncio.run(_openapi(args))
+        if args.command == "approvals":
+            return asyncio.run(_approvals(args))
         if args.command == "image":
             return asyncio.run(_image(args))
         if args.command == "search":

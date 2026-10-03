@@ -35,6 +35,12 @@ from .spec import SpecCompiler
 __all__ = ["Harness"]
 
 
+def _file_approvals(path: Path) -> Any:
+    from .runtime.approvals import Approvals, FileApprovalStore
+
+    return Approvals(FileApprovalStore(path))
+
+
 @dataclass
 class Harness:
     """Shared runtime services. Everything has a working default."""
@@ -66,6 +72,11 @@ class Harness:
     #: and a recording attached for a model that cannot listen is transcribed
     #: by it.
     speech: Any = None
+    #: Where a run that needs a person's approval is kept until it is given —
+    #: an `Approvals`, an `ApprovalStore`, or True for "in the session store".
+    #: With one, a tool that asks and has no approver pauses the run instead of
+    #: being refused, and `agent.resume_approval(id)` carries it on.
+    approvals: Any = None
     _guard: BudgetGuard | None = field(default=None, repr=False)
     _rate: RateGuard | None = field(default=None, repr=False)
 
@@ -80,6 +91,25 @@ class Harness:
             from .memory import memory_provider
 
             self.memory_store = memory_provider(self.memory_store)
+        if self.approvals is not None and self.approvals is not False:
+            from .runtime.approvals import Approvals, ApprovalStore, SessionApprovalStore
+
+            if self.approvals is True:
+                from .runtime.session import FileSessionStore
+
+                # Beside the chats: in the same database — or, for chats kept as
+                # files, in a directory next to theirs, where a claim is safe
+                # between processes.
+                self.approvals = (
+                    _file_approvals(self.sessions.root.parent / "approvals")
+                    if isinstance(self.sessions, FileSessionStore)
+                    else Approvals(SessionApprovalStore(self.sessions)))
+            elif isinstance(self.approvals, ApprovalStore):
+                self.approvals = Approvals(self.approvals)
+            if self.approvals.audit is None:
+                self.approvals.audit = self.audit.record
+        else:
+            self.approvals = None
         if self.governance is not None:
             self.governance.attach(self)
 
@@ -141,6 +171,7 @@ class Harness:
             "workspaces": lambda: WorkspaceBroker(base / "workspaces"),
             "deliverables": lambda: DeliverableStore(base / "deliverables"),
             "audit": lambda: AuditTrail(base / "audit.jsonl"),
+            "approvals": lambda: _file_approvals(base / "approvals"),
         }
         built = {name: (make() if callable(make) and name != "tracer" else make)
                  for name, make in parts.items() if name not in kwargs}
@@ -160,6 +191,8 @@ class Harness:
         from .sessions import session_provider
 
         store = memory_provider(url)
+        # A run paused for approval is kept beside the chats, in the same database.
+        kwargs.setdefault("approvals", True)
         return cls(memory_store=store, sessions=session_provider(store), **kwargs)
 
     @classmethod

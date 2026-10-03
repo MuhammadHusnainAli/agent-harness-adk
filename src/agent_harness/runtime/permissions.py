@@ -79,15 +79,30 @@ class PolicyGate:
                 return rule.decision, rule.reason
         return self.default, ""
 
-    async def check(self, tool: str, args: dict[str, Any] | None = None, *,
-                    tool_permission: Decision | None = None) -> None:
-        """Raise PermissionDenied unless the action is allowed. Otherwise return."""
+    def needs(self, tool: str, args: dict[str, Any] | None = None, *,
+              tool_permission: Decision | None = None) -> tuple[Decision, str]:
+        """What this call comes to, the tool's own declaration included."""
         decision, reason = self.decide(tool, args)
         # A tool's own declared permission can only tighten the policy, never loosen it.
         if tool_permission == "deny":
             decision, reason = "deny", "the tool declares itself deny-by-default"
         elif tool_permission == "ask" and decision == "allow":
             decision, reason = "ask", "the tool asks for confirmation"
+        return decision, reason
+
+    async def check(self, tool: str, args: dict[str, Any] | None = None, *,
+                    tool_permission: Decision | None = None,
+                    approved_by: str | None = None) -> None:
+        """Raise PermissionDenied unless the action is allowed. Otherwise return.
+
+        `approved_by` names a person who has already said yes to exactly this
+        call — an approval that was stored and answered later. It stands in for
+        the approver; it does not turn a deny into an allow.
+        """
+        decision, reason = self.needs(tool, args, tool_permission=tool_permission)
+        if decision == "ask" and approved_by:
+            await self._audit(tool, "allow", args or {})
+            return
 
         if decision == "allow":
             await self._audit(tool, "allow", args or {})

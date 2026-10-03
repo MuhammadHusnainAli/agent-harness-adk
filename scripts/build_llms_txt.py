@@ -101,6 +101,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/22_images.py",
      "Image generation: a job watched as it runs, reference images, a fallback "
      "engine, and an agent that makes a picture and a variation of it."),
+    ("examples/23_approvals.py",
+     "Approval that survives a restart: a run stops to ask, is stored in a "
+     "database, is approved by another process ten hours later and carries on."),
 ]
 
 

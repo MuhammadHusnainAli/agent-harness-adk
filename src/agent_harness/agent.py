@@ -60,12 +60,15 @@ from .tools import Tool, ToolContext, ToolRegistry
 from .types import (
     Artifact,
     HandoffRecord,
+    ImageBlock,
     MediaBlock,
     Message,
     ModelResponse,
     RunResult,
+    Source,
     StreamEvent,
     TextBlock,
+    Todo,
     ToolCall,
     ToolOutcome,
     ToolResultBlock,
@@ -159,6 +162,11 @@ def _drop_old_tool_media(messages: list[Message], keep: int) -> None:
             message.content[index] = TextBlock(
                 text=f"[an earlier {block.name or block.type} was here; it is no "
                      "longer kept — take a new one if you need to look again]")
+
+
+def _canonical(args: Any) -> str:
+    """Arguments in one spelling, so two sets can be told to be the same."""
+    return json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
 
 
 IDENTITY = Prompt(
@@ -611,6 +619,113 @@ class Agent:
         self._following = True
         return loaded
 
+    # ------------------------------------------------------------------
+    # approvals that were given later
+    # ------------------------------------------------------------------
+    async def resume_approval(self, approval: Any, **kwargs: Any) -> RunResult:
+        """Carry on a run that stopped to wait for a person.
+
+            result = await agent.run("Refund order 4182.")
+            result.stop_reason                       # "approval"
+            ...                                      # hours later, any process
+            await harness.approvals.approve(result.approval.id, by="maria")
+            result = await agent.resume_approval(result.approval.id)
+
+        The run continues from the step it stopped in: the approved call is run
+        with the arguments that were approved, a declined one is answered with
+        the reviewer's reason, and tools that had already run are not run again.
+        It may stop again, at a later call — `result.approval` is then the next.
+
+        Raises `ApprovalError` if there is no such approval, it has not been
+        answered yet, or it was already resumed. An approval is resumed once.
+        """
+        result: RunResult | None = None
+        async for event in self._resumed(approval, token_stream=False, **kwargs):
+            if event.type == "run_end":
+                result = event.data.get("result")
+        if result is None:  # pragma: no cover - the loop always emits run_end
+            raise HarnessError("the agent loop produced no result")
+        return result
+
+    def stream_approval(self, approval: Any, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        """`resume_approval`, as a stream of events."""
+        return self._resumed(approval, token_stream=True, **kwargs)
+
+    async def _resumed(self, approval: Any, *, token_stream: bool,
+                       **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        desk = self.harness.approvals
+        if desk is None:
+            raise ConfigurationError(
+                f"{self.name}: this harness keeps no approvals — pass approvals=True "
+                "(or a store) to the Harness that the run was paused on")
+        user = self.trace.user_id if self.trace is not None else None
+        tenant = self.trace.tenant_id if self.trace is not None else None
+        record = await desk.claim(getattr(approval, "id", approval), by=self.name,
+                                  user_id=user, tenant_id=tenant, agent=self.name)
+        final: RunResult | None = None
+        try:
+            session: Session | None = None
+            if record.session_id:
+                try:
+                    session = self._may_have(
+                        await self.harness.sessions.load(record.session_id))
+                except ConfigurationError:
+                    session = None          # gone, or never kept: the record is enough
+            notebook = None
+            if record.notebook:
+                held = record.notebook
+                notebook = Notebook(
+                    sources=[Source(**s) for s in held.get("sources") or []],
+                    evidence=list(held.get("evidence") or []),
+                    ledger=bool(held.get("ledger")), tracking=bool(held.get("tracking")))
+                notebook.todos = [Todo(**t) for t in held.get("todos") or []]
+                notebook.questions = int(held.get("questions") or 0)
+            history = [m.model_copy(deep=True) for m in record.messages]
+            async for event in self._drive(
+                    record.task, token_stream=token_stream, session=session,
+                    messages=history, run_id=record.run_id, notebook=notebook,
+                    _resume=record, **kwargs):
+                if event.type == "run_end":
+                    final = event.data.get("result")
+                yield event
+        except BaseException as exc:
+            # The approved tool may have run. It is not tried again by itself.
+            await asyncio.shield(desk.finish(
+                record.id, failed=True,
+                outcome={"error": f"{type(exc).__name__}: {exc}"[:500]}))
+            raise
+        await desk.finish(record.id, failed=final is None or bool(final.error), outcome={
+            "stop_reason": final.stop_reason if final else "error",
+            "output": (final.output if final else "")[:500],
+            "error": final.error if final else "no result",
+            "session_id": final.session_id if final else "",
+            "next": getattr(getattr(final, "approval", None), "id", "")})
+
+    def _paused(self, calls: list[ToolUseBlock], outcomes: list[ToolOutcome], *,
+                history: list[Message], run_id: str, step: int, task: str, model: str,
+                session: Session, notebook: Notebook | None) -> Any:
+        """The record of a run stopped at this step, for a person to answer."""
+        from .runtime.approvals import Approval, ApprovalCall
+
+        kept = None
+        if notebook is not None:
+            kept = {"todos": [t.model_dump(mode="json") for t in notebook.todos],
+                    "sources": [s.model_dump(mode="json") for s in notebook.sources],
+                    "evidence": list(notebook._evidence), "ledger": notebook.ledger,
+                    "tracking": notebook.tracking, "questions": notebook.questions}
+        return Approval(
+            run_id=run_id, agent=self.name, user_id=session.user_id,
+            tenant_id=session.tenant_id, task=task, model=model or "", step=step,
+            calls=[ApprovalCall(id=o.call_id, tool=o.name, args=o.pending["args"],
+                                reason=o.pending["reason"])
+                   for o in outcomes if o.pending],
+            done=[{"id": o.call_id, "name": o.name, "content": o.content,
+                   "is_error": o.is_error,
+                   "media": [m.model_dump(mode="json") for m in o.media
+                             if getattr(m, "type", "") == "image"]}
+                  for o in outcomes if not o.pending],
+            messages=[m.model_copy(deep=True) for m in history], notebook=kept)
+
     async def _rejoin(self, session: Session, sandbox_id: str | None) -> str:
         """Put this agent back in the sandbox its conversation was using.
 
@@ -1033,9 +1148,13 @@ class Agent:
         sandbox_id: str | None = None,
         attachments: Iterable[Any] = (),
         _relay: Relay | None = None,
+        _resume: Any = None,
     ) -> AsyncIterator[StreamEvent]:
         harness = self.harness
         relay = _relay
+        # Picked back up from a stored approval: the conversation is the one
+        # that was paused, and there is nothing new from the user.
+        resuming = _resume is not None
         # Handed the conversation mid-run: there is nothing new from the user,
         # only the history to carry on from.
         takeover = relay is not None and relay.takeover
@@ -1056,6 +1175,16 @@ class Agent:
                        else await self._session(session, threaded=threaded))
         if relay is not None:
             relay.attach(session_obj)
+        # A run can stop and wait for a person only where it can be picked up
+        # again: at the top of a conversation, not inside a sub-agent's task or
+        # a chain of handoffs.
+        pausable = (harness.approvals is not None and relay is None
+                    and (not one_off or resuming))
+        paused: Any = None
+        if resuming and self.budget:
+            # What it spent before it stopped still counts against its ceiling.
+            guard.usage = guard.usage + _resume.usage
+            guard.steps = max(0, _resume.step - 1)
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
         task_text = task_message.text
@@ -1100,6 +1229,21 @@ class Agent:
             else:
                 history = []
             earlier = [] if continuing else list(session_obj.messages)
+            if resuming and not one_off:
+                if session_obj.version == _resume.session_version:
+                    # The session holds the paused run at its end; what came
+                    # before that is kept as it is.
+                    held = list(session_obj.messages)
+                    earlier = held[:max(0, len(held) - len(history))]
+                else:
+                    # The conversation went on while this waited. The paused
+                    # run is finished beside it, not written over it.
+                    moved = session_obj.id
+                    session_obj = self._may_have(session_obj.fork(at=0))
+                    result.session_id = session_obj.id
+                    result.warnings.append(
+                        f"session {moved} moved on while this run waited for "
+                        f"approval; the run is kept as {session_obj.id}")
             if relay is not None:
                 # Every agent in a chain adds to the one record the first found.
                 if takeover:
@@ -1111,7 +1255,7 @@ class Agent:
             # the session holds.
             rewritten = takeover and relay.rewrote
 
-            if not takeover:
+            if not takeover and not resuming:
                 # What a takeover continues was checked by the agent it came to.
                 try:
                     task_text = self.content_guardrails.check(
@@ -1124,7 +1268,7 @@ class Agent:
                     return
 
             task_message = Message.user(task_text)
-            if not takeover:
+            if not takeover and not resuming:
                 history.append(task_message)
                 if memory is not None:
                     memory.session.add_message(task_message)
@@ -1178,7 +1322,12 @@ class Agent:
                         decision="ok", run_id=run_id,
                         kinds=[getattr(b, "type", "text") for b in ready],
                         names=[attach(a).label for a in attached])
-                if messages is None:
+                if resuming and not one_off:
+                    # Back into the sandbox it was working in, if it had one.
+                    notice = await self._rejoin(session_obj, sandbox_id)
+                    if notice:
+                        result.warnings.append(notice)
+                elif messages is None:
                     notice = await self._rejoin(session_obj, sandbox_id)
                     if notice:
                         # Said in the conversation itself, so it is still there
@@ -1193,7 +1342,8 @@ class Agent:
                         raise ConfigurationError(
                             f"{self.name}'s workspace is not usable: {exc}"
                         ) from None
-                for step in range(1, steps_allowed + 1):
+                first_step = _resume.step if resuming else 1
+                for step in range(first_step, steps_allowed + 1):
                     harness.control.check(f"{self.name} step {step}")
                     guard.step()
                     result.steps = step
@@ -1201,93 +1351,113 @@ class Agent:
                     await self.hooks.emit("step_start", agent=self.name,
                                              run_id=run_id, step=step)
 
-                    compacted = await self.compactor.compact(
-                        history, pinned=[*(memory.session.facts if memory else ()),
-                                         *(notebook.pins() if notebook else ())]
-                    )
-                    # The compactor hands back the same list when it did nothing.
-                    rewritten = rewritten or compacted is not history
-                    history = compacted
-                    system = await self.assembler.build(
-                        query=task_text, tool_names=self.tools.names,
-                        output_contract=contract,
-                    )
-                    tool_choice = self.tool_choice
-                    # A mode's last step is for handing over, not for one more
-                    # tool call whose result nobody would ever read.
-                    last_step = (profile is not None and step == steps_allowed
-                                 and steps_allowed > 1)
-                    if last_step:
-                        system = f"{system}\n\n{profile.wrap_up}"
-                        tool_choice = "none" if len(self.tools) else tool_choice
-                    request = CompletionRequest(
-                        model=model,
-                        messages=history,
-                        system=system,
-                        tools=self.tools.schemas(),
-                        tool_choice=tool_choice,
-                        max_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                        thinking=self.thinking,
-                        effort=self.effort,
-                        stop=self.stop,
-                        response_schema=(self.output_type.model_json_schema()
-                                         if self.output_type else None),
-                        **self.model_options,
-                    )
+                    finishing = resuming and step == first_step
+                    if finishing:
+                        # The step that was waiting: the model already asked for
+                        # these tools, so it is not asked again.
+                        calls = history[-1].tool_uses if history else []
+                        last_text = (history[-1].text if history else "") or last_text
+                        response = None
+                    else:
+                        compacted = await self.compactor.compact(
+                            history, pinned=[*(memory.session.facts if memory else ()),
+                                             *(notebook.pins() if notebook else ())]
+                        )
+                        # The compactor hands back the same list when it did nothing.
+                        rewritten = rewritten or compacted is not history
+                        history = compacted
+                        system = await self.assembler.build(
+                            query=task_text, tool_names=self.tools.names,
+                            output_contract=contract,
+                        )
+                        tool_choice = self.tool_choice
+                        # A mode's last step is for handing over, not for one more
+                        # tool call whose result nobody would ever read.
+                        last_step = (profile is not None and step == steps_allowed
+                                     and steps_allowed > 1)
+                        if last_step:
+                            system = f"{system}\n\n{profile.wrap_up}"
+                            tool_choice = "none" if len(self.tools) else tool_choice
+                        request = CompletionRequest(
+                            model=model,
+                            messages=history,
+                            system=system,
+                            tools=self.tools.schemas(),
+                            tool_choice=tool_choice,
+                            max_tokens=self.max_tokens,
+                            temperature=self.temperature,
+                            thinking=self.thinking,
+                            effort=self.effort,
+                            stop=self.stop,
+                            response_schema=(self.output_type.model_json_schema()
+                                             if self.output_type else None),
+                            **self.model_options,
+                        )
 
-                    hook = await self.hooks.emit("pre_model", agent=self.name,
-                                                    run_id=run_id, step=step,
-                                                    request=request)
-                    if hook.blocked:
-                        raise StopRequested(hook.reason)
-                    if hook.replaced:
-                        request = hook.replacement
+                        hook = await self.hooks.emit("pre_model", agent=self.name,
+                                                        run_id=run_id, step=step,
+                                                        request=request)
+                        if hook.blocked:
+                            raise StopRequested(hook.reason)
+                        if hook.replaced:
+                            request = hook.replacement
 
-                    response = None
-                    async for event in self._model_events(request, step, token_stream,
-                                                          run_id=run_id):
-                        if event.type == "step_end" and "response" in event.data:
-                            response = event.data["response"]
-                        else:
-                            yield event
-                    if response is None:  # a provider that yielded no response
-                        raise ProviderError("no response from the model",
-                                            provider=self.provider.name)
+                        response = None
+                        async for event in self._model_events(request, step, token_stream,
+                                                              run_id=run_id):
+                            if event.type == "step_end" and "response" in event.data:
+                                response = event.data["response"]
+                            else:
+                                yield event
+                        if response is None:  # a provider that yielded no response
+                            raise ProviderError("no response from the model",
+                                                provider=self.provider.name)
 
-                    # Capture what it said *before* charging for it: recording the
-                    # usage is what trips a budget, and work already done should
-                    # still be handed back.
-                    last_text = response.text or last_text
-                    guard.record(response.usage, agent=self.name, task=task_text[:60])
-                    result.usage += response.usage
-                    span.set(cost_usd=result.usage.cost_usd)
+                        # Capture what it said *before* charging for it: recording the
+                        # usage is what trips a budget, and work already done should
+                        # still be handed back.
+                        last_text = response.text or last_text
+                        guard.record(response.usage, agent=self.name, task=task_text[:60])
+                        result.usage += response.usage
+                        span.set(cost_usd=result.usage.cost_usd)
 
-                    post = await self.hooks.emit("post_model", agent=self.name,
-                                                    run_id=run_id, step=step,
-                                                    response=response)
-                    if post.replaced:
-                        response = post.replacement
+                        post = await self.hooks.emit("post_model", agent=self.name,
+                                                        run_id=run_id, step=step,
+                                                        response=response)
+                        if post.replaced:
+                            response = post.replacement
 
-                    history.append(response.message)
-                    if memory is not None:
-                        memory.session.add_message(response.message)
+                        history.append(response.message)
+                        if memory is not None:
+                            memory.session.add_message(response.message)
 
-                    if harness.checkpoints.should_save(step):
-                        await harness.checkpoints.save(Checkpoint(
-                            run_id=run_id, step=step, agent=self.name,
-                            session_id=session_obj.id, messages=history,
-                            usage=result.usage,
-                        ))
+                        if harness.checkpoints.should_save(step):
+                            await harness.checkpoints.save(Checkpoint(
+                                run_id=run_id, step=step, agent=self.name,
+                                session_id=session_obj.id, messages=history,
+                                usage=result.usage,
+                            ))
 
-                    calls = response.tool_uses
+                        calls = response.tool_uses
                     if calls:
                         outcomes = await self._execute_tools(
                             calls, run_id=run_id, step=step, guard=guard,
                             memory=memory, subagent_memory=subagent_memory,
                             result=result, notebook=notebook, relay=relay,
-                            attachments=attached,
+                            attachments=attached, pausable=pausable,
+                            approval=_resume if finishing else None,
                         )
+                        if any(o.pending for o in outcomes):
+                            # Someone has to say yes first, and nobody is here to
+                            # ask. The run stops at this step and is written
+                            # down; `resume_approval` finishes the step.
+                            paused = self._paused(
+                                calls, outcomes, history=history, run_id=run_id,
+                                step=step, task=task_text, model=model,
+                                session=session_obj, notebook=notebook)
+                            result.stop_reason = "approval"
+                            yield StreamEvent(type="step_end", agent=self.name, step=step)
+                            break
                         for call, outcome in zip(calls, outcomes, strict=False):
                             result.tool_calls.append(ToolCall(
                                 id=call.id, name=call.name, args=call.input,
@@ -1402,7 +1572,11 @@ class Agent:
                         f"{self.name} did not finish within {steps_allowed} steps"
                     )
 
-                if result.stop_reason != "handoff":
+                if result.stop_reason == "approval":
+                    result.output = self.content_guardrails.check(
+                        last_text or f"Waiting for approval: {paused.describe()}.",
+                        where="output", label=self.name)
+                elif result.stop_reason != "handoff":
                     if profile is not None and self.output_type is None:
                         final_text = profile.close(final_text, notebook)
                     final_text = self.content_guardrails.check(
@@ -1468,6 +1642,9 @@ class Agent:
             result.messages = history
             session_obj.messages = [*earlier, *history]
             session_obj.usage += result.usage
+            if resuming:
+                # The whole run, not only the part after the pause.
+                result.usage = _resume.usage + result.usage
             if not session_obj.title:
                 session_obj.title = " ".join(task_text.split())[:80]
             produced: list[Artifact] = []
@@ -1515,6 +1692,33 @@ class Agent:
                 self._thread = session_obj
             elif session is None and not one_off:
                 self._log = session_obj
+            elif resuming:
+                # Resumed by id: whichever of this agent's own it is, keep up.
+                if self._thread is not None and self._thread.id == session_obj.id:
+                    self._thread = session_obj
+                if self._log is not None and self._log.id == session_obj.id:
+                    self._log = session_obj
+
+            if paused is not None and result.stop_reason == "approval":
+                # Stored after the session, so the record knows which version of
+                # the conversation it belongs to.
+                stored = self.persist_session and not one_off
+                paused.session_id = session_obj.id if stored else ""
+                paused.session_version = session_obj.version if stored else 0
+                paused.usage = result.usage
+                try:
+                    result.approval = await harness.approvals.open(paused)
+                except Exception as exc:
+                    result.error = f"the run could not be paused for approval: {exc}"
+                    result.stop_reason = "error"
+                else:
+                    await harness.journal.write(
+                        "decision", f"paused for approval {paused.id}: "
+                        f"{paused.describe()}", agent=self.name, run_id=run_id)
+                    yield StreamEvent(
+                        type="approval_required", agent=self.name, step=result.steps,
+                        text=paused.describe(),
+                        data={"approval": result.approval.summary()})
 
             await harness.journal.handback(
                 self.name, (result.output or result.error or "")[:500], run_id=run_id,
@@ -1645,6 +1849,8 @@ class Agent:
         notebook: Notebook | None = None,
         relay: Relay | None = None,
         attachments: Sequence[Any] = (),
+        pausable: bool = False,
+        approval: Any = None,
     ) -> list[ToolOutcome]:
         """Run every tool the model asked for, in parallel, under the rails."""
         ctx = ToolContext(
@@ -1654,10 +1860,36 @@ class Agent:
                    "notebook": notebook, "relay": relay,
                    # What came with the task, for a tool that works on it — an
                    # image to edit, say.
-                   "attachments": list(attachments)},
+                   "attachments": list(attachments),
+                   # May a call that needs a person stop the run and wait?
+                   "pausable": pausable,
+                   # The stored approval this step is being finished from.
+                   "approval": approval},
         )
+        finished = ({d.get("id"): d for d in approval.done}
+                    if approval is not None else {})
+        decided = ({c.id: c for c in approval.calls} if approval is not None else {})
 
         async def one(call: ToolUseBlock) -> ToolOutcome:
+            if call.id in finished:
+                # It ran before the pause. It is not run again.
+                held = finished[call.id]
+                return ToolOutcome(
+                    call_id=call.id, name=call.name, content=held.get("content", ""),
+                    is_error=bool(held.get("is_error")),
+                    media=[ImageBlock(**m) for m in held.get("media") or []
+                           if isinstance(m, dict) and m.get("type") == "image"])
+            verdict = decided.get(call.id)
+            if verdict is not None and verdict.status != "approved":
+                why = (f"declined by {verdict.by}"
+                       + (f": {verdict.note}" if verdict.note else "")
+                       if verdict.status == "denied" else
+                       "the request for approval expired without an answer")
+                self.harness.audit.record(self.name, "tool_call", target=call.name,
+                                          decision="deny", run_id=run_id, reason=why,
+                                          approval=approval.id)
+                return ToolOutcome(call_id=call.id, name=call.name, is_error=True,
+                                   content=f"Not permitted: {why}")
             return await self._run_tool(call, ctx=ctx, guard=guard, run_id=run_id,
                                         step=step)
 
@@ -1720,9 +1952,35 @@ class Agent:
             if hook.replaced and isinstance(hook.replacement, dict):
                 args = hook.replacement
 
+            record = ctx.state.get("approval")
+            grant = next((c for c in record.calls
+                          if c.id == call.id and c.status == "approved"), None
+                         ) if record is not None else None
+            if grant is not None and _canonical(grant.args) != _canonical(args):
+                # Approved for one thing, about to do another. It does neither.
+                span.status = "error"
+                harness.audit.record(self.name, "tool_call", target=call.name,
+                                     decision="deny", run_id=run_id,
+                                     reason="arguments differ from those approved",
+                                     approval=record.id)
+                return ToolOutcome(
+                    call_id=call.id, name=call.name, is_error=True,
+                    content="Not permitted: this call is not the one that was "
+                            "approved — its arguments have changed.")
+            if grant is None and ctx.state.get("pausable") and self.policy.approver is None:
+                decision, reason = self.policy.needs(
+                    call.name, args, tool_permission=entry.permission)
+                if decision == "ask":
+                    harness.audit.record(self.name, "tool_call", target=call.name,
+                                         decision="pending", run_id=run_id, args=args,
+                                         reason=reason)
+                    return ToolOutcome(
+                        call_id=call.id, name=call.name, content="Waiting for approval.",
+                        pending={"reason": reason or "needs approval", "args": args})
             try:
                 await self.policy.check(call.name, args,
-                                        tool_permission=entry.permission)
+                                        tool_permission=entry.permission,
+                                        approved_by=grant.by if grant else None)
             except PermissionDenied as exc:
                 span.status = "error"
                 harness.audit.record(self.name, "tool_call", target=call.name,
@@ -1732,7 +1990,9 @@ class Agent:
                 return ToolOutcome(call_id=call.id, name=call.name,
                                    content=f"Not permitted: {exc}", is_error=True)
             harness.audit.record(self.name, "tool_call", target=call.name,
-                                 decision="allow", run_id=run_id, args=args)
+                                 decision="allow", run_id=run_id, args=args,
+                                 **({"approved_by": grant.by, "approval": record.id}
+                                    if grant is not None else {}))
 
             key = harness.cache.key("tool", call.name, args) if entry.cacheable else ""
             if key:

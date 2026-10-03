@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Approvals that outlive the process — `Harness(approvals=...)`, `agent.resume_approval`**
+- With an approval store on the harness, a tool call that needs a person and
+  has no approver to ask no longer ends in a refusal: the run stops at that
+  step with `stop_reason == "approval"` and `result.approval`, and is stored —
+  the conversation, the waiting call with its exact arguments, and what the
+  other tools of the step returned. An `approval_required` stream event.
+- `harness.approvals`: `pending()`, `list()`, `get()`, `approve(id, by=, note=,
+  call=)`, `deny(...)`, `expire()`, `release()`. `Approvals(store, notify=,
+  expires=, self_approval=, claim_timeout=)`.
+- `agent.resume_approval(id)` and `stream_approval(id)` carry the run on from
+  the step it stopped in, in any process: the approved call runs with the
+  approved arguments and the model is not asked again; a declined or expired
+  one is answered with the reason; tools that had already run are not re-run.
+  The session, its sandbox, a mode's todo list and sources, and the usage so
+  far are carried over. A run may pause again.
+- A record is resumed once: the claim is a write the store refuses to a second
+  taker, across processes. A resume that fails is marked `failed` and is not
+  retried by itself. Arguments that changed since approval are refused.
+- Requests are owned by the run's user and tenant. If the conversation was
+  continued while a request waited, the resumed run is kept as a fork.
+- Stores: `SessionApprovalStore` (any session database — `approvals=True`),
+  `FileApprovalStore` (`Harness.local()`), `MemoryApprovalStore`;
+  `ApprovalStore` to write one. `Harness.on(url)` keeps approvals in the same
+  database. `ApprovalError`.
+- `PolicyGate.needs()`; `PolicyGate.check(approved_by=)`.
+- **Changed:** on `Harness.local()` and `Harness.on()`, a tool that asks when
+  no approver is configured now pauses the run instead of being refused. A
+  plain `Harness()` and any harness with an `approver` behave as before.
+- Not covered: sub-agents, workflow tool steps, voice turns and handoff chains
+  do not pause; governance `require_approval` still waits in-process.
+- `agent-harness approvals [list|show|approve|deny|resume|release] [ID]`, and
+  `run` prints how to approve a run that stopped to ask.
+- `examples/23_approvals.py`.
+
 **Image generation — `ImageGenerator`**
 - `ImageGenerator()` makes images with the engine whose key is set: Gemini
   (`gemini-2.5-flash-image`, `gemini-3-pro-image-preview`, Imagen), OpenAI
