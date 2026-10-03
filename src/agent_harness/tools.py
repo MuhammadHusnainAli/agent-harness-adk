@@ -31,7 +31,7 @@ from pydantic import BaseModel, ValidationError, create_model
 
 from .errors import ToolError, ToolNotFound
 from .llm_providers.base import ToolSchema
-from .types import ToolOutcome
+from .types import MediaBlock, ToolOutcome
 
 __all__ = [
     "Tool",
@@ -40,6 +40,7 @@ __all__ = [
     "tool",
     "Permission",
     "render_result",
+    "split_media",
 ]
 
 Permission = Literal["allow", "ask", "deny"]
@@ -110,6 +111,26 @@ def _split_docstring(doc: str | None) -> tuple[str, dict[str, str]]:
             elif current and stripped:
                 params[current] = f"{params[current]} {stripped}".strip()
     return "\n".join(summary).strip(), params
+
+
+def split_media(value: Any) -> tuple[Any, list[MediaBlock]]:
+    """What a tool returned, as what is read and what is looked at.
+
+    A tool may return an image — a screenshot, a chart — on its own or in a
+    list beside its text: `return ["clicked Sign in", ImageBlock.from_bytes(png)]`.
+    The image reaches the model as an image, not as its bytes in the prompt.
+    """
+    if isinstance(value, MediaBlock):
+        return f"[{value.type}: {value.name or value.media_type}]", [value]
+    if isinstance(value, (list, tuple)) and any(isinstance(v, MediaBlock) for v in value):
+        media = [v for v in value if isinstance(v, MediaBlock)]
+        rest = [v for v in value if not isinstance(v, MediaBlock)]
+        if not rest:
+            return f"[{len(media)} {media[0].type}{'s' if len(media) > 1 else ''}]", media
+        if all(isinstance(v, str) for v in rest):
+            return "\n".join(rest), media
+        return (rest[0] if len(rest) == 1 else rest), media
+    return value, []
 
 
 def render_result(value: Any, *, limit: int = 40_000) -> str:
@@ -267,9 +288,10 @@ class Tool:
         started = time.perf_counter()
         try:
             value = await self.invoke(args, ctx)
+            readable, media = split_media(value)
             return ToolOutcome(
-                call_id=call_id, name=self.name, value=value,
-                content=render_result(value, limit=self.max_output_chars),
+                call_id=call_id, name=self.name, value=value, media=media,
+                content=render_result(readable, limit=self.max_output_chars),
                 duration_ms=(time.perf_counter() - started) * 1000,
             )
         except asyncio.CancelledError:

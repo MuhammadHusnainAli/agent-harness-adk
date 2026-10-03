@@ -47,6 +47,11 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         tools = [*basic_tools(), web_search, http_fetch]
     for spec in getattr(args, "openapi", None) or []:
         tools += _api(spec, args).tools
+    if getattr(args, "browser", False) or getattr(args, "show_browser", False):
+        from .browser import Browser
+
+        # Closed when the process ends: a browser never outlives what started it.
+        tools += Browser(headless=not args.show_browser).tools()
     mode: Any = args.mode
     if mode == "cowork" and sys.stdin.isatty():
         from . import modes
@@ -827,6 +832,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tools", action="store_true",
                        help="give it the built-in tools (time, maths, web search "
                             "and fetch)")
+        p.add_argument("--browser", action="store_true",
+                       help="give it a web browser to use (Chrome or Chromium, headless)")
+        p.add_argument("--show-browser", action="store_true",
+                       help="the same, with the browser window shown")
         p.add_argument("--openapi", action="append", default=[], metavar="SPEC",
                        help="an OpenAPI file or URL whose operations become tools "
                             "(repeatable)")

@@ -95,6 +95,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/20_web_search.py",
      "Web search: an engine that fails, a fallback that answers, the domain "
      "policy and the cache, and an agent that answers from what it found."),
+    ("examples/21_browser.py",
+     "Browser and computer use: an agent opens pages and fills in a form by the "
+     "page's numbered elements, then works the same browser by mouse and screenshot."),
 ]
 
 

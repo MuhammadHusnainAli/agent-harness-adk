@@ -253,7 +253,11 @@ _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
          "A2AServer": "a2a", "A2AClient": "a2a", "RemoteAgent": "a2a",
          "A2AError": "a2a",
          "OpenAPIToolkit": "toolkits.openapi", "openapi_tools": "toolkits.openapi",
-         "WebSearch": "toolkits.search", "make_search_tool": "toolkits.search"}
+         "WebSearch": "toolkits.search", "make_search_tool": "toolkits.search",
+         # A browser is started only by an agent that browses.
+         "Browser": "browser", "browser_tools": "browser", "computer_tool": "browser",
+         "Computer": "browser", "BrowserComputer": "browser",
+         "DesktopComputer": "browser"}
 
 
 def __getattr__(name: str):
@@ -520,6 +524,12 @@ __all__ = [
     "openapi_tools",
     "WebSearch",
     "make_search_tool",
+    "Browser",
+    "browser_tools",
+    "computer_tool",
+    "Computer",
+    "BrowserComputer",
+    "DesktopComputer",
     "PermissionDenied",
     "BudgetExceeded",
     "GuardrailTripped",

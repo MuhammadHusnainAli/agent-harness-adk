@@ -376,6 +376,9 @@ class ToolOutcome(BaseModel):
     duration_ms: float = 0.0
     cached: bool = False
     value: Any = Field(default=None, exclude=True)
+    #: Images (or other media) the tool returned for the model to look at — a
+    #: screenshot, say. They follow the tool results in the same turn.
+    media: list[Any] = Field(default_factory=list, exclude=True)
 
     def as_block(self) -> ToolResultBlock:
         return ToolResultBlock(

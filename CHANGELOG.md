@@ -8,6 +8,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Browser and computer use — `Browser`, `computer_tool`**
+- `Browser()` starts Chrome, Chromium or Edge headless and drives it over the
+  DevTools protocol with the harness's own WebSocket client: no dependency is
+  added. `cdp_url=` drives a browser that is already running; `headless=False`
+  shows it; `user_data_dir=` keeps a profile.
+- `browser.tools()`: `browser_navigate`, `browser_click`, `browser_type`,
+  `browser_select`, `browser_press`, `browser_scroll`, `browser_back`,
+  `browser_snapshot`, `browser_read`, `browser_wait`, `browser_tabs`,
+  `browser_screenshot`. After each action the model reads the page as numbered
+  elements — role, name, value, state — with what is on screen first, and acts
+  by number, so a model without vision can browse. `vision=True` adds a
+  screenshot to every answer; `permission="ask"` has each action approved.
+- `allowed_domains`, `blocked_domains` and `allow_private` are applied to every
+  document a tab loads: typed, clicked, redirected or framed. Only `http` and
+  `https` open; downloads are refused.
+- New tabs are followed, dialogs are answered and reported, covered elements
+  are clicked directly, shadow roots are read, password input is not echoed. A
+  browser that died is started again and a crashed tab reloaded; the browser
+  never outlives its process.
+- `computer_tool(computer)`: one `computer` tool — `screenshot`, `click`,
+  `double_click`, `right_click`, `move`, `drag`, `type`, `key`, `scroll`,
+  `wait`, `open` — answering every action with a screenshot. It is an ordinary
+  tool, so it works with any model that sees. `browser.computer()` is a browser
+  page; `DesktopComputer(sandbox)` is an X11 desktop driven with `xdotool`, and
+  asks before each action when the desktop is this machine's own; `Computer` is
+  the class to subclass for any other screen.
+- A tool may return an image — `return [text, ImageBlock.from_bytes(png)]` —
+  and the model is shown it, on every provider that takes images. A
+  conversation keeps the newest three (`agent.tool_images_kept`).
+  `ToolOutcome.media`; `media` on the `tool_result` stream event.
+- `agent-harness run|chat … --browser` (and `--show-browser`).
+- `examples/21_browser.py`.
+
 **Web search — `web_search`, `WebSearch`**
 - `web_search` in `agent_harness.toolkits`: a search tool that works with any
   model. It uses the engine whose key is in the environment — Tavily, Brave,

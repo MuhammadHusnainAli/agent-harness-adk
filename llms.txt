@@ -56,6 +56,7 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [18_openapi](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/18_openapi.py): OpenAPI → tools: an agent given an API's openapi.json calls its operations, with a key it never sees and an approval before a write.
 - [19_mcp_server](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/19_mcp_server.py): Agents served as an MCP server, each behind its own API key: what each key opens, what is refused, and an agent using another over MCP.
 - [20_web_search](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/20_web_search.py): Web search: an engine that fails, a fallback that answers, the domain policy and the cache, and an agent that answers from what it found.
+- [21_browser](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/21_browser.py): Browser and computer use: an agent opens pages and fills in a form by the page's numbered elements, then works the same browser by mouse and screenshot.
 
 ## Optional
 

@@ -625,6 +625,7 @@ Built-ins in `agent_harness.toolkits`:
 | `make_corpus_search` | keyword search over documents you hand it |
 | `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `Browser().tools()`, `computer_tool` | a real browser the agent drives by numbered elements, and a mouse and keyboard for a model that sees. [More below](#browser-and-computer-use) |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
 | `make_python_tool` | run code in the workspace — asks for approval every time, unless the workspace is a sandbox |
@@ -715,6 +716,119 @@ search` lists the engines and which are set up; `agent-harness search "heat
 pump subsidy" --recency year` runs one. Snippets are text from the open web:
 treat them as you treat any fetched page, as something the agent reads and not
 something it obeys. `examples/20_web_search.py` runs all of this offline.
+
+## Browser and computer use
+
+```python
+from agent_harness import Agent, Browser
+
+async with Browser() as browser:
+    agent = Agent("shopper", "Find things on the web.", tools=browser.tools())
+    await agent.run("What is the top story on Hacker News right now?")
+```
+
+The browser is Chrome, Chromium or Edge — whichever is installed — started
+headless and driven over the DevTools protocol by the harness itself. Nothing
+is added to install: no Playwright, no driver. `Browser(cdp_url="http://host:9222")`
+drives one that is already running somewhere else — a container, another
+machine, a hosted browser — and `headless=False` shows the window.
+
+The agent is not handed pixels to guess at. After every action it reads the
+page as the things that can be acted on, each with a number, and acts by number:
+
+```text
+Page: Sign in — https://shop.example/login
+
+[1] textbox "Email"
+[2] textbox "Password"
+[3] combobox "Country" value="France"  options: France | Germany
+[4] checkbox "Remember me"
+[5] button "Sign in"
+[6] link "Forgot your password?" → /reset
+
+Text on screen:
+Sign in to see your orders. …
+```
+
+So any model can browse, with or without vision. The tools:
+
+| Tool | Does |
+|---|---|
+| `browser_navigate(url)` | open a page |
+| `browser_click(ref)` · `browser_type(ref, text, submit)` · `browser_select(ref, option)` | act on an element by its number |
+| `browser_press(key)` · `browser_scroll(direction, amount)` · `browser_back()` | keys (`Enter`, `ctrl+a`), scrolling, history |
+| `browser_snapshot()` · `browser_read(offset, max_chars)` | read the page again; read all of its text |
+| `browser_wait(seconds, text)` | wait, or wait until some text appears |
+| `browser_tabs(action, index, url)` | list, switch, open, close |
+| `browser_screenshot()` | a picture of the page, for a model that sees |
+
+`browser.tools(vision=True)` sends a screenshot back with every action;
+`permission="ask"` has each one approved first. Every method is yours to call
+too — `await browser.goto(url)`, `.click(3)`, `.type(1, "ada@example.com")`,
+`.screenshot()`.
+
+```python
+Browser(
+    allowed_domains=["shop.example", "*.gov"],   # a plain name covers its subdomains
+    blocked_domains=["ads.example"],
+    allow_private=False,          # no localhost, no 10.x, no cloud metadata address
+    viewport=(1280, 800), timeout=30, accept_dialogs=False,
+    user_data_dir="./profile",    # keep cookies and logins; a fresh profile otherwise
+)
+```
+
+What is taken care of, so the model does not have to:
+
+- **Where it may go.** The policy is applied to every document a tab asks for —
+  a typed address, a clicked link, a redirect, a frame — and names are resolved
+  before a private address is ruled out. Only `http` and `https` open: no
+  `file:`, no `chrome:`. Downloads are refused.
+- **Pages that move.** After each action the page is given time to load and is
+  read again, so the answer to a click is what the click led to. Numbers stay
+  with their elements for as long as the page lives; a number from a page that
+  has gone is refused with "read the page again", not guessed at.
+- **What gets in the way.** A link that opens a new tab is followed there; an
+  `alert` is accepted and a `confirm` dismissed (or accepted, with
+  `accept_dialogs=True`), and the model is told what it said; an element under
+  an overlay is clicked directly; elements inside shadow roots are listed.
+- **What breaks.** A browser that has died is started again on the next call, a
+  crashed tab is reloaded, and both are reported. The browser is closed with
+  its `Browser`, and never outlives the process that started it.
+- **Secrets.** What is typed into a password field is not echoed back.
+
+### Computer use
+
+For what a list of elements cannot reach — a canvas, a map, a game, a desktop
+application — there is one tool, `computer`, with a mouse, a keyboard and a
+screenshot after every action. It needs a model that sees; any such model will
+do, because it is an ordinary tool and not a vendor's.
+
+```python
+from agent_harness import Browser, DesktopComputer, computer_tool
+
+agent = Agent("operator", tools=[computer_tool(browser.computer())])       # a browser page
+agent = Agent("operator", tools=[computer_tool(DesktopComputer(sandbox))])  # a Linux desktop
+```
+
+Its actions are `screenshot`, `click`, `double_click`, `right_click`, `move`,
+`drag`, `type`, `key`, `scroll`, `wait` — and `open` on a browser. Coordinates
+are pixels of the screenshot, and a point off the screen is refused.
+
+`DesktopComputer` drives an X11 desktop with `xdotool` and takes its pictures
+with `scrot`: give it a sandbox whose image has a display (`Xvfb`), those two
+and the applications you want used. With no sandbox it drives *this* machine's
+desktop, and the tool then asks before every action. A screen that is neither —
+VNC, a phone — is a subclass of `Computer`.
+
+Any tool can return an image this way: `return ["what happened",
+ImageBlock.from_bytes(png)]` and the model is shown it. A conversation keeps the
+newest three (`agent.tool_images_kept`); older ones leave a note in their place,
+so a long session does not fill with screenshots.
+
+A web page is text from strangers. An agent that browses will read instructions
+that are not yours; keep it to the domains it needs, and put `permission="ask"`,
+a guardrail or a human in front of anything it can change.
+`examples/21_browser.py` runs a browser against a shop served on the spot.
 
 ## OpenAPI → tools
 
@@ -2298,6 +2412,7 @@ agent-harness run "what does this say?" --attach contract.pdf --attach call.mp3
 agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
+agent-harness run "what is on the front page of example.com?" --browser
 agent-harness search "heat pump subsidy" --recency year --engine brave
 agent-harness search                    # the search engines, and which are set up
 agent-harness models
@@ -2378,6 +2493,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Browser and computer use — `Browser`, `computer_tool`**
+- `Browser()` starts Chrome, Chromium or Edge headless and drives it over the
+  DevTools protocol with the harness's own WebSocket client: no dependency is
+  added. `cdp_url=` drives a browser that is already running; `headless=False`
+  shows it; `user_data_dir=` keeps a profile.
+- `browser.tools()`: `browser_navigate`, `browser_click`, `browser_type`,
+  `browser_select`, `browser_press`, `browser_scroll`, `browser_back`,
+  `browser_snapshot`, `browser_read`, `browser_wait`, `browser_tabs`,
+  `browser_screenshot`. After each action the model reads the page as numbered
+  elements — role, name, value, state — with what is on screen first, and acts
+  by number, so a model without vision can browse. `vision=True` adds a
+  screenshot to every answer; `permission="ask"` has each action approved.
+- `allowed_domains`, `blocked_domains` and `allow_private` are applied to every
+  document a tab loads: typed, clicked, redirected or framed. Only `http` and
+  `https` open; downloads are refused.
+- New tabs are followed, dialogs are answered and reported, covered elements
+  are clicked directly, shadow roots are read, password input is not echoed. A
+  browser that died is started again and a crashed tab reloaded; the browser
+  never outlives its process.
+- `computer_tool(computer)`: one `computer` tool — `screenshot`, `click`,
+  `double_click`, `right_click`, `move`, `drag`, `type`, `key`, `scroll`,
+  `wait`, `open` — answering every action with a screenshot. It is an ordinary
+  tool, so it works with any model that sees. `browser.computer()` is a browser
+  page; `DesktopComputer(sandbox)` is an X11 desktop driven with `xdotool`, and
+  asks before each action when the desktop is this machine's own; `Computer` is
+  the class to subclass for any other screen.
+- A tool may return an image — `return [text, ImageBlock.from_bytes(png)]` —
+  and the model is shown it, on every provider that takes images. A
+  conversation keeps the newest three (`agent.tool_images_kept`).
+  `ToolOutcome.media`; `media` on the `tool_result` stream event.
+- `agent-harness run|chat … --browser` (and `--show-browser`).
+- `examples/21_browser.py`.
 
 **Web search — `web_search`, `WebSearch`**
 - `web_search` in `agent_harness.toolkits`: a search tool that works with any
@@ -4480,7 +4628,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`, `Browser`, `browser_tools`, `computer_tool`, `Computer`, `BrowserComputer`, `DesktopComputer`
 
 ---
 
@@ -6537,6 +6685,133 @@ async def main() -> None:
         elif event.type == "run_end":
             print(f"\nanalyst    {event.data['result'].output}")
     await harness.aclose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/21_browser.py
+
+Browser and computer use: an agent opens pages and fills in a form by the page's numbered elements, then works the same browser by mouse and screenshot.
+
+```python
+"""Browser and computer use: an agent that opens pages, fills in a form, and looks.
+
+A small shop runs here on a real socket. The agent is given a browser — Chrome,
+Chromium or Edge, whichever is installed, started headless — and drives it two
+ways: by the numbered elements of the page, which any model can do, and with a
+mouse and a screenshot, for a model that sees.
+
+On a machine with no browser installed the example says so and stops.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+from _common import pick_provider
+
+from agent_harness import Agent, Browser, Harness, computer_tool, tool_call
+from agent_harness.browser import find_browser
+from agent_harness.errors import ConfigurationError
+
+PAGES = {
+    "/": """<title>Corner Shop</title><h1>Corner Shop</h1>
+        <p>Order tracking for customers.</p><a href="/track">Track an order</a>""",
+    "/track": """<title>Track an order</title><h1>Track an order</h1>
+        <form onsubmit="event.preventDefault(); document.getElementById('out').innerText =
+              'Order ' + order.value + ' shipped by ' + carrier.value + ' on 2 October.'">
+          <label for="order">Order number</label><input id="order">
+          <select id="carrier" aria-label="Carrier">
+            <option>Post</option><option>Courier</option></select>
+          <button>Look it up</button>
+        </form><p id="out"></p>""",
+}
+
+
+class Shop(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        body = PAGES.get(self.path, "<title>Not found</title>").encode()
+        self.send_response(200 if self.path in PAGES else 404)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: Any) -> None:
+        return None
+
+
+def number(listing: str, label: str) -> int:
+    """The number the page listing gives the element with this label."""
+    return int(re.search(rf"\[(\d+)\] [^\n]*{re.escape(label)}", listing).group(1))
+
+
+async def main() -> None:
+    try:
+        find_browser()
+    except ConfigurationError as exc:
+        print(f"(skipped: {exc})")
+        return
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Shop)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+
+    # The shop is on this machine, so private addresses are allowed — and
+    # nothing else is: the browser may go to the shop and nowhere besides.
+    # (A CI runner cannot run Chrome's own sandbox; anywhere else it stays on.)
+    async with Browser(allow_private=True, allowed_domains=["127.0.0.1"],
+                       sandbox=False if os.environ.get("CI") else None) as browser:
+        # --- drive it yourself ----------------------------------------------------
+        print(await browser.goto(url), "\n")
+        try:
+            await browser.goto("https://example.com")
+        except Exception as exc:
+            print(f"refused    {exc}\n")
+
+        # --- hand it to an agent -----------------------------------------------------
+        # Scripted only when there is no API key: a model reads the listing and
+        # picks the numbers itself.
+        def scripted(request):
+            said = "\n".join(getattr(b, "content", "") for b in request.messages[-1].content)
+            turn = sum(1 for m in request.messages if m.role == "assistant")
+            if turn == 0:
+                return tool_call("browser_navigate", url=f"{url}/track")
+            if turn == 1:
+                return tool_call("browser_type", ref=number(said, "Order number"),
+                                 text="4182")
+            if turn == 2:
+                return tool_call("browser_select", ref=number(said, "Carrier"),
+                                 option="Courier")
+            if turn == 3:
+                return tool_call("browser_click", ref=number(said, "Look it up"))
+            return "Order 4182 shipped by Courier on 2 October."
+
+        provider, model = pick_provider([scripted])
+        harness = Harness(provider=provider)
+        agent = Agent("clerk", "Look things up on the shop's website.",
+                      tools=browser.tools(), model=model, harness=harness, memory=False)
+        async for event in agent.stream(f"When did order 4182 ship, and how? The shop "
+                                        f"is at {url} and it went by courier."):
+            if event.type == "tool_result":
+                print(f"tool       {event.data['tool']} → {event.text.splitlines()[0]}")
+            elif event.type == "run_end":
+                print(f"\nclerk      {event.data['result'].output}\n")
+
+        # --- computer use: the same browser, by mouse and screenshot ---------------
+        computer = computer_tool(browser.computer())
+        said, shot = await computer.invoke({"action": "open", "text": url})
+        print(f"computer   {said}  ({shot.media_type}, {shot.size():,} bytes)")
+        said, shot = await computer.invoke({"action": "click", "x": 60, "y": 110})
+        print(f"computer   {said}  now on: {(await browser.snapshot()).splitlines()[0]}")
+        await harness.aclose()
+    server.shutdown()
 
 
 if __name__ == "__main__":

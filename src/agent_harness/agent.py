@@ -60,6 +60,7 @@ from .tools import Tool, ToolContext, ToolRegistry
 from .types import (
     Artifact,
     HandoffRecord,
+    MediaBlock,
     Message,
     ModelResponse,
     RunResult,
@@ -67,6 +68,7 @@ from .types import (
     TextBlock,
     ToolCall,
     ToolOutcome,
+    ToolResultBlock,
     ToolUseBlock,
     attach,
     new_id,
@@ -134,6 +136,29 @@ def _agent_count(value: int) -> int:
             f"got {count}"
         )
     return count
+
+
+#: How many images returned by tools a conversation keeps. A screenshot is a
+#: thousand tokens or more, and only the latest few say what the screen shows.
+TOOL_IMAGES_KEPT = 3
+
+
+def _drop_old_tool_media(messages: list[Message], keep: int) -> None:
+    """Replace all but the newest `keep` tool-returned images with a note."""
+    left = max(0, keep)
+    for message in reversed(messages):
+        if not any(isinstance(b, ToolResultBlock) for b in message.content):
+            continue
+        for index in range(len(message.content) - 1, -1, -1):
+            block = message.content[index]
+            if not isinstance(block, MediaBlock):
+                continue
+            if left > 0:
+                left -= 1
+                continue
+            message.content[index] = TextBlock(
+                text=f"[an earlier {block.name or block.type} was here; it is no "
+                     "longer kept — take a new one if you need to look again]")
 
 
 IDENTITY = Prompt(
@@ -366,6 +391,8 @@ class Agent:
         self.output_type = output_type
         self.tool_choice = tool_choice
         self.parallel_tools = parallel_tools
+        #: Images returned by tools that the conversation keeps; set it to change.
+        self.tool_images_kept = TOOL_IMAGES_KEPT
         self.contract_retries = contract_retries
         self.stop = list(stop)
         self.persist_session = persist_session
@@ -1268,10 +1295,19 @@ class Agent:
                             yield StreamEvent(type="tool_result", agent=self.name,
                                               step=step, text=outcome.content[:400],
                                               data={"tool": outcome.name,
-                                                    "error": outcome.is_error})
+                                                    "error": outcome.is_error,
+                                                    **({"media": outcome.media}
+                                                       if outcome.media else {})})
                         tool_message = Message.tool_results(
                             [o.as_block() for o in outcomes]
                         )
+                        # What a tool returned to be looked at — a screenshot —
+                        # follows the results, in the same turn.
+                        seen = [m for o in outcomes for m in o.media]
+                        if seen:
+                            tool_message.content.extend(seen)
+                            _drop_old_tool_media([*history, tool_message],
+                                                 self.tool_images_kept)
                         history.append(tool_message)
                         if memory is not None:
                             memory.session.add_message(tool_message)

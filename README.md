@@ -613,6 +613,7 @@ Built-ins in `agent_harness.toolkits`:
 | `make_corpus_search` | keyword search over documents you hand it |
 | `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `Browser().tools()`, `computer_tool` | a real browser the agent drives by numbered elements, and a mouse and keyboard for a model that sees. [More below](#browser-and-computer-use) |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
 | `make_python_tool` | run code in the workspace — asks for approval every time, unless the workspace is a sandbox |
@@ -703,6 +704,119 @@ search` lists the engines and which are set up; `agent-harness search "heat
 pump subsidy" --recency year` runs one. Snippets are text from the open web:
 treat them as you treat any fetched page, as something the agent reads and not
 something it obeys. `examples/20_web_search.py` runs all of this offline.
+
+## Browser and computer use
+
+```python
+from agent_harness import Agent, Browser
+
+async with Browser() as browser:
+    agent = Agent("shopper", "Find things on the web.", tools=browser.tools())
+    await agent.run("What is the top story on Hacker News right now?")
+```
+
+The browser is Chrome, Chromium or Edge — whichever is installed — started
+headless and driven over the DevTools protocol by the harness itself. Nothing
+is added to install: no Playwright, no driver. `Browser(cdp_url="http://host:9222")`
+drives one that is already running somewhere else — a container, another
+machine, a hosted browser — and `headless=False` shows the window.
+
+The agent is not handed pixels to guess at. After every action it reads the
+page as the things that can be acted on, each with a number, and acts by number:
+
+```text
+Page: Sign in — https://shop.example/login
+
+[1] textbox "Email"
+[2] textbox "Password"
+[3] combobox "Country" value="France"  options: France | Germany
+[4] checkbox "Remember me"
+[5] button "Sign in"
+[6] link "Forgot your password?" → /reset
+
+Text on screen:
+Sign in to see your orders. …
+```
+
+So any model can browse, with or without vision. The tools:
+
+| Tool | Does |
+|---|---|
+| `browser_navigate(url)` | open a page |
+| `browser_click(ref)` · `browser_type(ref, text, submit)` · `browser_select(ref, option)` | act on an element by its number |
+| `browser_press(key)` · `browser_scroll(direction, amount)` · `browser_back()` | keys (`Enter`, `ctrl+a`), scrolling, history |
+| `browser_snapshot()` · `browser_read(offset, max_chars)` | read the page again; read all of its text |
+| `browser_wait(seconds, text)` | wait, or wait until some text appears |
+| `browser_tabs(action, index, url)` | list, switch, open, close |
+| `browser_screenshot()` | a picture of the page, for a model that sees |
+
+`browser.tools(vision=True)` sends a screenshot back with every action;
+`permission="ask"` has each one approved first. Every method is yours to call
+too — `await browser.goto(url)`, `.click(3)`, `.type(1, "ada@example.com")`,
+`.screenshot()`.
+
+```python
+Browser(
+    allowed_domains=["shop.example", "*.gov"],   # a plain name covers its subdomains
+    blocked_domains=["ads.example"],
+    allow_private=False,          # no localhost, no 10.x, no cloud metadata address
+    viewport=(1280, 800), timeout=30, accept_dialogs=False,
+    user_data_dir="./profile",    # keep cookies and logins; a fresh profile otherwise
+)
+```
+
+What is taken care of, so the model does not have to:
+
+- **Where it may go.** The policy is applied to every document a tab asks for —
+  a typed address, a clicked link, a redirect, a frame — and names are resolved
+  before a private address is ruled out. Only `http` and `https` open: no
+  `file:`, no `chrome:`. Downloads are refused.
+- **Pages that move.** After each action the page is given time to load and is
+  read again, so the answer to a click is what the click led to. Numbers stay
+  with their elements for as long as the page lives; a number from a page that
+  has gone is refused with "read the page again", not guessed at.
+- **What gets in the way.** A link that opens a new tab is followed there; an
+  `alert` is accepted and a `confirm` dismissed (or accepted, with
+  `accept_dialogs=True`), and the model is told what it said; an element under
+  an overlay is clicked directly; elements inside shadow roots are listed.
+- **What breaks.** A browser that has died is started again on the next call, a
+  crashed tab is reloaded, and both are reported. The browser is closed with
+  its `Browser`, and never outlives the process that started it.
+- **Secrets.** What is typed into a password field is not echoed back.
+
+### Computer use
+
+For what a list of elements cannot reach — a canvas, a map, a game, a desktop
+application — there is one tool, `computer`, with a mouse, a keyboard and a
+screenshot after every action. It needs a model that sees; any such model will
+do, because it is an ordinary tool and not a vendor's.
+
+```python
+from agent_harness import Browser, DesktopComputer, computer_tool
+
+agent = Agent("operator", tools=[computer_tool(browser.computer())])       # a browser page
+agent = Agent("operator", tools=[computer_tool(DesktopComputer(sandbox))])  # a Linux desktop
+```
+
+Its actions are `screenshot`, `click`, `double_click`, `right_click`, `move`,
+`drag`, `type`, `key`, `scroll`, `wait` — and `open` on a browser. Coordinates
+are pixels of the screenshot, and a point off the screen is refused.
+
+`DesktopComputer` drives an X11 desktop with `xdotool` and takes its pictures
+with `scrot`: give it a sandbox whose image has a display (`Xvfb`), those two
+and the applications you want used. With no sandbox it drives *this* machine's
+desktop, and the tool then asks before every action. A screen that is neither —
+VNC, a phone — is a subclass of `Computer`.
+
+Any tool can return an image this way: `return ["what happened",
+ImageBlock.from_bytes(png)]` and the model is shown it. A conversation keeps the
+newest three (`agent.tool_images_kept`); older ones leave a note in their place,
+so a long session does not fill with screenshots.
+
+A web page is text from strangers. An agent that browses will read instructions
+that are not yours; keep it to the domains it needs, and put `permission="ask"`,
+a guardrail or a human in front of anything it can change.
+`examples/21_browser.py` runs a browser against a shop served on the spot.
 
 ## OpenAPI → tools
 
@@ -2286,6 +2400,7 @@ agent-harness run "what does this say?" --attach contract.pdf --attach call.mp3
 agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
+agent-harness run "what is on the front page of example.com?" --browser
 agent-harness search "heat pump subsidy" --recency year --engine brave
 agent-harness search                    # the search engines, and which are set up
 agent-harness models
