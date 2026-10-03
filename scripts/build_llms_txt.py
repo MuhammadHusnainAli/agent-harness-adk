@@ -104,6 +104,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/23_approvals.py",
      "Approval that survives a restart: a run stops to ask, is stored in a "
      "database, is approved by another process ten hours later and carries on."),
+    ("examples/24_knowledge.py",
+     "A knowledge base: documents chunked, embedded and stored in a vector store, "
+     "searched by meaning and by words, and an agent held to what it may see."),
 ]
 
 

@@ -613,6 +613,7 @@ Built-ins in `agent_harness.toolkits`:
 | `make_corpus_search` | keyword search over documents you hand it |
 | `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `KnowledgeBase(...).as_tool()` | documents searched by meaning, in any of seventeen vector stores. [More below](#knowledge-bases-and-vector-stores) |
 | `ImageGenerator().tools()` | image generation with reference images — Gemini, OpenAI, Replicate — as jobs with progress, retries and fallback. [More below](#image-generation) |
 | `Browser().tools()`, `computer_tool` | a real browser the agent drives by numbered elements, and a mouse and keyboard for a model that sees. [More below](#browser-and-computer-use) |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
@@ -1153,6 +1154,120 @@ from agent_harness import MemoryManager, ProviderEmbedder, OpenAIProvider, FileS
 memory = MemoryManager(FileStore(".harness/memory"),
                        embedder=ProviderEmbedder(OpenAIProvider()))
 ```
+
+Past about fifty thousand records, keep memory's index in a vector database
+instead of in the process — any of the stores below:
+
+```python
+from agent_harness.knowledge import vector_store
+
+memory_store = SemanticMemory(PostgresMemory(dsn), embedder=embedder,
+                              index=vector_store("pgvector://user:pw@host/db?table=memory"))
+```
+
+Each record is stored with its scope and its owner, and a search is held to
+them in the database — one tenant's memory is never fetched for another.
+
+## Knowledge bases and vector stores
+
+```python
+from agent_harness import Agent, KnowledgeBase, OpenAIProvider
+from agent_harness.memory import ProviderEmbedder
+
+kb = KnowledgeBase("qdrant://localhost:6333/handbook",
+                   embedder=ProviderEmbedder(OpenAIProvider(), "text-embedding-3-small"))
+await kb.add(path="handbook/refunds.md", metadata={"team": "support"})
+await kb.add(url="https://example.com/terms")
+await kb.add("Orders ship within two working days.", id="shipping", title="Shipping")
+
+passages = await kb.search("how long do refunds take?", k=5, filter={"team": "support"})
+agent = Agent("support", tools=[kb.as_tool(filter={"team": "support"})])
+```
+
+**Documents in.** A document is read (`parse_document`: text, Markdown, HTML,
+CSV, JSON, and PDF or DOCX with their optional installs), cut into overlapping
+passages at paragraph and sentence boundaries — each one labelled with the
+headings it sits under — embedded in batches, and stored under its id. Adding it
+again replaces it; when nothing has changed, one embedding is spent finding
+that out and nothing is written. A shorter version leaves no stale passages
+behind, and `kb.delete(id)` removes all of them.
+
+**Passages out.** A search embeds the question, takes more candidates than
+were asked for, and orders them by meaning *and* by the words they share with
+the question, so a product code or a name is not lost to a near-synonym.
+`reranker=` puts a cross-encoder or a rerank API over the candidates;
+`min_score=` drops what is not close; `namespace=` keeps several knowledge
+bases apart in one store. The tool an agent gets returns each passage with the
+document it came from, and `as_tool(filter=...)` holds that agent to the
+documents it may see — a filter the model cannot remove.
+
+**The store** is a name or a URL. One interface, one filter language, and
+scores that are cosine similarity on every one of them:
+
+| Store | Name / URL | Needs |
+|---|---|---|
+| In memory · SQLite file | `memory` · `sqlite:///knowledge.db` | — |
+| Qdrant (and Qdrant Cloud) | `qdrant://host:6333/collection` | — |
+| Chroma (and Chroma Cloud) | `chroma://host:8000/collection` | — |
+| Weaviate (and Weaviate Cloud) | `weaviate://host:8080/Collection` | — |
+| Milvus · Zilliz Cloud | `milvus://host:19530/collection` | — |
+| Pinecone | `pinecone://index-name` | — |
+| OpenSearch · Amazon OpenSearch Service and Serverless | `opensearch://host:9200/index` | — (SigV4 built in) |
+| Elasticsearch · Elastic Cloud | `elasticsearch://host:9200/index` | — |
+| PostgreSQL + pgvector · Supabase, Neon, Aurora, AlloyDB, Azure Postgres | `pgvector://user:pw@host/db?table=t` | `asyncpg` |
+| Redis 8 / Redis Stack · MemoryDB, Azure Managed Redis | `redis://host:6379?index=name` | `redis` |
+| MongoDB Atlas Vector Search | `mongodb+srv://…?database=d&collection=c` | `pymongo` |
+| Azure AI Search | `azure-search://service.search.windows.net/index` | — |
+| Cloudflare Vectorize | `vectorize://account-id/index` | — |
+| Upstash Vector | `upstash://host` | — |
+| Vertex AI Vector Search | `VertexVectorStore(project=…, index=…, endpoint=…)` | — |
+| Amazon S3 Vectors | `s3vectors://bucket/index?region=…` | — |
+| Amazon Bedrock Knowledge Bases | `KnowledgeBase(retriever=BedrockKnowledgeBase(id))` | — |
+
+Add `+https` for TLS (`qdrant+https://…`), and pass keys as arguments or let
+them come from the environment (`QDRANT_API_KEY`, `PINECONE_API_KEY`,
+`AZURE_SEARCH_API_KEY`, `CLOUDFLARE_API_TOKEN`, the usual AWS and Google
+variables). All but three are spoken to over plain HTTP, so they add nothing to
+install.
+
+```python
+from agent_harness.knowledge import VectorRecord, vector_store
+
+store = vector_store("opensearch+https://search-x.eu-west-1.es.amazonaws.com/handbook",
+                     aws_region="eu-west-1")
+await store.ensure(1536)                                  # the index, if it is not there
+await store.upsert([VectorRecord("a", vector, "the text", {"source": "faq.md", "year": 2026})])
+hits = await store.query(vector, k=5, filter={"source": "faq.md", "year": {"$gte": 2025}})
+await store.delete(filter={"source": "faq.md"})
+print(await store.check())                                # prove it works, end to end
+```
+
+Filters are `{"field": value}`, `$in`, `$ne`, `$gt`/`$gte`/`$lt`/`$lte`, and
+keys are ANDed; each is translated into the database's own. Ids are any string:
+a store that only takes UUIDs is given one derived from yours. Requests that
+may succeed later — 429, 5xx, timeouts — are retried with back-off, and keys
+never appear in an error.
+
+What differs between stores is said where it matters:
+
+- Redis, MongoDB Atlas, Azure AI Search and Vectorize filter only on fields
+  their index was told about: `filterable={"team": "tag"}`. The fields a
+  knowledge base and memory use themselves are declared for you.
+- Vertex AI Vector Search stores no text, so text and metadata go to a
+  `payloads` side store (a SQLite file by default); its index is created and
+  deployed in Google Cloud, not here.
+- Pinecone, Vectorize, S3 Vectors and OpenSearch Serverless show a write a
+  moment after it is made. Vectorize returns at most 20 results, S3 Vectors 30.
+- A Bedrock knowledge base is a retriever: Bedrock does the chunking and the
+  embedding, and it is asked in words.
+- SageMaker hosts models and is not a vector store; on AWS the stores are
+  OpenSearch, S3 Vectors, Aurora/RDS (pgvector) and MemoryDB (Redis).
+
+`agent-harness knowledge stores` lists them, `knowledge check --store URL`
+proves one works, `knowledge add FILE… --store URL` and `knowledge search`
+do what they say, and `run … --knowledge URL` gives an agent the search tool.
+`tests/test_knowledge_live.py` runs every store you point it at through the
+same checks. `examples/24_knowledge.py` runs on a SQLite file with no key.
 
 ## Context: when it compresses
 
@@ -2566,6 +2681,9 @@ agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness run "what is on the front page of example.com?" --browser
+agent-harness knowledge add handbook/*.md --store qdrant://localhost:6333/handbook
+agent-harness run "how long do refunds take?" --knowledge qdrant://localhost:6333/handbook
+agent-harness knowledge check --store pgvector://user:pw@host/db   # prove a store works
 agent-harness approvals --state .harness              # runs waiting for a person
 agent-harness approvals approve apr_9f2c --by maria && agent-harness approvals resume apr_9f2c
 agent-harness image "a red fox in snow" --reference fox.jpg --aspect 16:9
@@ -2628,8 +2746,7 @@ writes, spends or sends.
 0.1.0 — the first release. The public API above is what we intend to keep.
 Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-Not in this release: a vector-database backend (the built-in index is exact
-brute force, fine to ~50k records) and provider-side batch APIs. OCR, PDF and
+Not in this release: provider-side batch APIs. OCR, PDF and
 DOCX parsing work through an optional install each rather than shipping in the
 default dependency set.
 

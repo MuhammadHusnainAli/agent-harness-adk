@@ -49,6 +49,9 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         tools = [*basic_tools(), web_search, http_fetch]
     for spec in getattr(args, "openapi", None) or []:
         tools += _api(spec, args).tools
+    if getattr(args, "knowledge", None):
+        args.store = args.knowledge
+        tools.append(_knowledge_base(args).as_tool())
     if getattr(args, "images", False):
         from .toolkits.images import ImageGenerator
 
@@ -181,6 +184,87 @@ async def _openapi(args: argparse.Namespace) -> int:
         return 0
     finally:
         await toolkit.aclose()
+
+
+def _embedder(model: str | None) -> Any:
+    """Real embeddings when a key for them is set; the offline hasher when not."""
+    import os
+
+    from .memory.semantic import HashEmbedder, ProviderEmbedder
+
+    if os.environ.get("OPENAI_API_KEY"):
+        from .llm_providers import OpenAIProvider
+
+        return ProviderEmbedder(OpenAIProvider(), model or "text-embedding-3-small")
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        from .llm_providers import GeminiProvider
+
+        return ProviderEmbedder(GeminiProvider(), model)
+    print("(no embedding key is set — using the offline hashing embedder, which "
+          "matches words, not meaning)", file=sys.stderr)
+    return HashEmbedder()
+
+
+def _knowledge_base(args: argparse.Namespace) -> Any:
+    from .knowledge import KnowledgeBase
+
+    return KnowledgeBase(args.store, embedder=_embedder(getattr(args, "embed_model", None)),
+                         namespace=getattr(args, "namespace", "") or "")
+
+
+async def _knowledge(args: argparse.Namespace) -> int:
+    from .knowledge import vector_store, vector_stores
+
+    if args.action == "stores":
+        print(f"{'store':<22} needs")
+        for row in vector_stores():
+            print(f"{row['name']:<22} {row['needs'] or 'nothing'}")
+        return 0
+    if not args.store:
+        raise SystemExit(f"knowledge {args.action} needs --store: a name or a URL, "
+                         "e.g. sqlite:///knowledge.db or qdrant://localhost:6333/docs")
+    if args.action == "check":
+        store = vector_store(args.store)
+        try:
+            report = await store.check()
+        finally:
+            await store.aclose()
+        for row in report["steps"]:
+            mark = "ok  " if row["ok"] else "FAIL"
+            detail = f"  {row['detail']}" if row["detail"] else ""
+            print(f"{mark} {row['step']:<18} {row['seconds']:>7.3f}s{detail}")
+        print(f"\n{report['store']} {'works' if report['ok'] else 'does not work'}")
+        return 0 if report["ok"] else 1
+    kb = _knowledge_base(args)
+    try:
+        if args.action == "add":
+            if not args.items:
+                raise SystemExit("knowledge add takes files or URLs to add")
+            for item in args.items:
+                added = await (kb.add(url=item) if item.startswith(("http://", "https://"))
+                               else kb.add(path=item))
+                print(f"{added.id}: " + ("unchanged" if added.unchanged
+                                         else f"{added.chunks} passages"))
+            return 0
+        if args.action == "delete":
+            for item in args.items:
+                await kb.delete(item)
+                print(f"{item}: removed")
+            return 0
+        found = await kb.search(" ".join(args.items), k=args.limit)
+        if args.json:
+            print(json.dumps([{**p.to_dict(), "chunk": p.chunk} for p in found], indent=2,
+                             ensure_ascii=False))
+            return 0
+        for number, passage in enumerate(found, 1):
+            where = passage.title or passage.source or passage.document
+            print(f"{number}. [{passage.score:.3f}] {where}\n   "
+                  + " ".join(passage.text.split())[:300])
+        if not found:
+            print("nothing matches")
+        return 0
+    finally:
+        await kb.aclose()
 
 
 async def _image(args: argparse.Namespace) -> int:
@@ -942,6 +1026,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tools", action="store_true",
                        help="give it the built-in tools (time, maths, web search "
                             "and fetch)")
+        p.add_argument("--knowledge", default=None, metavar="STORE",
+                       help="a knowledge base it can search: a vector store's name "
+                            "or URL, e.g. qdrant://localhost:6333/docs")
         p.add_argument("--images", action="store_true",
                        help="let it generate images (Gemini, OpenAI or Replicate, "
                             "by the key that is set)")
@@ -1109,6 +1196,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="only this site (repeatable)")
     search.add_argument("--json", action="store_true")
 
+    knowledge = sub.add_parser(
+        "knowledge", help="a knowledge base: add documents, search, check a vector store")
+    knowledge.add_argument("action", choices=["stores", "check", "add", "search", "delete"])
+    knowledge.add_argument("items", nargs="*",
+                           help="files or URLs to add, the question to search for, or "
+                                "document ids to delete")
+    knowledge.add_argument("--store", default=None, metavar="URL",
+                           help="the vector store: sqlite:///knowledge.db, "
+                                "qdrant://host:6333/docs, pgvector://user:pw@host/db, …")
+    knowledge.add_argument("--namespace", default="",
+                           help="keep this knowledge base apart from others in the store")
+    knowledge.add_argument("--embed-model", default=None, help="the embedding model")
+    knowledge.add_argument("--limit", type=int, default=5)
+    knowledge.add_argument("--json", action="store_true")
+
     image = sub.add_parser(
         "image", help="generate an image, or list the image engines and which are set up")
     image.add_argument("prompt", nargs="*", help="what to draw; none lists the engines")
@@ -1230,6 +1332,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_a2a(args))
         if args.command == "openapi":
             return asyncio.run(_openapi(args))
+        if args.command == "knowledge":
+            return asyncio.run(_knowledge(args))
         if args.command == "approvals":
             return asyncio.run(_approvals(args))
         if args.command == "image":

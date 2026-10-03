@@ -111,6 +111,7 @@ def test_every_native_tool_from_the_tooling_panel_exists():
     assert callable(toolkits.make_search_tool)           # web search
     assert callable(ah.Browser) and callable(ah.computer_tool)   # browser & computer use
     assert callable(ah.ImageGenerator) and callable(toolkits.image_tools)  # image generation
+    assert callable(ah.KnowledgeBase) and callable(ah.vector_store)        # RAG, vector stores
     assert callable(toolkits.parse_document)             # document parsing & OCR
     assert callable(toolkits.bar_chart)                  # chart & report rendering
     assert callable(toolkits.render_report)

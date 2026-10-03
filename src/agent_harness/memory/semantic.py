@@ -19,7 +19,7 @@ from .base import MemoryRecord, MemoryStore
 from .trace import Trace
 
 __all__ = ["Embedder", "HashEmbedder", "ProviderEmbedder", "VectorStore", "SemanticMemory",
-           "cosine"]
+           "DatabaseIndex", "cosine"]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -114,14 +114,79 @@ class VectorStore:
             self.path.unlink()
 
 
+class DatabaseIndex:
+    """Memory's index in a vector database — past what one process can scan.
+
+        from agent_harness.knowledge import vector_store
+
+        memory = SemanticMemory(store, embedder=embedder,
+                                index=vector_store("qdrant://host:6333/memory"))
+
+    Each record is stored with its scope and its owner, and a search is held to
+    them in the database, not after the fact — so a tenant's memory is never
+    even fetched for another. A record with no owner on an axis is shared, as
+    it is everywhere else.
+    """
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+        self._ready = False
+
+    async def add(self, vector: list[float], record: MemoryRecord) -> None:
+        from ..knowledge.base import VectorRecord
+
+        if not self._ready:
+            await self.store.ensure(len(vector))
+            self._ready = True
+        await self.store.upsert([VectorRecord(record.id, vector, record.text, {
+            "scope": record.scope, "kind": record.kind,
+            # "" for "nobody in particular", so it can be asked for by name.
+            "user_id": record.user_id or "", "tenant_id": record.tenant_id or "",
+            "session_id": record.session_id or "",
+            "record": record.model_dump_json()})])
+
+    async def search(self, vector: list[float], *, limit: int = 5,
+                     scope: str | None = None, min_score: float = 0.0,
+                     trace: Trace | None = None) -> list[tuple[float, MemoryRecord]]:
+        if not self._ready:
+            await self.store.ensure(len(vector))
+            self._ready = True
+        wanted: dict[str, Any] = {"scope": scope} if scope is not None else {}
+        for axis, value in (trace.filters() if trace is not None else {}).items():
+            wanted[axis] = {"$in": [value, ""]}
+        out = []
+        for hit in await self.store.query(vector, k=limit, filter=wanted or None):
+            if hit.score <= min_score:
+                continue
+            try:
+                out.append((hit.score, MemoryRecord(**json.loads(hit.metadata["record"]))))
+            except (KeyError, ValueError, TypeError):
+                continue
+        return out
+
+    async def clear(self) -> None:
+        await self.store.clear()
+        self._ready = False
+
+
 class SemanticMemory(MemoryStore):
-    """A MemoryStore that also retrieves by meaning. Wraps any other store."""
+    """A MemoryStore that also retrieves by meaning. Wraps any other store.
+
+    `index` is where the vectors are kept: by default in this process, exact
+    and good to about fifty thousand records. Give it a vector database —
+    `index=vector_store("pgvector://…")`, or any `agent_harness.knowledge`
+    store — and it is good to as many as the database is.
+    """
 
     def __init__(self, store: MemoryStore, *, embedder: Embedder | None = None,
-                 index: VectorStore | None = None, min_score: float = 0.05) -> None:
+                 index: Any = None, min_score: float = 0.05) -> None:
         self.store = store
         self.embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        if index is not None and hasattr(index, "upsert") and hasattr(index, "query"):
+            index = DatabaseIndex(index)
         self.index = index if index is not None else VectorStore()
+        #: The index is a database: it is asked, not scanned.
+        self.remote = isinstance(self.index, DatabaseIndex)
         self.min_score = min_score
         self._lock = asyncio.Lock()
 
@@ -129,8 +194,11 @@ class SemanticMemory(MemoryStore):
         await self.store.append(record)
         if record.text.strip():
             vector = record.embedding or (await self.embedder.embed([record.text]))[0]
-            async with self._lock:
-                self.index.add(vector, record)
+            if self.remote:
+                await self.index.add(vector, record)
+            else:
+                async with self._lock:
+                    self.index.add(vector, record)
         return record
 
     async def all(self, scope: str | None = None, *, limit: int | None = None,
@@ -142,7 +210,10 @@ class SemanticMemory(MemoryStore):
                     trace: Trace | None = None) -> None:
         await self.store.clear(scope, trace=trace)
         if scope is None and trace is None:
-            self.index.clear()
+            if self.remote:
+                await self.index.clear()
+            else:
+                self.index.clear()
 
     async def read_doc(self, name: str, *, trace: Trace | None = None) -> str:
         return await self.store.read_doc(name, trace=trace)
@@ -156,12 +227,14 @@ class SemanticMemory(MemoryStore):
 
     async def search(self, query: str, *, scope: str | None = None, limit: int = 5,
                      trace: Trace | None = None) -> list[MemoryRecord]:
-        if not query.strip() or len(self.index) == 0:
+        if not query.strip() or (not self.remote and len(self.index) == 0):
             return await self.store.search(query, scope=scope, limit=limit,
                                            trace=trace)
         vector = (await self.embedder.embed([query]))[0]
         hits = self.index.search(vector, limit=limit, scope=scope,
                                  min_score=self.min_score, trace=trace)
+        if self.remote:
+            hits = await hits
         if not hits:
             return await self.store.search(query, scope=scope, limit=limit,
                                            trace=trace)
@@ -171,5 +244,6 @@ class SemanticMemory(MemoryStore):
                             limit: int = 5, trace: Trace | None = None
                             ) -> list[tuple[float, MemoryRecord]]:
         vector = (await self.embedder.embed([query]))[0]
-        return self.index.search(vector, limit=limit, scope=scope,
+        hits = self.index.search(vector, limit=limit, scope=scope,
                                  min_score=self.min_score, trace=trace)
+        return await hits if self.remote else hits

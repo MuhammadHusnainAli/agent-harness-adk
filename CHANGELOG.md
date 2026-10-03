@@ -8,6 +8,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Knowledge bases and vector stores — `KnowledgeBase`, `vector_store`**
+- `KnowledgeBase(store, embedder=)`: `add(text | path= | url=, id=, title=,
+  metadata=)`, `add_many`, `search(query, k=, filter=)`, `delete(id)`,
+  `as_tool(filter=)`. Documents are cut into overlapping passages at paragraph
+  and sentence boundaries, labelled with their headings, embedded in batches
+  and stored under the document's id. Re-adding replaces; an unchanged document
+  costs one embedding and no write; a shorter version leaves nothing stale.
+- Search orders candidates by meaning and by shared words (reciprocal rank
+  fusion), with `reranker=`, `min_score=` and `namespace=`. The tool returns
+  each passage with its document, and its `filter=` cannot be removed by the
+  model.
+- `VectorStore`: `ensure`, `upsert`, `query`, `delete`, `count`, `clear`,
+  `check`. One filter language (`$in`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`,
+  ANDed keys), string ids on every store, and scores returned as cosine
+  similarity whatever the database reports. HTTP stores retry 429, 5xx and
+  timeouts and redact keys from errors.
+- Stores: in memory, SQLite, Qdrant, Chroma, Weaviate, Milvus/Zilliz, Pinecone,
+  OpenSearch (Amazon OpenSearch Service and Serverless with SigV4),
+  Elasticsearch, pgvector, Redis, MongoDB Atlas, Azure AI Search, Cloudflare
+  Vectorize, Upstash, Vertex AI Vector Search, Amazon S3 Vectors — and
+  `BedrockKnowledgeBase` as a retriever. `vector_store(name_or_url)`,
+  `vector_stores()`. No dependency is added; pgvector, Redis and MongoDB use
+  their drivers when installed.
+- `SemanticMemory(index=<vector store>)` keeps memory's index in a database,
+  filtered by scope, user, tenant and session there (`DatabaseIndex`).
+- `agent-harness knowledge stores | check | add | search | delete --store URL`,
+  and `--knowledge URL` on `run` and `chat`.
+- `tests/test_knowledge_live.py`, run against the stores named in
+  `AGENT_HARNESS_VECTOR_STORES`. `examples/24_knowledge.py`.
+
 **Approvals that outlive the process — `Harness(approvals=...)`, `agent.resume_approval`**
 - With an approval store on the harness, a tool call that needs a person and
   has no approver to ask no longer ends in a refusal: the run stops at that

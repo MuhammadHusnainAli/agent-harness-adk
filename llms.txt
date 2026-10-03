@@ -59,6 +59,7 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [21_browser](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/21_browser.py): Browser and computer use: an agent opens pages and fills in a form by the page's numbered elements, then works the same browser by mouse and screenshot.
 - [22_images](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/22_images.py): Image generation: a job watched as it runs, reference images, a fallback engine, and an agent that makes a picture and a variation of it.
 - [23_approvals](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/23_approvals.py): Approval that survives a restart: a run stops to ask, is stored in a database, is approved by another process ten hours later and carries on.
+- [24_knowledge](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/24_knowledge.py): A knowledge base: documents chunked, embedded and stored in a vector store, searched by meaning and by words, and an agent held to what it may see.
 
 ## Optional
 
