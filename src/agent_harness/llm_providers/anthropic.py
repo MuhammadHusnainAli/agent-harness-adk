@@ -14,7 +14,9 @@ from typing import Any, ClassVar
 
 from ..errors import ProviderError
 from ..types import (
+    DocumentBlock,
     ImageBlock,
+    MediaBlock,
     Message,
     ModelResponse,
     StreamEvent,
@@ -24,7 +26,15 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import CompletionRequest, Provider, ProviderField, normalise_model, sse_events
+from .base import (
+    CompletionRequest,
+    Provider,
+    ProviderField,
+    media_data,
+    media_note,
+    normalise_model,
+    sse_events,
+)
 from .parameters import ParameterPlan, nearest_effort
 from .resilience import classify
 
@@ -164,6 +174,7 @@ class AnthropicProvider(Provider):
         ProviderField(name="base_url", type="url", default="https://api.anthropic.com",
                       description="Override for a proxy or gateway."),
     )
+    modalities: ClassVar[frozenset[str]] = frozenset({"image", "document"})
     capabilities: ClassVar[frozenset[str]] = frozenset({
         "streaming", "tools", "vision", "thinking", "json_schema", "prompt_caching",
         "list_models"})
@@ -252,10 +263,17 @@ class AnthropicProvider(Provider):
         if isinstance(block, ToolResultBlock):
             return {"type": "tool_result", "tool_use_id": block.tool_use_id,
                     "content": block.content, "is_error": block.is_error}
-        if isinstance(block, ImageBlock):
-            source = ({"type": "url", "url": block.url} if block.url else
-                      {"type": "base64", "media_type": block.media_type, "data": block.data})
-            return {"type": "image", "source": source}
+        if isinstance(block, (ImageBlock, DocumentBlock)) and (
+                isinstance(block, ImageBlock) or block.media_type == "application/pdf"):
+            kind = "image" if isinstance(block, ImageBlock) else "document"
+            if block.url and not block.inline:
+                return {"type": kind, "source": {"type": "url", "url": block.url}}
+            data = media_data(block)
+            if data is not None:
+                return {"type": kind, "source": {
+                    "type": "base64", "media_type": block.media_type, "data": data}}
+        if isinstance(block, MediaBlock):
+            return {"type": "text", "text": media_note(block)}
         return {"type": "text", "text": str(block)}
 
     def _encode_messages(self, messages: list[Message]) -> tuple[list[dict], list[str]]:

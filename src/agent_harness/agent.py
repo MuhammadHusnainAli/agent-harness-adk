@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from .attachments import prepare_attachments
 from .context import ContextAssembler, ContextCompactor, close_open_tool_calls
 from .errors import (
     AuthenticationError,
@@ -61,9 +62,11 @@ from .types import (
     ModelResponse,
     RunResult,
     StreamEvent,
+    TextBlock,
     ToolCall,
     ToolOutcome,
     ToolUseBlock,
+    attach,
     new_id,
 )
 from .versioning import AgentVersion
@@ -88,6 +91,20 @@ def _enabled(value: bool | str) -> bool:
     raise ConfigurationError(
         f"runtime_agents must be enable/disable (or a bool) — got {value!r}"
     )
+
+
+class _Leaving:
+    """Takes a run off the stop controller's list on the way out, whatever the
+    way out is. A run whose caller cancels it must not be left "running"."""
+
+    def __init__(self, control: Any, run_id: str) -> None:
+        self.control, self.run_id = control, run_id
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> None:
+        self.control.leave(self.run_id)
 
 
 _YES = {"true", "yes", "on", "1", "enable", "enabled", "local", "isolated"}
@@ -820,6 +837,7 @@ class Agent:
         model: str | None = None,
         notebook: Notebook | None = None,
         sandbox_id: str | None = None,
+        attachments: Iterable[Any] = (),
     ) -> AsyncIterator[StreamEvent]:
         harness = self.harness
         run_id = run_id or new_id("run")
@@ -840,6 +858,8 @@ class Agent:
 
         task_message = task if isinstance(task, Message) else Message.user(str(task))
         task_text = task_message.text
+        # Whatever came with the task that is not text: files, images, audio.
+        attached = [*task_message.media, *attachments]
 
         result = RunResult(agent=self.name, run_id=run_id, session_id=session_obj.id)
         profile = self.mode
@@ -854,8 +874,11 @@ class Agent:
             result.todos, result.sources = notebook.todos, notebook.sources
         files_before: dict[str, tuple[int, int]] | None = None
 
-        with harness.tracer.span(f"agent:{self.name}", kind="run", task=task_text[:120],
-                                 model=model) as span:
+        # However the run ends — finished, failed, or abandoned by a caller who
+        # stopped listening — it stops counting as running.
+        with _Leaving(harness.control, run_id), harness.tracer.span(
+                f"agent:{self.name}", kind="run", task=task_text[:120],
+                model=model) as span:
             result.trace_id = span.trace_id
             # A conversation being continued starts from what was said. A run
             # that is not continuing one starts clean, and is added to the
@@ -919,12 +942,28 @@ class Agent:
                     raise PermissionDenied(f"{self.name} may not run: {started.reason}",
                                            reason=started.reason)
                 self._check_mode()
+                if attached:
+                    # Sent as they are where the model can take them; read or
+                    # transcribed into text where it cannot. Text made that way
+                    # passes the same input checks as anything else coming in.
+                    ready = await prepare_attachments(
+                        attached, self.provider, model, speech=harness.speech)
+                    for block in ready:
+                        if isinstance(block, TextBlock):
+                            block.text = self.content_guardrails.check(
+                                block.text, where="input", label="attachment")
+                    task_message.content[:0] = ready
+                    harness.audit.record(
+                        self.name, "attachments", target=str(len(ready)),
+                        decision="ok", run_id=run_id,
+                        kinds=[getattr(b, "type", "text") for b in ready],
+                        names=[attach(a).label for a in attached])
                 if messages is None:
                     notice = await self._rejoin(session_obj, sandbox_id)
                     if notice:
                         # Said in the conversation itself, so it is still there
                         # the next time this history is read.
-                        task_message.content[0].text = f"{notice}\n\n{task_text}"
+                        task_message.content[-1].text = f"{notice}\n\n{task_text}"
                 if profile and profile.collect_files and self.workspace is not None:
                     # Also what starts a sandbox — so one that cannot start
                     # ends the run here, before a model call is paid for.
@@ -1477,6 +1516,32 @@ class Agent:
                 run_id=run_id, tool=call.name, error=outcome.is_error,
             )
             return outcome
+
+    async def call_tool(self, name: str, args: dict[str, Any] | None = None, *,
+                        run_id: str = "", step: int = 0,
+                        guard: BudgetGuard | None = None,
+                        result: RunResult | None = None) -> ToolOutcome:
+        """Run one of this agent's tools under all of its rails, outside a run.
+
+        For when something other than this agent's own loop decides which tool
+        to call — a realtime voice model, a workflow of your own. The call still
+        passes the guardrails, the hooks, the permission gate, the audit trail
+        and the budget, exactly as it would have inside a run. Never raises: a
+        refusal or a failure comes back as an outcome with `is_error` set.
+        """
+        guard = guard or self.harness.guard
+        call = ToolUseBlock(name=name, input=dict(args or {}))
+        ctx = ToolContext(
+            agent=self.name, run_id=run_id, step=step, workspace=self.workspace,
+            memory=self.memory, harness=self.harness,
+            state={"result": result or RunResult(agent=self.name, run_id=run_id),
+                   "guard": guard, "subagent_memory": None, "notebook": None})
+        try:
+            return await self._run_tool(call, ctx=ctx, guard=guard, run_id=run_id,
+                                        step=step)
+        except (BudgetExceeded, StopRequested) as exc:
+            return ToolOutcome(call_id=call.id, name=name, is_error=True,
+                               content=f"Not run: {exc}")
 
     # ------------------------------------------------------------------
     # delegation

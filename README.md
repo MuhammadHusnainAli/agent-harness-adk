@@ -447,6 +447,139 @@ including a race of eight saves from one version. S3 and GCS share the Azure
 code path and have not; `tests/test_sessions.py` lists the environment variables
 that run the suite against yours.
 
+## Attachments: images, files, audio, video
+
+Hand an agent whatever you have. Each thing reaches the model in the form the
+model can take:
+
+```python
+result = await agent.run(
+    "What does the contract say about notice, and does the call agree?",
+    attachments=["contract.pdf", "call.mp3", "whiteboard.jpg", "figures.xlsx"],
+)
+```
+
+| | Claude | GPT | Gemini | others (Groq, Ollama, …) |
+|---|---|---|---|---|
+| image | as an image | as an image | as an image | as an image |
+| PDF | as the PDF | as the PDF | as the PDF | read here, sent as text |
+| Word, CSV, Markdown, JSON, … | read here, sent as text | same | same | same |
+| audio | transcribed, sent as text | audio models hear it; others get a transcript | hears it | transcribed |
+| video | — | — | watches it | — |
+
+- **Native where the model can, text where it cannot.** A file the model does
+  not read is read here with `parse_document`; a recording it cannot hear is
+  transcribed with whatever you gave the harness — `Harness(speech=OpenAISpeech())`.
+  So the same line works on every provider.
+- **It says so before it spends anything.** A video for a model that cannot
+  watch, a recording with nothing to transcribe it, a file that is not there or
+  is over 20 MB: the run ends with the reason, and no model call is made.
+- **Text made from an attachment is input like any other.** It passes the same
+  guardrails as the task — a document is the most common place for an injected
+  instruction to hide.
+- **A file is pointed at, not copied.** `attach("report.pdf")` keeps the path
+  and reads it when the message is sent, so a saved session holds a reference
+  rather than megabytes of base64. Bytes that exist only in memory —
+  `attach(data, "audio/wav")` — do travel with it.
+- **Nothing a model cannot take is ever sent as its bytes.** If the file has
+  gone, or the model changed, the model is told in a line that an attachment was
+  not sent.
+
+```python
+from agent_harness import Message, attach
+
+Message.user("Compare these.", attachments=["before.png", "after.png"])
+attach("https://example.com/clip.mp4")           # a URL the provider fetches
+provider.accepts(attach("call.mp3"), "gpt-4.1")  # False: it will be transcribed
+```
+
+Not yet: tools that *return* images, and uploads past 20 MB through a
+provider's file API.
+
+## Voice: agents you talk to
+
+```python
+from agent_harness import Agent
+from agent_harness.voice import OpenAISpeech, RealtimeAgent, VoiceAgent
+
+agent = Agent("concierge", "Help callers with their bookings.", mode="voice",
+              tools=[find_booking])
+
+voice = VoiceAgent(agent, speech=OpenAISpeech())        # listen · think · speak
+voice = RealtimeAgent(agent, provider="openai")         # one speech-to-speech model
+
+async for event in voice.run(microphone()):             # 16-bit PCM in
+    if event.type == "audio":
+        speaker.write(event.audio)                      # 16-bit PCM out
+    elif event.type == "interrupted":
+        speaker.flush()                                 # they spoke over it
+```
+
+Two ways to build it, used the same way:
+
+| | `VoiceAgent` | `RealtimeAgent` |
+|---|---|---|
+| how | speech → text → your agent → speech | audio straight into a realtime model |
+| models | any of the twenty providers | OpenAI Realtime, Gemini Live |
+| time to first sound | a transcription and a first sentence | the lowest there is |
+| budgets, memory, audit, tools | all of them, unchanged | tools run under every rail |
+| guardrails on what is said | before it is spoken | on the transcript, after |
+| turn-taking | here: `EnergyVAD`, or your own | the model's own |
+
+`mode="voice"` makes the agent write for the ear — short sentences, no markdown,
+a few words before a tool call so a lookup is not a silence.
+
+What makes it a conversation rather than a queue:
+
+- **It starts speaking before it has finished thinking.** The answer is cut into
+  sentences as the model writes them — the first at a clause, sooner still — and
+  each is synthesised while the next is being written.
+- **It stops when you speak.** Speech over an answer cancels the rest, and the
+  conversation keeps only what was actually said aloud: the agent is not left
+  believing it told you something you never heard.
+- **It waits for you to finish.** If you pause and carry on before anything has
+  been said back, the two halves are transcribed and answered as one turn.
+- **It knows when someone is speaking.** `EnergyVAD` measures speech against the
+  room — the quietest tenth of the last few seconds, so a fan or a hum is the
+  room, not a voice. `silence_ms` is the dial between cutting people off and
+  awkward pauses. A neural detector (Silero, WebRTC) plugs in where it goes.
+- **Every turn is timed.** `turn_end` carries `stt_ms`, `first_token_ms` and
+  `first_audio_ms`; `voice.latency` and `harness.health` keep them.
+
+```python
+VoiceAgent(agent, speech=OpenAISpeech(voice="marin", language="en"),
+           vad=EnergyVAD(16_000, silence_ms=400),
+           greeting="Hello, how can I help?", tool_filler="One moment.",
+           output_rate=8000)                          # a phone line
+
+RealtimeAgent(agent, OpenAIRealtime(voice="cedar", turn_detection="semantic_vad"))
+RealtimeAgent(agent, "gemini", rate=16_000, output_rate=8000)
+```
+
+Speech itself is a small contract — `transcribe(audio)` and `synthesize(text)` —
+so Deepgram, ElevenLabs or a model of your own goes where `OpenAISpeech` does.
+`OpenAISpeech(base_url=...)` covers Groq's Whisper, Azure OpenAI and local
+servers. `voice.ulaw_decode` / `ulaw_encode` carry a phone line's audio.
+
+It is the same agent underneath. The conversation is a session — owned, stored
+and resumable like any other (`VoiceAgent(agent, session="ses_…")`). The budget
+still stops it, and says so aloud. And where the audio goes is put to the same
+`model_egress` check as a model call, so a residency policy covers the voice too.
+
+```bash
+agent-harness voice                                   # the microphone (pip install sounddevice)
+agent-harness voice --input question.wav --output answer.wav
+agent-harness voice --realtime openai
+```
+
+Tested without a network: the turn-taking, interruption and latency paths run
+against scripted speech; the WebSocket client against a server written for the
+tests and against the `websockets` library; OpenAI Realtime and Gemini Live
+against scripted sockets that speak their documented protocols. **None of it has
+been run against the live OpenAI or Google services** — do that with your own
+key before you put a caller on it. Echo cancellation is the client's job: played
+through an open speaker, an agent will hear itself.
+
 ## Tools
 
 ```python
@@ -1571,6 +1704,8 @@ agent-harness run "how did Q3 go?" --mode research --depth deep --tools
 agent-harness chat --mode cowork --workspace ./project --approve
 agent-harness run "build it" --mode cowork --sandbox docker://node:22
 agent-harness sandboxes docker --check
+agent-harness run "what does this say?" --attach contract.pdf --attach call.mp3
+agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness models

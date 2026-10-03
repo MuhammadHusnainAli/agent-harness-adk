@@ -6,8 +6,11 @@ JSON for the journal and the session store, and round-trips back again.
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 import time
 import uuid
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,6 +24,11 @@ __all__ = [
     "ToolResultBlock",
     "ThinkingBlock",
     "ImageBlock",
+    "AudioBlock",
+    "VideoBlock",
+    "DocumentBlock",
+    "MediaBlock",
+    "attach",
     "ContentBlock",
     "Message",
     "Usage",
@@ -71,15 +79,151 @@ class ToolResultBlock(_Block):
     is_error: bool = False
 
 
-class ImageBlock(_Block):
-    type: Literal["image"] = "image"
-    media_type: str = "image/png"
+class MediaBlock(_Block):
+    """Something that is not text: an image, a recording, a clip, a file.
+
+    It is held one of three ways. `path` is a file on this machine, read when
+    the message is sent — so a conversation that is saved stays small, and a
+    large file is not copied into every session. `data` is the bytes themselves,
+    base64, for something that exists only in memory. `url` is somewhere the
+    provider can fetch it from.
+    """
+
+    media_type: str = "application/octet-stream"
     data: str = ""  # base64
     url: str | None = None
+    path: str | None = None
+    name: str = ""
+
+    @classmethod
+    def from_path(cls, path: str | Path, media_type: str | None = None,
+                  **fields: Any) -> Any:
+        file = Path(path).expanduser()
+        return cls(path=str(file), name=fields.pop("name", file.name),
+                   media_type=media_type or _guess(file.name, cls), **fields)
+
+    @classmethod
+    def from_bytes(cls, data: bytes, media_type: str | None = None,
+                   **fields: Any) -> Any:
+        kind = media_type or cls.model_fields["media_type"].default
+        return cls(data=base64.b64encode(data).decode(), media_type=kind, **fields)
+
+    @classmethod
+    def from_url(cls, url: str, media_type: str | None = None, **fields: Any) -> Any:
+        name = fields.pop("name", url.rsplit("/", 1)[-1].split("?")[0])
+        return cls(url=url, name=name,
+                   media_type=media_type or _guess(name, cls), **fields)
+
+    @property
+    def inline(self) -> bool:
+        """Can its bytes be sent, rather than only pointed at?"""
+        return bool(self.data or self.path)
+
+    def load(self) -> str:
+        """The content as base64. Raises `FileNotFoundError` if `path` is gone."""
+        if self.data:
+            return self.data
+        if self.path:
+            return base64.b64encode(Path(self.path).read_bytes()).decode()
+        raise FileNotFoundError(self.url or self.name or "attachment")
+
+    def read(self) -> bytes:
+        return base64.b64decode(self.load())
+
+    def size(self) -> int:
+        """Its size in bytes; 0 for one that is only a URL."""
+        if self.data:
+            return len(self.data) * 3 // 4 - self.data[-2:].count("=")
+        if self.path:
+            try:
+                return Path(self.path).stat().st_size
+            except OSError:
+                return 0
+        return 0
+
+    @property
+    def label(self) -> str:
+        return self.name or self.url or self.type
+
+    def __repr__(self) -> str:  # never the bytes
+        where = self.path or self.url or f"{self.size()} bytes"
+        return f"<{type(self).__name__} {self.media_type} {where}>"
+
+    __str__ = __repr__
+
+
+class ImageBlock(MediaBlock):
+    type: Literal["image"] = "image"
+    media_type: str = "image/png"
+
+
+class AudioBlock(MediaBlock):
+    """A recording. Models that listen take it as it is; for one that cannot,
+    the harness transcribes it first, if it has been given something to
+    transcribe with."""
+
+    type: Literal["audio"] = "audio"
+    media_type: str = "audio/wav"
+
+
+class VideoBlock(MediaBlock):
+    type: Literal["video"] = "video"
+    media_type: str = "video/mp4"
+
+
+class DocumentBlock(MediaBlock):
+    """A file to read: a PDF, a Word document, a spreadsheet, a text file.
+
+    A PDF reaches a model that reads PDFs as the PDF, pages and figures and all.
+    Anything else — and a PDF for a model that does not — is read here and its
+    text sent instead.
+    """
+
+    type: Literal["document"] = "document"
+    media_type: str = "application/pdf"
+
+
+_KINDS: dict[str, type[MediaBlock]] = {"image": ImageBlock, "audio": AudioBlock,
+                                       "video": VideoBlock}
+
+
+def _guess(name: str, cls: type[MediaBlock] | None = None) -> str:
+    found = mimetypes.guess_type(name)[0]
+    if found:
+        return found
+    return cls.model_fields["media_type"].default if cls else "application/octet-stream"
+
+
+def attach(source: Any, media_type: str | None = None, **fields: Any) -> MediaBlock:
+    """Whatever you have, as the block that carries it.
+
+        attach("chart.png")                      # an image
+        attach("call.mp3")                       # a recording
+        attach("report.pdf")                     # a document
+        attach("https://example.com/clip.mp4")   # a video the provider fetches
+        attach(pcm_bytes, "audio/wav")           # bytes, with what they are
+
+    The kind is read from the media type: `image/*`, `audio/*`, `video/*`, and
+    everything else is a document.
+    """
+    if isinstance(source, MediaBlock):
+        return source
+    if isinstance(source, (bytes, bytearray)):
+        if not media_type:
+            raise ValueError("bytes need a media_type — attach(data, \"audio/wav\")")
+        kind = _KINDS.get(media_type.split("/", 1)[0], DocumentBlock)
+        return kind.from_bytes(bytes(source), media_type, **fields)
+    text = str(source)
+    kind = _KINDS.get((media_type or _guess(text.split("?")[0])).split("/", 1)[0],
+                      DocumentBlock)
+    if text.startswith(("http://", "https://", "gs://")):
+        return kind.from_url(text, media_type, **fields)
+    return kind.from_path(text, media_type, **fields)
 
 
 ContentBlock = Annotated[
-    TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ImageBlock,
+    TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ImageBlock
+    | AudioBlock | VideoBlock | DocumentBlock,
     Field(discriminator="type"),
 ]
 
@@ -96,8 +240,13 @@ class Message(BaseModel):
 
     # ---- constructors -------------------------------------------------
     @classmethod
-    def user(cls, text: str, **kw: Any) -> Message:
-        return cls(role="user", content=[TextBlock(text=text)], **kw)
+    def user(cls, text: str = "", *, attachments: Any = (), **kw: Any) -> Message:
+        """A user turn. `attachments` are files, URLs or blocks; they go before
+        the text, which is where models expect what the text is about."""
+        blocks: list[Any] = [attach(item) for item in attachments]
+        if text or not blocks:
+            blocks.append(TextBlock(text=text))
+        return cls(role="user", content=blocks, **kw)
 
     @classmethod
     def assistant(cls, content: str | list[ContentBlock], **kw: Any) -> Message:
@@ -121,6 +270,10 @@ class Message(BaseModel):
     @property
     def tool_uses(self) -> list[ToolUseBlock]:
         return [b for b in self.content if isinstance(b, ToolUseBlock)]
+
+    @property
+    def media(self) -> list[MediaBlock]:
+        return [b for b in self.content if isinstance(b, MediaBlock)]
 
     def __str__(self) -> str:  # pragma: no cover - debugging affordance
         return f"{self.role}: {self.text[:120]}"

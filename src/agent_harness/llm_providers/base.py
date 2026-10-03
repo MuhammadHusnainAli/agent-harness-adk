@@ -34,7 +34,7 @@ from ..errors import (
     ProviderUnavailableError,
     RateLimitError,
 )
-from ..types import Message, ModelResponse, StreamEvent, Usage
+from ..types import MediaBlock, Message, ModelResponse, StreamEvent, Usage
 from .parameters import SAMPLING_PARAMETERS, Effort, ParameterPlan
 from .resilience import (
     CircuitBreaker,
@@ -357,6 +357,21 @@ class Provider(ABC):
     capabilities: ClassVar[frozenset[str]] = frozenset()
     #: The sampling parameters this backend accepts. Anything else is dropped.
     parameters: ClassVar[frozenset[str]] = frozenset(SAMPLING_PARAMETERS)
+    #: What a model here can be handed besides text: image · audio · video ·
+    #: document. Anything else the harness turns into text before it is sent —
+    #: a file is read, a recording is transcribed. Set it on an instance to
+    #: correct it for a model this table is wrong about.
+    modalities: ClassVar[frozenset[str]] = frozenset({"image"})
+
+    def accepts(self, block: MediaBlock, model: str = "") -> bool:
+        """Can `model` be sent this attachment as it is?
+
+        A document means a PDF: that is the one file format models read
+        natively. Every other file is read here and sent as its text.
+        """
+        if block.type == "document" and block.media_type != "application/pdf":
+            return False
+        return block.type in self.modalities
 
     def __init__(
         self,
@@ -884,6 +899,25 @@ def _events_from(resp: ModelResponse) -> list[StreamEvent]:
                                   data={"name": use.name, "input": use.input, "id": use.id}))
     events.append(StreamEvent(type="step_end", data={"response": resp.model_dump(mode="json")}))
     return events
+
+
+def media_data(block: MediaBlock) -> str | None:
+    """An attachment's bytes as base64, or None if its file has gone."""
+    try:
+        return block.load()
+    except OSError:
+        return None
+
+
+def media_note(block: MediaBlock) -> str:
+    """What a model is told in place of an attachment it cannot be given.
+
+    Never the block itself: that would put its bytes in the prompt.
+    """
+    if block.inline and media_data(block) is None:
+        return f"[attachment {block.label!r} is no longer available]"
+    return (f"[{block.type} attachment {block.label!r} was not sent: this model "
+            f"cannot take {block.type} input]")
 
 
 def _user_agent() -> str:

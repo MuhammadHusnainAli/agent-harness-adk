@@ -85,6 +85,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--user`, `--tenant`, `--agent`, `--delete`, `--json`, `--backends`.
 - `DurableSessionStore` for writing your own. `examples/12_sessions.py`.
 
+**Attachments — images, files, audio, video**
+- `agent.run(task, attachments=[...])` and `Message.user(text, attachments=[...])`
+  take paths, URLs, bytes or blocks. `attach()`, `AudioBlock`, `VideoBlock`,
+  `DocumentBlock`; `ImageBlock` gains `path` and `name`.
+- Sent natively where the model takes them — PDFs to Claude, GPT and Gemini;
+  audio to Gemini and OpenAI's audio models; video to Gemini — and as text where
+  it does not: files are read with `parse_document`, recordings transcribed with
+  `Harness(speech=...)`. `Provider.modalities` and `Provider.accepts()`.
+- What cannot be sent ends the run before any model call. Text made from an
+  attachment passes the input guardrails. A file is held by path, so saved
+  sessions stay small. `agent-harness run --attach`.
+- `examples/13_multimodal.py`.
+
+**Voice — `agent_harness.voice`**
+- `VoiceAgent`: speech in, the agent's answer spoken back, on any provider.
+  Sentence-by-sentence synthesis that starts before the model has finished,
+  barge-in that keeps only what was heard, turns joined when a pause was
+  mid-sentence, and per-turn latency (`stt_ms`, `first_token_ms`,
+  `first_audio_ms`).
+- `RealtimeAgent`: speech-to-speech over OpenAI Realtime or Gemini Live, with
+  the agent's instructions, its tools run under every rail (`Agent.call_tool`),
+  its budget, and the transcript kept as a session.
+- `EnergyVAD` (adaptive voice-activity detection), `SpeechChunker`,
+  `OpenAISpeech` (any OpenAI-compatible STT/TTS), `FakeSpeech`, a `Resampler`
+  that does not click at chunk joins, µ-law, and a dependency-free `WebSocket`
+  client.
+- `mode="voice"`; `agent-harness voice [--input WAV] [--realtime openai|gemini]`.
+- Audio leaving for transcription, speech or a realtime model passes the
+  `model_egress` hook. `examples/14_voice.py`.
+
 ### Changed
 
 - In a mode, the final allowed step tells the model it is the last and disables
@@ -112,8 +142,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from a stale version.
 - `Harness.local(...)` accepts replacements for any of its file-backed parts.
 
+- A run whose caller cancels it, or stops reading its stream, is taken off the
+  stop controller's list of running agents.
+- A user `Message` carrying non-text blocks no longer loses them when it is the
+  task of a run.
+- `FakeProvider(stream_words=True, stream_delay=...)` streams a reply a word at
+  a time.
+
 ### Fixed
 
+- A sqlite URL such as `sqlite:///./memory.db` pointed at the filesystem root,
+  and `sqlite:////abs/path` at a relative path.
+- An attachment a provider could not encode was sent as its printed form — the
+  raw base64 — instead of being left out.
 - `AzureBlobMemory` raised when asked to delete a blob that was already gone.
 - Resuming a session whose last run was stopped mid-step (a budget, a stop
   request) sent a tool call with no result, which providers reject. Unanswered

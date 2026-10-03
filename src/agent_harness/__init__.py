@@ -214,6 +214,9 @@ from .subagents import Bench, SubAgentFactory, SubAgentSpec
 from .tools import Tool, ToolContext, ToolRegistry, tool
 from .types import (
     Artifact,
+    AudioBlock,
+    DocumentBlock,
+    ImageBlock,
     Message,
     ModelResponse,
     RunResult,
@@ -224,6 +227,8 @@ from .types import (
     ToolResultBlock,
     ToolUseBlock,
     Usage,
+    VideoBlock,
+    attach,
 )
 from .versioning import AgentVersion
 
@@ -233,7 +238,9 @@ __version__ = "0.1.4"
 # first use. `from agent_harness import MCPServer` still works. Governance is
 # the same: only those who turn it on pay for importing it.
 _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
-         "Governance": "governance", "AgentIdentity": "governance"}
+         "Governance": "governance", "AgentIdentity": "governance",
+         "VoiceAgent": "voice", "RealtimeAgent": "voice", "VoiceEvent": "voice",
+         "OpenAISpeech": "voice", "EnergyVAD": "voice"}
 
 
 def __getattr__(name: str):
@@ -454,6 +461,17 @@ __all__ = [
     "StreamEvent",
     "Usage",
     "Artifact",
+    "attach",
+    "ImageBlock",
+    "AudioBlock",
+    "VideoBlock",
+    "DocumentBlock",
+    # voice
+    "VoiceAgent",
+    "RealtimeAgent",
+    "VoiceEvent",
+    "OpenAISpeech",
+    "EnergyVAD",
     "TextBlock",
     "ToolUseBlock",
     "ToolResultBlock",

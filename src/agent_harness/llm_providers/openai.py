@@ -14,7 +14,10 @@ from typing import Any, ClassVar
 
 from ..errors import ProviderError
 from ..types import (
+    AudioBlock,
+    DocumentBlock,
     ImageBlock,
+    MediaBlock,
     Message,
     ModelResponse,
     StreamEvent,
@@ -24,7 +27,14 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import CompletionRequest, Provider, ProviderField, sse_events
+from .base import (
+    CompletionRequest,
+    Provider,
+    ProviderField,
+    media_data,
+    media_note,
+    sse_events,
+)
 from .parameters import SAMPLING_PARAMETERS, ParameterPlan, nearest_effort
 from .resilience import classify
 
@@ -69,6 +79,7 @@ class OpenAIProvider(Provider):
         ProviderField(name="project", env=("OPENAI_PROJECT_ID",),
                       description="Bill a specific project."),
     )
+    modalities: ClassVar[frozenset[str]] = frozenset({"image", "document"})
     capabilities: ClassVar[frozenset[str]] = frozenset({
         "streaming", "tools", "vision", "thinking", "json_schema", "embeddings",
         "list_models"})
@@ -213,9 +224,11 @@ class OpenAIProvider(Provider):
                         "function": {"name": block.name,
                                      "arguments": json.dumps(block.input)},
                     })
-                elif isinstance(block, ImageBlock):
-                    url = block.url or f"data:{block.media_type};base64,{block.data}"
-                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                elif isinstance(block, MediaBlock):
+                    part = self._encode_media(block, req.model)
+                    parts.append(part)
+                    if part["type"] == "text":
+                        text_chunks.append(part["text"])
 
             if msg.role == "assistant":
                 if not text_chunks and not tool_calls:
@@ -228,10 +241,45 @@ class OpenAIProvider(Provider):
             else:
                 if not parts:
                     continue
-                has_image = any(p["type"] == "image_url" for p in parts)
+                has_media = any(p["type"] != "text" for p in parts)
                 out.append({"role": "user",
-                            "content": parts if has_image else "\n".join(text_chunks)})
+                            "content": parts if has_media else "\n".join(text_chunks)})
         return out
+
+    _AUDIO_FORMATS: ClassVar[dict[str, str]] = {
+        "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+        "audio/mpeg": "mp3", "audio/mp3": "mp3"}
+
+    def accepts(self, block: MediaBlock, model: str = "") -> bool:
+        if block.type not in self.modalities and block.type != "audio":
+            return False
+        if block.type == "audio":
+            # Only the audio models listen, and only to WAV or MP3 they are sent.
+            return ("audio" in self.modalities or "audio" in model) and (
+                block.inline and block.media_type in self._AUDIO_FORMATS)
+        if block.type == "document":
+            return block.media_type == "application/pdf" and block.inline
+        return True
+
+    def _encode_media(self, block: MediaBlock, model: str = "") -> dict[str, Any]:
+        if not self.accepts(block, model):
+            return {"type": "text", "text": media_note(block)}
+        if isinstance(block, ImageBlock) and block.url and not block.inline:
+            return {"type": "image_url", "image_url": {"url": block.url}}
+        data = media_data(block) if block.inline else None
+        if data is None:
+            return {"type": "text", "text": media_note(block)}
+        if isinstance(block, ImageBlock):
+            return {"type": "image_url", "image_url": {
+                "url": f"data:{block.media_type};base64,{data}"}}
+        if isinstance(block, AudioBlock) and block.media_type in self._AUDIO_FORMATS:
+            return {"type": "input_audio", "input_audio": {
+                "data": data, "format": self._AUDIO_FORMATS[block.media_type]}}
+        if isinstance(block, DocumentBlock) and block.media_type == "application/pdf":
+            return {"type": "file", "file": {
+                "filename": block.name or "document.pdf",
+                "file_data": f"data:application/pdf;base64,{data}"}}
+        return {"type": "text", "text": media_note(block)}
 
     def _payload(self, req: CompletionRequest, *, stream: bool = False) -> dict[str, Any]:
         reasoning = req.model.startswith(self.reasoning_prefixes)

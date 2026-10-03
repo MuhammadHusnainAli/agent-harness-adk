@@ -91,6 +91,9 @@ class OpenAICompatibleProvider(OpenAIProvider):
              description="Sent as a bearer token, if the server wants one."),
     )
     capabilities: ClassVar[frozenset[str]] = _CAPS
+    # Vision is common among the models served this way; PDFs and audio are not,
+    # so those are read or transcribed here and sent as text.
+    modalities: ClassVar[frozenset[str]] = frozenset({"image"})
 
     def __init__(self, api_key: str | None = None, *, base_url: str | None = None,
                  **kw: Any) -> None:

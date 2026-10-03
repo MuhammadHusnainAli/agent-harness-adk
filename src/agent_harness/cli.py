@@ -115,7 +115,8 @@ async def _run(args: argparse.Namespace) -> int:
     result = None
     try:
         if args.stream:
-            async for event in agent.stream(args.task, session=args.session):
+            async for event in agent.stream(args.task, session=args.session,
+                                            attachments=args.attach):
                 if event.type == "text":
                     print(event.text, end="", flush=True)
                 elif event.type == "tool_result":
@@ -128,7 +129,8 @@ async def _run(args: argparse.Namespace) -> int:
                     result = event.data["result"]
             print()
         else:
-            result = await agent.run(args.task, session=args.session)
+            result = await agent.run(args.task, session=args.session,
+                                     attachments=args.attach)
             print(result.output)
 
         if result is None:
@@ -146,6 +148,97 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"\n[{result.steps} steps · ${result.cost_usd:.4f} · "
               f"session {result.session_id}{where}]", file=sys.stderr)
         return 1 if result.error else 0
+    finally:
+        await harness.aclose()
+
+
+async def _voice(args: argparse.Namespace) -> int:
+    """Talk to an agent: from a WAV file, or live through the microphone."""
+    from .voice import OpenAISpeech, RealtimeAgent, VoiceAgent, duration_ms, unwav, wav
+
+    args.mode = args.mode or "voice"
+    harness = _harness(args)
+    agent = _agent(args, harness)
+    rate = 16_000
+    try:
+        if args.realtime:
+            talker: Any = RealtimeAgent(agent, args.realtime, rate=rate,
+                                        session=args.session)
+        else:
+            talker = VoiceAgent(
+                agent, rate=rate, session=args.session, greeting=args.greeting,
+                speech=OpenAISpeech(voice=args.voice, language=args.language))
+        out_rate = talker.output_rate
+
+        if args.input:
+            pcm, file_rate = unwav(Path(args.input).read_bytes())
+            if file_rate != rate:
+                from .voice import resample
+                pcm = resample(pcm, file_rate, rate)
+
+            async def source() -> Any:
+                # A little quiet at the end, so the last word is heard to end.
+                audio = pcm + bytes(rate * 2)
+                for offset in range(0, len(audio), 640):
+                    yield audio[offset:offset + 640]
+                    await asyncio.sleep(0)
+
+            spoken = bytearray()
+            async for event in talker.run(source()):
+                if event.type == "transcript" and not event.data.get("partial"):
+                    print(f"you   › {event.text}")
+                elif event.type == "audio":
+                    spoken += event.audio
+                elif event.type == "turn_end" and event.text:
+                    first = event.data.get("first_audio_ms")
+                    took = f"  [first sound after {first:.0f} ms]" if first else ""
+                    print(f"agent › {event.text}{took}")
+                elif event.type == "error":
+                    print(f"error: {event.text}", file=sys.stderr)
+            if args.output and spoken:
+                Path(args.output).write_bytes(wav(bytes(spoken), out_rate))
+                print(f"\nwrote {args.output} "
+                      f"({duration_ms(bytes(spoken), out_rate) / 1000:.1f}s)",
+                      file=sys.stderr)
+            print(f"[session {talker.session_id}]", file=sys.stderr)
+            return 0
+
+        try:
+            import sounddevice
+        except ImportError:
+            print("live voice needs a microphone library: pip install sounddevice\n"
+                  "or pass --input question.wav to talk from a file", file=sys.stderr)
+            return 2
+
+        loop = asyncio.get_running_loop()
+        heard: asyncio.Queue[bytes] = asyncio.Queue()
+
+        def captured(data: Any, frames: int, time_info: Any, status: Any) -> None:
+            loop.call_soon_threadsafe(heard.put_nowait, bytes(data))
+
+        async def microphone() -> Any:
+            while True:
+                yield await heard.get()
+
+        print(f"agent-harness {__version__} · talking to {agent.name}. "
+              "Ctrl-C to hang up.\n")
+        with sounddevice.RawInputStream(samplerate=rate, channels=1, dtype="int16",
+                                        blocksize=320, callback=captured), \
+                sounddevice.RawOutputStream(samplerate=out_rate, channels=1,
+                                            dtype="int16") as speaker:
+            async for event in talker.run(microphone()):
+                if event.type == "audio":
+                    await asyncio.to_thread(speaker.write, event.audio)
+                elif event.type == "interrupted":
+                    speaker.abort()
+                    speaker.start()
+                elif event.type == "transcript" and not event.data.get("partial"):
+                    print(f"you   › {event.text}")
+                elif event.type == "turn_end" and event.text:
+                    print(f"agent › {event.text}")
+                elif event.type == "error":
+                    print(f"error: {event.text}", file=sys.stderr)
+        return 0
     finally:
         await harness.aclose()
 
@@ -562,12 +655,30 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run one task and print the answer")
     run.add_argument("task")
     run.add_argument("--stream", action="store_true", help="stream the answer")
+    run.add_argument("--attach", action="append", default=[], metavar="FILE",
+                     help="a file or URL to send with the task: an image, a PDF, a "
+                          "recording, a video, a document (repeatable)")
     run.add_argument("--json", action="store_true", help="also print the full result")
     run.add_argument("--report", action="store_true", help="print the run report")
     common(run)
 
     chat = sub.add_parser("chat", help="an interactive session")
     common(chat)
+
+    voice = sub.add_parser(
+        "voice", help="talk to an agent: live, or from a WAV file")
+    voice.add_argument("--input", default=None, metavar="WAV",
+                       help="a recording to answer, instead of the microphone")
+    voice.add_argument("--output", default=None, metavar="WAV",
+                       help="with --input: where to write the spoken answer")
+    voice.add_argument("--realtime", default=None, choices=["openai", "gemini"],
+                       help="use a speech-to-speech model instead of listen, "
+                            "think, speak")
+    voice.add_argument("--voice", default="alloy", help="the voice to speak in")
+    voice.add_argument("--language", default=None,
+                       help="the language being spoken, e.g. en")
+    voice.add_argument("--greeting", default=None, help="said when the call opens")
+    common(voice)
 
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
@@ -652,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run(args))
         if args.command == "chat":
             return asyncio.run(_chat(args))
+        if args.command == "voice":
+            return asyncio.run(_voice(args))
         if args.command == "models":
             return _models(args)
         if args.command == "providers":

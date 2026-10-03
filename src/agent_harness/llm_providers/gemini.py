@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 from ..errors import ProviderError
 from ..types import (
-    ImageBlock,
+    MediaBlock,
     Message,
     ModelResponse,
     StreamEvent,
@@ -23,7 +23,15 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import CompletionRequest, Provider, ProviderField, normalise_model, sse_events
+from .base import (
+    CompletionRequest,
+    Provider,
+    ProviderField,
+    media_data,
+    media_note,
+    normalise_model,
+    sse_events,
+)
 from .parameters import ParameterPlan, nearest_effort
 from .resilience import classify
 
@@ -94,6 +102,9 @@ class GeminiProvider(Provider):
                       default="https://generativelanguage.googleapis.com/v1beta",
                       description="Override for a proxy or gateway."),
     )
+    modalities: ClassVar[frozenset[str]] = frozenset(
+        {"image", "audio", "video", "document"})
+
     capabilities: ClassVar[frozenset[str]] = frozenset({
         "streaming", "tools", "vision", "thinking", "json_schema", "embeddings",
         "list_models"})
@@ -205,13 +216,18 @@ class GeminiProvider(Provider):
                         "response": {"output": block.content,
                                      "error": block.is_error or None},
                     }})
-                elif isinstance(block, ImageBlock):
-                    if block.data:
+                elif isinstance(block, MediaBlock):
+                    # Gemini takes every kind the same way: the bytes inline, or
+                    # a URI it can fetch (a Files API upload, a YouTube link).
+                    data = media_data(block) if block.inline else None
+                    if data is not None and self.accepts(block):
                         parts.append({"inlineData": {"mimeType": block.media_type,
-                                                     "data": block.data}})
-                    elif block.url:
+                                                     "data": data}})
+                    elif block.url and not block.inline and self.accepts(block):
                         parts.append({"fileData": {"mimeType": block.media_type,
                                                    "fileUri": block.url}})
+                    else:
+                        parts.append({"text": media_note(block)})
             if not parts:
                 continue
             if contents and contents[-1]["role"] == role:

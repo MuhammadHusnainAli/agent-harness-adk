@@ -61,6 +61,11 @@ class Harness:
     #: An `agent_harness.governance.Governance`, or None. Typed loosely so the
     #: governance package is only imported by those who use it.
     governance: Any = None
+    #: Something that turns speech into text and text into speech — an
+    #: `agent_harness.voice.OpenAISpeech`, say. A voice agent speaks through it,
+    #: and a recording attached for a model that cannot listen is transcribed
+    #: by it.
+    speech: Any = None
     _guard: BudgetGuard | None = field(default=None, repr=False)
     _rate: RateGuard | None = field(default=None, repr=False)
 
@@ -191,3 +196,5 @@ class Harness:
         await close_all()
         await self.workspaces.aclose()
         await self.sessions.aclose()
+        if self.speech is not None and hasattr(self.speech, "aclose"):
+            await self.speech.aclose()

@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from .prompts import sections
-from .types import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from .types import MediaBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 
 __all__ = ["estimate_tokens", "ContextAssembler", "ContextCompactor",
            "close_open_tool_calls"]
@@ -35,6 +35,10 @@ def message_tokens(message: Message) -> int:
             total += estimate_tokens(block.content)
         elif isinstance(block, ToolUseBlock):
             total += estimate_tokens(str(block.input)) + 8
+        elif isinstance(block, MediaBlock):
+            # Rough, and deliberately not small: an image or a page of PDF is
+            # around a thousand tokens, and under-counting is what overflows.
+            total += max(1_500, block.size() // 750)
         else:
             total += 16
     return total

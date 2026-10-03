@@ -49,6 +49,7 @@ __all__ = [
     "chat",
     "research",
     "cowork",
+    "voice",
     "resolve_mode",
     "register_mode",
     "citations",
@@ -774,11 +775,46 @@ def cowork(depth: str | None = None, *, ask: Asker | None = None,
     )
 
 
+def voice(depth: str | None = None, *, max_steps: int | None = None) -> Mode:
+    """Spoken conversation: answers written for the ear, and kept short.
+
+    For an agent behind a `VoiceAgent` or a `RealtimeAgent`. The thread is kept
+    by whichever of those is running it, because only it knows how much of an
+    answer was actually heard before the person spoke over it.
+    """
+    level, tier = _depth(depth if depth is not None else "fast")
+    return Mode(
+        name="voice", depth=level, tier=tier if depth is not None else None,
+        description="Spoken conversation: short, plain, written for the ear.",
+        max_steps=max_steps or {"fast": 6, "balanced": 10, "deep": 16}[level],
+        opening=("You are speaking aloud with someone, and everything you write "
+                 "will be read out by a voice. Write for the ear."),
+        guidance=(
+            ("", "Answer in one or two short sentences, then stop. If there is "
+                 "more, offer it rather than say it."),
+            ("", "No lists, headings, markdown, emoji or code — none of it can be "
+                 "spoken. Say numbers, dates and amounts the way a person would "
+                 "say them."),
+            ("", "Ask one question at a time, and only when the answer changes "
+                 "what you do."),
+            ("", "When you need a tool, say a few words first so the silence is "
+                 "explained, then call it."),
+            ("", "What you hear was transcribed and may be slightly wrong. If "
+                 "something does not make sense, say what you heard and ask."),
+            ("", "If you are interrupted, do not start over. Answer what was "
+                 "just said."),
+        ),
+        wrap_up=("This is your last step. Say what you have in a sentence, and "
+                 "what you could not do."),
+    )
+
+
 #: The modes an agent can be built in, by name.
 MODES: dict[str, Callable[..., Mode]] = {
     "chat": chat,
     "research": research,
     "cowork": cowork,
+    "voice": voice,
 }
 
 

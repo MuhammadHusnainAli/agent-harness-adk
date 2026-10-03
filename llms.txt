@@ -48,6 +48,8 @@ Every example runs without an API key - they fall back to a scripted `FakeProvid
 - [10_modes](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/10_modes.py): Modes: a chat that keeps its thread, research with a checked source ledger, and cowork that plans, asks, and hands back files.
 - [11_sandboxes](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/11_sandboxes.py): Sandboxes: cowork inside a Docker container (or any other sandbox), with the files it wrote handed back.
 - [12_sessions](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/12_sessions.py): Sessions in a database: owned, listed by user, continued by another process, and two requests on one chat both keeping their turn.
+- [13_multimodal](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/13_multimodal.py): Attachments: a spreadsheet, an image and a recording handed to an agent, each reaching the model as the model can take it.
+- [14_voice](https://raw.githubusercontent.com/MuhammadHusnainAli/agent-harness-adk/main/examples/14_voice.py): A voice agent: voice-activity detection, a spoken answer that starts before the model finishes, a tool call, and an interruption.
 
 ## Optional
 

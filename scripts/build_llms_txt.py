@@ -71,6 +71,12 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/12_sessions.py",
      "Sessions in a database: owned, listed by user, continued by another "
      "process, and two requests on one chat both keeping their turn."),
+    ("examples/13_multimodal.py",
+     "Attachments: a spreadsheet, an image and a recording handed to an agent, "
+     "each reaching the model as the model can take it."),
+    ("examples/14_voice.py",
+     "A voice agent: voice-activity detection, a spoken answer that starts "
+     "before the model finishes, a tool call, and an interruption."),
 ]
 
 
@@ -188,7 +194,10 @@ GROUPS: list[tuple[str, list[str]]] = [
     ("Context", ["ContextAssembler", "ContextCompactor", "estimate_tokens"]),
     ("Types", ["Message", "ModelResponse", "RunResult", "StreamEvent", "Usage",
                "Artifact", "Todo", "Source", "TextBlock", "ToolUseBlock",
-               "ToolResultBlock"]),
+               "ToolResultBlock", "attach", "ImageBlock", "AudioBlock",
+               "VideoBlock", "DocumentBlock"]),
+    ("Voice", ["VoiceAgent", "RealtimeAgent", "VoiceEvent", "OpenAISpeech",
+               "EnergyVAD"]),
     ("Errors", ["HarnessError", "ConfigurationError", "ProviderError",
                 "RateLimitError", "ToolError", "ToolNotFound", "PermissionDenied",
                 "BudgetExceeded", "GuardrailTripped", "MaxStepsExceeded",

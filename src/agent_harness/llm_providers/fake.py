@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 from collections.abc import Callable
 from typing import Any, ClassVar
 
 from ..errors import ProviderError
-from ..types import Message, ModelResponse, TextBlock, ToolUseBlock, Usage
+from ..types import Message, ModelResponse, StreamEvent, TextBlock, ToolUseBlock, Usage
 from .base import CompletionRequest, Provider
 
 Script = str | Message | ModelResponse | ToolUseBlock | Callable[[CompletionRequest], Any]
@@ -31,13 +32,21 @@ class FakeProvider(Provider):
     description: ClassVar[str] = "A scripted provider for tests: no network, no key, no cost."
     auth_type: ClassVar[str] = "none"
     capabilities: ClassVar[frozenset[str]] = frozenset({"streaming", "tools", "embeddings"})
+    modalities: ClassVar[frozenset[str]] = frozenset(
+        {"image", "audio", "video", "document"})
 
     def __init__(self, responses: list[Script] | None = None, *,
-                 default: str = "done", loop: bool = False, **kw: Any) -> None:
+                 default: str = "done", loop: bool = False,
+                 stream_words: bool = False, stream_delay: float = 0.0,
+                 **kw: Any) -> None:
         super().__init__(api_key="fake", **kw)
         self.responses: list[Script] = list(responses or [])
         self.default = default
         self.loop = loop
+        #: Stream a reply a word at a time, `stream_delay` seconds apart — for
+        #: testing anything that acts on text as it arrives.
+        self.stream_words = stream_words
+        self.stream_delay = stream_delay
         self.requests: list[CompletionRequest] = []
         self.cursor = 0
 
@@ -79,6 +88,24 @@ class FakeProvider(Provider):
                       output_tokens=max(words, 1), calls=1)
         return self._finish(message=message, stop_reason=stop, usage=usage,
                             model=req.model or self.default_model, raw={})
+
+    async def stream(self, req: CompletionRequest) -> Any:
+        if not (self.stream_words or self.stream_delay):
+            async for event in super().stream(req):
+                yield event
+            return
+        response = await self.complete(req)
+        words = response.text.split(" ") if response.text else []
+        for index, word in enumerate(words):
+            if self.stream_delay:
+                await asyncio.sleep(self.stream_delay)
+            yield StreamEvent(type="text",
+                              text=word + (" " if index < len(words) - 1 else ""))
+        for use in response.tool_uses:
+            yield StreamEvent(type="tool_call",
+                              data={"name": use.name, "input": use.input, "id": use.id})
+        yield StreamEvent(type="step_end",
+                          data={"response": response.model_dump(mode="json")})
 
     async def embed(self, texts: list[str], model: str | None = None) -> list[list[float]]:
         return [hash_embedding(t) for t in texts]
