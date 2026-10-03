@@ -118,6 +118,9 @@ class AgentEntry(BaseModel):
     #: An agent served somewhere else over A2A, instead of one built here: its
     #: URL, or {url: ..., token_env: PRICING_TOKEN, timeout: 120}.
     a2a: str | dict[str, Any] | None = None
+    #: The environment variable holding this agent's own API key, for when it
+    #: is served over MCP (`Blueprint.mcp_server`).
+    mcp_key_env: str | None = None
 
 
 class Blueprint(BaseModel):
@@ -414,6 +417,45 @@ class Blueprint(BaseModel):
                 f"{', '.join(sorted(self.workflows)) or 'none'}")
         return Workflow({"name": name, **self.workflows[name]}, agents=agents,
                         tools=self._registry(tools), harness=harness, blueprint=self)
+
+    def mcp_server(self, names: Any = None, *, tools: Any = (), harness: Any = None,
+                   **options: Any) -> Any:
+        """Serve this file's agents over MCP, each behind the key it names.
+
+            agents:
+              billing: {instructions: ..., mcp_key_env: BILLING_MCP_KEY}
+              orders:  {instructions: ..., mcp_key_env: ORDERS_MCP_KEY}
+
+        `names` chooses which agents; left out, every agent that names a key —
+        or all of them, if you pass `api_key=` for a key that opens every one.
+        """
+        import os
+
+        from .harness import Harness
+        from .mcp import MCPAgentServer
+
+        keyed = [n for n, entry in self.agents.items() if entry.mcp_key_env]
+        chosen = list(names) if names is not None else (
+            list(self.agents) if options.get("api_key") or options.get("auth")
+            or not keyed else keyed)
+        shared = harness if harness is not None else Harness()
+        built: dict[str, Any] = {}
+        api_keys: dict[str, Any] = dict(options.pop("api_keys", None) or {})
+        for name in chosen:
+            if name not in self.agents:
+                raise ConfigurationError(
+                    f"no agent {name!r} in this blueprint; declared: "
+                    f"{', '.join(sorted(self.agents)) or 'none'}")
+            variable = self.agents[name].mcp_key_env
+            if variable and name not in api_keys:
+                secret = os.environ.get(variable)
+                if not secret:
+                    raise ConfigurationError(
+                        f"{name}: the environment variable {variable} is not set")
+                api_keys[name] = secret
+        served = {name: self._build(name, built, tools=tools, harness=shared)
+                  for name in chosen}
+        return MCPAgentServer(served, api_keys=api_keys or None, **options)
 
     def memory_store(self) -> Any:
         """The store the file declares, if it declares one."""

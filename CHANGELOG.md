@@ -8,6 +8,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Agents as an MCP server — `MCPAgentServer`**
+- `MCPAgentServer(agents)` serves agents as MCP tools: each agent is one tool
+  taking a `task`. An ASGI application over MCP's streamable HTTP, a built-in
+  server for development (`await server.serve()`), and stdio
+  (`await server.serve_stdio()`).
+- A key per agent: `api_keys={"billing": "sk-…", "orders": "sk-…"}`. A key opens
+  only the agents it was issued for, and the others are not listed or callable.
+  `api_key=` opens every agent; several keys per agent; `None` leaves an agent
+  open; a key can name its `user_id` and `tenant_id`; `auth=` for a check of
+  your own; `add_key` and `revoke_key` while serving. Keys are accepted as
+  `Authorization: Bearer` or `X-API-Key`, compared in constant time, and logged
+  only by id. Each agent is also served alone at `/<name>/mcp`.
+- `conversation_id` carries a conversation across calls, owned by the key.
+  `expose_tools=` serves an agent's own tools through its rails. Output
+  contracts come back as `structuredContent`, artefacts as embedded resources,
+  failures as `isError`.
+- Progress notifications for a caller that sends a progress token; calls end at
+  `timeout`, on `notifications/cancelled`, or when the caller disconnects;
+  `max_concurrency`, `max_queue`, `allowed_origins`, `/healthz`.
+- `mcp_key_env` on a blueprint agent and `Blueprint.mcp_server()`.
+- `agent-harness mcp-serve [--blueprint FILE] [--api-key K] [--key-env AGENT=VAR]
+  [--expose-tools] [--stdio]`.
+- `examples/19_mcp_server.py`.
+
 **OpenAPI → tools — `openapi_tools`, `OpenAPIToolkit`**
 - `openapi_tools(spec)` turns every operation of an OpenAPI document into a tool.
   The document is a file (JSON or YAML), a URL, its text, or a mapping; OpenAPI

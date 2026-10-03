@@ -107,6 +107,44 @@ def _api(spec: str, args: argparse.Namespace) -> Any:
         writes="ask" if getattr(args, "approve", False) else "allow")
 
 
+async def _mcp_serve(args: argparse.Namespace) -> int:
+    import os
+
+    from .mcp import MCPAgentServer
+
+    harness = _harness(args)
+    keys = [*args.api_key, *filter(None, [os.environ.get("MCP_API_KEY")])]
+    try:
+        if args.blueprint:
+            from .blueprint import Blueprint
+
+            per_agent: dict[str, Any] = {}
+            for pair in args.key_env:
+                name, sep, variable = pair.partition("=")
+                if not sep or not os.environ.get(variable):
+                    raise SystemExit(f"--key-env takes AGENT=ENV_VAR, with the "
+                                     f"variable set — got {pair!r}")
+                per_agent[name] = os.environ[variable]
+            server = Blueprint.from_file(args.blueprint).mcp_server(
+                harness=harness, api_key=keys or None, api_keys=per_agent or None,
+                expose_tools=args.expose_tools)
+        else:
+            server = MCPAgentServer(_agent(args, harness), api_key=keys or None,
+                                    expose_tools=args.expose_tools)
+        if args.stdio:
+            await server.serve_stdio()
+            return 0
+        await server.serve(args.host, args.port, ready=lambda url: print(
+            f"serving {', '.join(server.agents)} over MCP at {url}/mcp\n"
+            + "".join(f"  {name:<14} {url}/{name}/mcp\n" for name in server.agents)
+            + f"  keys           {len(server._keys) or 'none — anyone may call'}\n"
+            "This is the development server; for production run the ASGI app "
+            "under uvicorn.", file=sys.stderr))
+        return 0
+    finally:
+        await harness.aclose()
+
+
 async def _openapi(args: argparse.Namespace) -> int:
     toolkit = _api(args.spec, args)
     try:
@@ -870,6 +908,26 @@ def build_parser() -> argparse.ArgumentParser:
                      help="send: the context id of a conversation to carry on")
     common(a2a)
 
+    serve = sub.add_parser(
+        "mcp-serve", help="serve an agent, or a blueprint's agents, as an MCP server")
+    serve.add_argument("--blueprint", default=None, metavar="FILE",
+                       help="serve the agents of an agents.yaml; each may name its "
+                            "own key with `mcp_key_env`")
+    serve.add_argument("--api-key", action="append", default=[],
+                       help="a key that opens every agent (repeatable; or "
+                            "$MCP_API_KEY)")
+    serve.add_argument("--key-env", action="append", default=[], metavar="AGENT=VAR",
+                       help="with --blueprint: an agent's own key, read from an "
+                            "environment variable (repeatable)")
+    serve.add_argument("--expose-tools", action="store_true",
+                       help="serve the agents' own tools as well")
+    serve.add_argument("--stdio", action="store_true",
+                       help="serve over stdin/stdout, for a client that starts "
+                            "the server itself")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    common(serve)
+
     api = sub.add_parser(
         "openapi", help="show the tools an OpenAPI document becomes, or call one")
     api.add_argument("spec", help="the OpenAPI file or URL")
@@ -977,6 +1035,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_a2a(args))
         if args.command == "openapi":
             return asyncio.run(_openapi(args))
+        if args.command == "mcp-serve":
+            return asyncio.run(_mcp_serve(args))
         if args.command == "models":
             return _models(args)
         if args.command == "providers":

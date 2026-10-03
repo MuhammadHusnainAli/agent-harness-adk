@@ -1337,6 +1337,86 @@ Both transports (stdio and streamable HTTP), tools, resources and prompts. A
 server that will not connect is reported in `mcp.errors`, not raised into your
 run. `allowed_tools` trims what a server may expose.
 
+### Serving your agents as an MCP server
+
+The other direction: any MCP client — Claude Desktop, Cursor, another
+framework's agent — uses your agents as tools.
+
+```python
+# myapp.py
+from agent_harness.mcp import MCPAgentServer
+
+server = MCPAgentServer(
+    [billing, orders],
+    api_keys={"billing": os.environ["BILLING_MCP_KEY"],     # each agent, its own key
+              "orders": os.environ["ORDERS_MCP_KEY"]},
+)
+```
+
+```bash
+uvicorn myapp:server --workers 8                     # it is an ASGI app
+agent-harness mcp-serve --name helper --api-key …    # the built-in server, to develop
+agent-harness mcp-serve --stdio                      # for a client that starts it itself
+```
+
+Each agent is one tool, named after it. The client sends a `task`; the agent
+runs with its own model, tools, guardrails and budget; its answer comes back.
+
+**Every agent has its own key.** A key opens only the agents it was issued for:
+
+| the caller sends | they are offered |
+|---|---|
+| the billing key | `billing` — and `orders` is, to them, not there |
+| the orders key | `orders` |
+| a key from `api_key=` | every agent |
+| no key, or a wrong one | `401` |
+
+```python
+MCPAgentServer(agents, api_key="sk-…")                          # one key for everything
+MCPAgentServer(agents, api_keys={"billing": ["sk-a", "sk-b"]})  # several keys, to rotate
+MCPAgentServer(agents, api_keys={"docs": None, "billing": "sk-…"})   # `docs` needs no key
+MCPAgentServer(agents, api_keys={"billing": {"key": "sk-…", "user_id": "ada",
+                                             "tenant_id": "acme"}})   # whose calls they are
+MCPAgentServer(agents, auth=lambda headers: {...})               # your own check
+
+server.add_key("sk-new-partner", agent="orders")     # issue one while serving
+server.revoke_key("sk-old-partner")                  # and stop one working, now
+```
+
+Keys arrive as `Authorization: Bearer …` or `X-API-Key: …`, are compared in
+constant time, and are never logged — the audit trail records a key's id. With
+no keys at all the server is open, which is for development. Each agent is also
+served alone at `/<name>/mcp`, for a client that should be pointed at exactly
+one; `/mcp` serves everything the key opens.
+
+- **Conversations.** A caller may pass `conversation_id` — any id of their
+  choosing — and calls that share it are one conversation the agent remembers.
+  It belongs to the key that started it: the same id under another key is
+  another conversation. Without one, each call is a single task.
+- **The agents' own tools.** `expose_tools=True` (or globs) serves them too, as
+  `<agent>_<tool>`, called through the agent so its permission gate, hooks and
+  audit trail still apply.
+- **What comes back.** The answer as text; an output contract as
+  `structuredContent`; files the agent produced as embedded resources; a failed
+  run as `isError`, which the calling model can read and act on.
+- **Long runs.** A caller that sends a progress token is streamed
+  `notifications/progress` for each step and tool. A call is stopped at
+  `timeout`, by `notifications/cancelled`, or when the caller hangs up.
+- **Stateless.** The transport is MCP's streamable HTTP with no session kept in
+  the process, so any replica answers any request; conversations live in the
+  harness's session store. `max_concurrency` and `max_queue` bound the work, and
+  `/healthz` reports it.
+
+In a blueprint each agent names the environment variable its key is in, and
+`blueprint.mcp_server()` (or `agent-harness mcp-serve --blueprint agents.yaml`)
+serves them:
+
+```yaml
+agents:
+  billing: {instructions: Handle refunds., mcp_key_env: BILLING_MCP_KEY}
+  orders:  {instructions: Track orders.,   mcp_key_env: ORDERS_MCP_KEY}
+```
+
 ## Budgets that stop instead of failing
 
 ```python

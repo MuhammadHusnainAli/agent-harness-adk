@@ -241,6 +241,7 @@ __version__ = "0.1.4"
 # first use. `from agent_harness import MCPServer` still works. Governance is
 # the same: only those who turn it on pay for importing it.
 _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
+         "MCPAgentServer": "mcp",
          "Governance": "governance", "AgentIdentity": "governance",
          "VoiceAgent": "voice", "RealtimeAgent": "voice", "VoiceEvent": "voice",
          "OpenAISpeech": "voice", "EnergyVAD": "voice",
@@ -364,6 +365,7 @@ __all__ = [
     "MCPServer",
     "MCPClient",
     "MCPManager",
+    "MCPAgentServer",
     # governance
     "Governance",
     "AgentIdentity",

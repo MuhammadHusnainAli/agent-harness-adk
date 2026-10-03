@@ -89,6 +89,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/18_openapi.py",
      "OpenAPI → tools: an agent given an API's openapi.json calls its "
      "operations, with a key it never sees and an approval before a write."),
+    ("examples/19_mcp_server.py",
+     "Agents served as an MCP server, each behind its own API key: what each "
+     "key opens, what is refused, and an agent using another over MCP."),
 ]
 
 

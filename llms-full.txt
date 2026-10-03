@@ -1349,6 +1349,86 @@ Both transports (stdio and streamable HTTP), tools, resources and prompts. A
 server that will not connect is reported in `mcp.errors`, not raised into your
 run. `allowed_tools` trims what a server may expose.
 
+### Serving your agents as an MCP server
+
+The other direction: any MCP client — Claude Desktop, Cursor, another
+framework's agent — uses your agents as tools.
+
+```python
+# myapp.py
+from agent_harness.mcp import MCPAgentServer
+
+server = MCPAgentServer(
+    [billing, orders],
+    api_keys={"billing": os.environ["BILLING_MCP_KEY"],     # each agent, its own key
+              "orders": os.environ["ORDERS_MCP_KEY"]},
+)
+```
+
+```bash
+uvicorn myapp:server --workers 8                     # it is an ASGI app
+agent-harness mcp-serve --name helper --api-key …    # the built-in server, to develop
+agent-harness mcp-serve --stdio                      # for a client that starts it itself
+```
+
+Each agent is one tool, named after it. The client sends a `task`; the agent
+runs with its own model, tools, guardrails and budget; its answer comes back.
+
+**Every agent has its own key.** A key opens only the agents it was issued for:
+
+| the caller sends | they are offered |
+|---|---|
+| the billing key | `billing` — and `orders` is, to them, not there |
+| the orders key | `orders` |
+| a key from `api_key=` | every agent |
+| no key, or a wrong one | `401` |
+
+```python
+MCPAgentServer(agents, api_key="sk-…")                          # one key for everything
+MCPAgentServer(agents, api_keys={"billing": ["sk-a", "sk-b"]})  # several keys, to rotate
+MCPAgentServer(agents, api_keys={"docs": None, "billing": "sk-…"})   # `docs` needs no key
+MCPAgentServer(agents, api_keys={"billing": {"key": "sk-…", "user_id": "ada",
+                                             "tenant_id": "acme"}})   # whose calls they are
+MCPAgentServer(agents, auth=lambda headers: {...})               # your own check
+
+server.add_key("sk-new-partner", agent="orders")     # issue one while serving
+server.revoke_key("sk-old-partner")                  # and stop one working, now
+```
+
+Keys arrive as `Authorization: Bearer …` or `X-API-Key: …`, are compared in
+constant time, and are never logged — the audit trail records a key's id. With
+no keys at all the server is open, which is for development. Each agent is also
+served alone at `/<name>/mcp`, for a client that should be pointed at exactly
+one; `/mcp` serves everything the key opens.
+
+- **Conversations.** A caller may pass `conversation_id` — any id of their
+  choosing — and calls that share it are one conversation the agent remembers.
+  It belongs to the key that started it: the same id under another key is
+  another conversation. Without one, each call is a single task.
+- **The agents' own tools.** `expose_tools=True` (or globs) serves them too, as
+  `<agent>_<tool>`, called through the agent so its permission gate, hooks and
+  audit trail still apply.
+- **What comes back.** The answer as text; an output contract as
+  `structuredContent`; files the agent produced as embedded resources; a failed
+  run as `isError`, which the calling model can read and act on.
+- **Long runs.** A caller that sends a progress token is streamed
+  `notifications/progress` for each step and tool. A call is stopped at
+  `timeout`, by `notifications/cancelled`, or when the caller hangs up.
+- **Stateless.** The transport is MCP's streamable HTTP with no session kept in
+  the process, so any replica answers any request; conversations live in the
+  harness's session store. `max_concurrency` and `max_queue` bound the work, and
+  `/healthz` reports it.
+
+In a blueprint each agent names the environment variable its key is in, and
+`blueprint.mcp_server()` (or `agent-harness mcp-serve --blueprint agents.yaml`)
+serves them:
+
+```yaml
+agents:
+  billing: {instructions: Handle refunds., mcp_key_env: BILLING_MCP_KEY}
+  orders:  {instructions: Track orders.,   mcp_key_env: ORDERS_MCP_KEY}
+```
+
 ## Budgets that stop instead of failing
 
 ```python
@@ -2211,6 +2291,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Agents as an MCP server — `MCPAgentServer`**
+- `MCPAgentServer(agents)` serves agents as MCP tools: each agent is one tool
+  taking a `task`. An ASGI application over MCP's streamable HTTP, a built-in
+  server for development (`await server.serve()`), and stdio
+  (`await server.serve_stdio()`).
+- A key per agent: `api_keys={"billing": "sk-…", "orders": "sk-…"}`. A key opens
+  only the agents it was issued for, and the others are not listed or callable.
+  `api_key=` opens every agent; several keys per agent; `None` leaves an agent
+  open; a key can name its `user_id` and `tenant_id`; `auth=` for a check of
+  your own; `add_key` and `revoke_key` while serving. Keys are accepted as
+  `Authorization: Bearer` or `X-API-Key`, compared in constant time, and logged
+  only by id. Each agent is also served alone at `/<name>/mcp`.
+- `conversation_id` carries a conversation across calls, owned by the key.
+  `expose_tools=` serves an agent's own tools through its rails. Output
+  contracts come back as `structuredContent`, artefacts as embedded resources,
+  failures as `isError`.
+- Progress notifications for a caller that sends a progress token; calls end at
+  `timeout`, on `notifications/cancelled`, or when the caller disconnects;
+  `max_concurrency`, `max_queue`, `allowed_origins`, `/healthz`.
+- `mcp_key_env` on a blueprint agent and `Blueprint.mcp_server()`.
+- `agent-harness mcp-serve [--blueprint FILE] [--api-key K] [--key-env AGENT=VAR]
+  [--expose-tools] [--stdio]`.
+- `examples/19_mcp_server.py`.
 
 **OpenAPI → tools — `openapi_tools`, `OpenAPIToolkit`**
 - `openapi_tools(spec)` turns every operation of an OpenAPI document into a tool.
@@ -3491,7 +3595,7 @@ Fields: instructions, description, model, mode, depth, tier, effort, temperature
 
 ### `Blueprint`  (class)
 A file's worth of declarations, and the agents it can build.
-Methods: `api_toolkits(self) -> list[Any]`, `build(self, name: str, *, tools: Any = (), harness: Any = None, **overrides: Any) -> Any`, `build_all(self, *, tools: Any = (), harness: Any = None, **overrides: Any) -> dict[str, Any]`, `from_dict(data: dict[str, Any]) -> Blueprint`, `from_file(path: str | Path) -> Blueprint`, `from_text(text: str, *, fmt: str = yaml, path: str | None = None) -> Blueprint`, `memory_store(self) -> Any`, `render(self, text: str) -> str`, `save(self, path: str | Path) -> Path`, `session_store(self) -> Any`, `workflow(self, name: str, *, tools: Any = (), harness: Any = None, agents: Any = None) -> Any`
+Methods: `api_toolkits(self) -> list[Any]`, `build(self, name: str, *, tools: Any = (), harness: Any = None, **overrides: Any) -> Any`, `build_all(self, *, tools: Any = (), harness: Any = None, **overrides: Any) -> dict[str, Any]`, `from_dict(data: dict[str, Any]) -> Blueprint`, `from_file(path: str | Path) -> Blueprint`, `from_text(text: str, *, fmt: str = yaml, path: str | None = None) -> Blueprint`, `mcp_server(self, names: Any = None, *, tools: Any = (), harness: Any = None, **options: Any) -> Any`, `memory_store(self) -> Any`, `render(self, text: str) -> str`, `save(self, path: str | Path) -> Path`, `session_store(self) -> Any`, `workflow(self, name: str, *, tools: Any = (), harness: Any = None, agents: Any = None) -> Any`
 Properties: names
 Fields: version, defaults, prompts, guardrails, subagents, agents, memory, sessions, workflows, openapi, path
 
@@ -4259,7 +4363,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`
 
 ---
 
@@ -6120,6 +6224,121 @@ async def main() -> None:
     await api.aclose()
     await harness.aclose()
     server.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/19_mcp_server.py
+
+Agents served as an MCP server, each behind its own API key: what each key opens, what is refused, and an agent using another over MCP.
+
+```python
+"""Agents served as an MCP server, each behind a key of its own.
+
+Two agents are served over MCP on a real socket. Each has its own API key: a
+caller holding the billing key is offered one tool, and the orders agent is —
+as far as that caller can tell — not there. Then a manager agent connects, as
+any MCP client would, and uses what its key opens.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from _common import pick_provider
+
+from agent_harness import Agent, FakeProvider, Harness, MCPError, tool, tool_call
+from agent_harness.mcp import MCPAgentServer, MCPClient, MCPServer
+
+BILLING_KEY = "sk-billing-demo-key"
+ORDERS_KEY = "sk-orders-demo-key"
+
+
+@tool
+def find_charges(order: str) -> str:
+    """List what an order was charged.
+
+    Args:
+        order: the order number.
+    """
+    return f"order {order}: 40.00 EUR on 2 May, 40.00 EUR on 2 May (duplicate)"
+
+
+async def connect(url: str, key: str | None, name: str = "desk") -> MCPClient:
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    client = MCPClient(MCPServer(name=name, url=url, headers=headers))
+    await client.connect()
+    await client.list_tools()
+    return client
+
+
+async def main() -> None:
+    provider, model = pick_provider()
+    scripted = provider is not None
+    harness = Harness()
+
+    def scripts(*turns: object) -> FakeProvider | None:
+        return FakeProvider(list(turns)) if scripted else None
+
+    billing = Agent(
+        "billing", "You handle charges and refunds. Look the charges up first.",
+        description="Charges, refunds and invoices.", tools=[find_charges],
+        model=model, harness=harness, memory=False,
+        provider=scripts(tool_call("find_charges", order="4182"),
+                         "Order 4182 was charged twice; the duplicate 40 EUR is refunded.",
+                         "It reaches the card in three to five working days."))
+    orders = Agent(
+        "orders", "You track where orders are.", description="Where an order is.",
+        model=model, harness=harness, memory=False,
+        provider=scripts("Order 4182 shipped on Thursday."))
+
+    # --- serve them, each behind its own key -----------------------------------
+    server = MCPAgentServer([billing, orders],
+                            api_keys={"billing": BILLING_KEY, "orders": ORDERS_KEY})
+    started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    serving = asyncio.create_task(server.serve("127.0.0.1", 0, ready=started.set_result))
+    url = await started
+    print(f"serving at {url}/mcp   (and {url}/billing/mcp, {url}/orders/mcp)\n")
+
+    # --- what each key opens ------------------------------------------------------
+    for label, key in (("billing key", BILLING_KEY), ("orders key", ORDERS_KEY)):
+        client = await connect(f"{url}/mcp", key)
+        print(f"{label:<12} sees {[t['name'] for t in client.tools_cache]}")
+        await client.close()
+    for label, key in (("no key", None), ("wrong key", "sk-not-a-real-key")):
+        try:
+            await connect(f"{url}/mcp", key)
+        except MCPError as refused:
+            print(f"{label:<12} {str(refused).split(':')[0]}")
+
+    # --- an agent of yours, using one through MCP ----------------------------------
+    client = await connect(f"{url}/mcp", BILLING_KEY)
+    manager = Agent(
+        "manager", "Help the customer. Ask the billing agent about anything to do "
+        "with money, and keep to one conversation with it.",
+        tools=client.as_tools(), model=model, harness=Harness(), memory=False,
+        provider=scripts(
+            tool_call("desk_billing", task="Customer was charged twice for order "
+                      "4182. Check and refund the duplicate.", conversation_id="c-1"),
+            tool_call("desk_billing", task="When will they see the money?",
+                      conversation_id="c-1"),
+            "The duplicate 40 EUR is refunded and arrives in three to five working days."))
+    result = await manager.run("I was charged twice for order 4182 — when do I get "
+                               "my money back?")
+    print(f"\nmanager      {result.output}")
+    for call in result.tool_calls:
+        print(f"             called {call.name}({call.args['task'][:48]}…)")
+
+    health = server.health()
+    print(f"\nserver       {health['calls']} calls, {health['refused']} refused, "
+          f"{health['keys']} keys")
+    await client.close()
+    serving.cancel()
+    await asyncio.gather(serving, return_exceptions=True)
+    await harness.aclose()
+    await manager.harness.aclose()
 
 
 if __name__ == "__main__":
