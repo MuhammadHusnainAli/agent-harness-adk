@@ -47,6 +47,11 @@ def _agent(args: argparse.Namespace, harness: Harness) -> Agent:
         tools = [*basic_tools(), web_search, http_fetch]
     for spec in getattr(args, "openapi", None) or []:
         tools += _api(spec, args).tools
+    if getattr(args, "images", False):
+        from .toolkits.images import ImageGenerator
+
+        # Into the workspace when the agent has one; into ./images when not.
+        tools += ImageGenerator(output_dir="images").tools()
     if getattr(args, "browser", False) or getattr(args, "show_browser", False):
         from .browser import Browser
 
@@ -174,6 +179,31 @@ async def _openapi(args: argparse.Namespace) -> int:
         return 0
     finally:
         await toolkit.aclose()
+
+
+async def _image(args: argparse.Namespace) -> int:
+    from .toolkits.images import ImageGenerator, image_engines
+
+    if not args.prompt:
+        print(f"{'engine':<11} {'status':<9} {'model':<36} needs")
+        for engine in image_engines():
+            print(f"{engine['name']:<11} {'ready' if engine['ready'] else 'not set':<9} "
+                  f"{engine['model']:<36} {engine['needs']}")
+        return 0
+
+    def progress(update: Any) -> None:
+        how_far = f" {update.fraction:.0%}" if update.fraction is not None else ""
+        print(f"[{update.elapsed:5.1f}s] {update.status}{how_far} {update.message}".rstrip(),
+              file=sys.stderr)
+
+    images = ImageGenerator(args.engine or None, model=args.model, output_dir=args.out,
+                            on_progress=progress)
+    made = await images.generate(" ".join(args.prompt), references=args.reference,
+                                 aspect_ratio=args.aspect, count=args.count,
+                                 name=args.name)
+    for image in made:
+        print(image.describe())
+    return 0
 
 
 async def _search(args: argparse.Namespace) -> int:
@@ -832,6 +862,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tools", action="store_true",
                        help="give it the built-in tools (time, maths, web search "
                             "and fetch)")
+        p.add_argument("--images", action="store_true",
+                       help="let it generate images (Gemini, OpenAI or Replicate, "
+                            "by the key that is set)")
         p.add_argument("--browser", action="store_true",
                        help="give it a web browser to use (Chrome or Chromium, headless)")
         p.add_argument("--show-browser", action="store_true",
@@ -996,6 +1029,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="only this site (repeatable)")
     search.add_argument("--json", action="store_true")
 
+    image = sub.add_parser(
+        "image", help="generate an image, or list the image engines and which are set up")
+    image.add_argument("prompt", nargs="*", help="what to draw; none lists the engines")
+    image.add_argument("--engine", action="append", default=[], metavar="NAME",
+                       help="gemini, openai or replicate (repeatable: the next is "
+                            "asked when one fails)")
+    image.add_argument("--model", default=None, help="the engine's model")
+    image.add_argument("--reference", action="append", default=[], metavar="FILE|URL",
+                       help="an image to work from (repeatable)")
+    image.add_argument("--aspect", default="", help='the shape, e.g. "16:9"')
+    image.add_argument("--count", type=int, default=1)
+    image.add_argument("--name", default="", help="the file name, without an extension")
+    image.add_argument("--out", default="images", help="where to save (default ./images)")
+
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
     providers = sub.add_parser(
@@ -1087,6 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_a2a(args))
         if args.command == "openapi":
             return asyncio.run(_openapi(args))
+        if args.command == "image":
+            return asyncio.run(_image(args))
         if args.command == "search":
             return asyncio.run(_search(args))
         if args.command == "mcp-serve":

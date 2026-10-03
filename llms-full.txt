@@ -625,6 +625,7 @@ Built-ins in `agent_harness.toolkits`:
 | `make_corpus_search` | keyword search over documents you hand it |
 | `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `ImageGenerator().tools()` | image generation with reference images — Gemini, OpenAI, Replicate — as jobs with progress, retries and fallback. [More below](#image-generation) |
 | `Browser().tools()`, `computer_tool` | a real browser the agent drives by numbered elements, and a mouse and keyboard for a model that sees. [More below](#browser-and-computer-use) |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
@@ -829,6 +830,96 @@ A web page is text from strangers. An agent that browses will read instructions
 that are not yours; keep it to the domains it needs, and put `permission="ask"`,
 a guardrail or a human in front of anything it can change.
 `examples/21_browser.py` runs a browser against a shop served on the spot.
+
+## Image generation
+
+```python
+from agent_harness import Agent, ImageGenerator
+
+images = ImageGenerator()                      # the engine whose key is set
+agent = Agent("designer", "Make what is asked for, look at it, improve it.",
+              tools=images.tools(), workspace="./studio")
+await agent.run("A poster for the autumn sale, in the style of this photo.",
+                attachments=["storefront.jpg"])
+```
+
+| Engine | Set | Default model | References |
+|---|---|---|---|
+| `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash-image` — or `gemini-3-pro-image-preview`, or an `imagen-…` model | up to 14 (none for Imagen) |
+| `openai` | `OPENAI_API_KEY` | `gpt-image-1`; `base_url=` for anything that speaks the same API | up to 16 |
+| `replicate` | `REPLICATE_API_TOKEN` | `black-forest-labs/flux-kontext-pro`; any hosted model by name | as the model takes them |
+
+All three are spoken to over HTTP. Name one, or several to fall back through:
+
+```python
+from agent_harness.toolkits import GeminiImages, ReplicateImages
+
+images = ImageGenerator("gemini", model="gemini-3-pro-image-preview")
+images = ImageGenerator([GeminiImages(), "openai"], aspect_ratio="16:9",
+                        cost_per_image=0.04, max_images=50)
+images = ImageGenerator(ReplicateImages(model="google/nano-banana",
+                                        reference_key="image_input", reference_list=True))
+
+made = await images.generate("a red fox in snow, 35mm photograph",
+                             references=["fox.jpg"], count=2)
+made[0].save("fox.png")           # .data, .media_type, .width, .height, .engine, .model
+```
+
+**Reference images** are what a picture is made from, or made to look like: a
+photo to edit, a style to follow, a character to keep the likeness of. In your
+own code a reference is a path, a URL, bytes, an `ImageBlock`, or an image made
+earlier. The agent names one by what it can see — a file in its workspace, an
+image it generated earlier (`"images/poster.png"`), an attachment that came
+with the task (`"attachment:1"`), an http(s) address — and never by a path on
+this machine. `images.tools(references=[...])` gives every generation the same
+ones: a brand's style, a character sheet. Each reference is checked to be an
+image, by its bytes and not its name, before it is sent anywhere.
+
+**Progress.** Every generation is a job:
+
+```python
+job = await images.submit("a city at dusk", count=4)
+while not job.done:
+    print(job.describe())         # running on replicate — 40%, 12s (processing)
+    await asyncio.sleep(2)
+made = job.result()               # or: await job.wait(60), job.cancel()
+
+ImageGenerator(on_progress=lambda p: print(p.status, p.fraction, p.message))
+```
+
+The agent has the same. `generate_image` waits up to `wait=120` seconds; a job
+that outlives the wait comes back as a job id, and `image_status` checks on it,
+waits for it, collects it or cancels it — so a slow model does not hold a run
+hostage, and the agent is told not to start the same image twice. Replicate
+reports how far along it is; Gemini and OpenAI answer in one piece, so their
+progress is the stage and the time.
+
+What the agent gets back is where the image went, its size, and — with
+`show=True`, the default — the image itself, so a model that sees can judge it
+and try again. Images are written to the agent's workspace under `images/`
+(or `output_dir=` when there is none) and listed in `result.artifacts`.
+
+When it goes wrong:
+
+- **Retried**: 429, 5xx, timeouts, dropped connections — with back-off, honouring
+  `Retry-After` — and a model that answered with words and no picture.
+- **Passed to the next engine**: a refused key, an exhausted quota, an engine
+  that cannot take the references given. One that keeps failing is left alone
+  for a minute.
+- **Not retried and not passed on**: a prompt the provider *refused*. The agent
+  is told it was refused and why; another provider is not a way round that.
+- **Bounded**: `timeout=180` seconds an attempt, `deadline=600` the whole job,
+  `max_count=4` images a request, `max_images=` in total, `max_concurrency=3` at
+  once. A job that is cancelled or runs out of time is cancelled at the provider.
+- **Checked**: what comes back must be an image; an error page is a failure.
+- **Counted**: `cost_per_image=` is charged to the run's budget, and stops a run
+  like any other spend. Failures name the engine and never the key.
+
+`FakeImages` draws without a key or a network, for tests; an engine of your own
+is a function of an `ImageRequest` or an `ImageEngine` subclass.
+`agent-harness image` lists the engines, `agent-harness image "a red fox"
+--reference fox.jpg --aspect 16:9` makes one, and `--images` gives the tools to
+`run` and `chat`. `examples/22_images.py` runs all of it offline.
 
 ## OpenAPI → tools
 
@@ -2413,6 +2504,8 @@ agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness run "what is on the front page of example.com?" --browser
+agent-harness image "a red fox in snow" --reference fox.jpg --aspect 16:9
+agent-harness run "design a logo for a bakery" --images --workspace ./studio
 agent-harness search "heat pump subsidy" --recency year --engine brave
 agent-harness search                    # the search engines, and which are set up
 agent-harness models
@@ -2493,6 +2586,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Image generation — `ImageGenerator`**
+- `ImageGenerator()` makes images with the engine whose key is set: Gemini
+  (`gemini-2.5-flash-image`, `gemini-3-pro-image-preview`, Imagen), OpenAI
+  (`gpt-image-1`, or any server with the same API) and Replicate (any hosted
+  model). All over HTTP; no dependency is added. A list of engines is a
+  fallback chain.
+- Reference images: a path, a URL, bytes, an `ImageBlock`, or an image made
+  earlier, sent with the prompt to edit, restyle or keep a likeness. An agent
+  names a file in its workspace, an earlier image, an attachment
+  (`attachment:1`) or an http(s) address — never a path on the machine. Each is
+  verified to be an image from its bytes; URLs are fetched from public
+  addresses only, with a size cap.
+- Every generation is an `ImageJob`: `submit` returns it at once, with
+  `status`, `fraction`, `describe()`, `wait()`, `cancel()` and `result()`;
+  `generate` waits for it. `on_progress` receives an `ImageProgress` at every
+  step. Replicate predictions are polled and report the model's own progress.
+- `images.tools()`: `generate_image(prompt, references, aspect_ratio, count,
+  name)` and `image_status(job_id, wait, cancel)`. The image is saved to the
+  workspace under `images/`, added to `result.artifacts`, and shown to the
+  model. A job that outlives `wait` is collected with `image_status`.
+- Retries with back-off on 429, 5xx, timeouts and an answer with no image; the
+  next engine on a refused key, an exhausted quota or unsupported references; a
+  circuit breaker per engine. A prompt the provider refuses is not retried and
+  not taken to another provider. `timeout`, `deadline`, `max_count`,
+  `max_images`, `max_concurrency`; a cancelled job is cancelled at the provider;
+  what comes back is checked to be an image; `cost_per_image` is charged to the
+  run's budget; keys are redacted from errors.
+- `FakeImages` for tests; `ImageEngine` to subclass, or a function, for a
+  service of your own; `image_engines()`; `AGENT_HARNESS_IMAGES`.
+- A tool's context now carries what came with the task:
+  `ctx.state["attachments"]`.
+- `agent-harness image [PROMPT] [--engine] [--model] [--reference] [--aspect]
+  [--count] [--name] [--out]`, and `--images` on `run` and `chat`.
+- `examples/22_images.py`.
 
 **Browser and computer use — `Browser`, `computer_tool`**
 - `Browser()` starts Chrome, Chromium or Edge headless and drives it over the
@@ -4628,7 +4756,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`, `Browser`, `browser_tools`, `computer_tool`, `Computer`, `BrowserComputer`, `DesktopComputer`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `MCPAgentServer`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`, `OpenAPIToolkit`, `openapi_tools`, `WebSearch`, `make_search_tool`, `ImageGenerator`, `image_tools`, `GeneratedImage`, `Browser`, `browser_tools`, `computer_tool`, `Computer`, `BrowserComputer`, `DesktopComputer`
 
 ---
 
@@ -6812,6 +6940,87 @@ async def main() -> None:
         print(f"computer   {said}  now on: {(await browser.snapshot()).splitlines()[0]}")
         await harness.aclose()
     server.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/22_images.py
+
+Image generation: a job watched as it runs, reference images, a fallback engine, and an agent that makes a picture and a variation of it.
+
+```python
+"""Image generation: an agent that makes a picture, is shown it, and works from it.
+
+With an image key in the environment (`GEMINI_API_KEY`, `OPENAI_API_KEY` or
+`REPLICATE_API_TOKEN`) this makes real images. Without one it uses `FakeImages`,
+which draws a small PNG of one colour — enough to show everything around the
+drawing: the job and its progress, the reference images, the fallback, and the
+files an agent leaves in its workspace.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+
+from _common import pick_provider
+
+from agent_harness import Agent, Harness, ImageGenerator, Workspace, tool_call
+from agent_harness.toolkits import FakeImages, image_engines
+from agent_harness.toolkits.images import ImageFailure, solid_png
+
+
+async def main() -> None:
+    print("engines   ", ", ".join(f"{e['name']}{'' if e['ready'] else ' (not set)'}"
+                                 for e in image_engines()), "\n")
+    live = any(e["ready"] for e in image_engines())
+    # Without a key: an engine that is down, then one that draws — slowly enough
+    # to be watched.
+    engines = None if live else [
+        FakeImages(name="first", fail=[ImageFailure("the engine answered 503")]),
+        FakeImages(steps=4, delay=0.05)]
+    images = ImageGenerator(engines, aspect_ratio="16:9")
+
+    # --- a job you can watch ------------------------------------------------------
+    job = await images.submit("a lighthouse at dusk, oil painting", count=2)
+    while not job.done:
+        print(f"progress   {job.describe()}")
+        await asyncio.sleep(0.06 if not live else 2)
+    for image in job.result():
+        print(f"made       {image.describe()}")
+    print(f"stats      {images.stats}\n")
+
+    # --- a reference image: change what was made, or follow a picture of your own --
+    logo = solid_png(32, 32, (240, 180, 40))           # stands in for a file of yours
+    edited = await images.generate(
+        "the same lighthouse, in winter, with this emblem on the door",
+        references=[job.result()[0], logo], name="winter")
+    print(f"edited     {edited[0].describe()}  (from 2 references)\n")
+
+    # --- and an agent, with a workspace to keep them in -------------------------------
+    provider, model = pick_provider([
+        tool_call("generate_image", prompt="a poster for an autumn book fair",
+                  aspect_ratio="3:4", name="poster"),
+        tool_call("generate_image", prompt="the same poster with a darker background",
+                  references=["images/poster.png"], name="poster-dark"),
+        "Two versions are in the workspace: images/poster.png and images/poster-dark.png.",
+    ])
+    harness = Harness(provider=provider)
+    with tempfile.TemporaryDirectory() as folder:
+        agent = Agent("designer", "Make what is asked for, look at it, and improve it.",
+                      tools=images.tools(), workspace=Workspace(folder), model=model,
+                      harness=harness, memory=False)
+        async for event in agent.stream("A poster for the autumn book fair, and a "
+                                        "darker variation."):
+            if event.type == "tool_result":
+                print(f"tool       {event.data['tool']} → {event.text.splitlines()[1]}")
+            elif event.type == "run_end":
+                result = event.data["result"]
+                print(f"\ndesigner   {result.output}")
+                print("files      " + ", ".join(a.path for a in result.artifacts if a.path))
+    await harness.aclose()
 
 
 if __name__ == "__main__":

@@ -32,7 +32,6 @@ to every page load — a typed address, a clicked link, a redirect, a frame.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
 import shutil
@@ -49,6 +48,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..errors import ConfigurationError, ToolError
+from ..toolkits._net import is_private_host
 from ..toolkits.search import _domain, _matches
 from ..types import ImageBlock
 from .cdp import CDP, CDPError
@@ -71,7 +71,6 @@ _PATHS = (
 #: Environment variables that name the browser to start.
 BROWSER_ENV = ("AGENT_HARNESS_BROWSER", "CHROME_PATH")
 
-_LOCAL_NAMES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
 _MODIFIERS = {"alt": 1, "option": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4,
               "command": 4, "super": 4, "win": 4, "shift": 8}
 #: name → (key, code, virtual key code, text)
@@ -724,35 +723,6 @@ class Browser:
     # ------------------------------------------------------------------
     # where it may go
     # ------------------------------------------------------------------
-    async def _private(self, host: str) -> bool:
-        """Does this name lead to this machine or a private network?"""
-        if host in self._resolved:
-            return self._resolved[host]
-        private = host == "localhost" or host.endswith(_LOCAL_NAMES)
-        if not private:
-            addresses: list[str] = []
-            try:
-                ipaddress.ip_address(host.strip("[]"))
-                addresses = [host.strip("[]")]
-            except ValueError:
-                try:
-                    found = await asyncio.wait_for(
-                        asyncio.get_running_loop().getaddrinfo(host, None), 4)
-                    addresses = [info[4][0] for info in found]
-                except (OSError, *_Timeout):
-                    addresses = []       # it will not load; that is the browser's to say
-            for address in addresses:
-                try:
-                    ip = ipaddress.ip_address(address.split("%")[0])
-                except ValueError:
-                    continue
-                if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                        or ip.is_multicast or ip.is_unspecified):
-                    private = True
-                    break
-        self._resolved[host] = private
-        return private
-
     async def refusal(self, url: str) -> str:
         """Why this address may not be opened; empty when it may."""
         try:
@@ -771,7 +741,7 @@ class Browser:
             return f"{host} is on the blocked list"
         if self.allowed and not any(_matches(host, a) for a in self.allowed):
             return f"{host} is not on the allowed list"
-        if not self.allow_private and await self._private(host):
+        if not self.allow_private and await is_private_host(host, self._resolved):
             return f"{host} is a private or loopback address"
         return ""
 

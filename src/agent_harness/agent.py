@@ -1286,6 +1286,7 @@ class Agent:
                             calls, run_id=run_id, step=step, guard=guard,
                             memory=memory, subagent_memory=subagent_memory,
                             result=result, notebook=notebook, relay=relay,
+                            attachments=attached,
                         )
                         for call, outcome in zip(calls, outcomes, strict=False):
                             result.tool_calls.append(ToolCall(
@@ -1643,13 +1644,17 @@ class Agent:
         result: RunResult,
         notebook: Notebook | None = None,
         relay: Relay | None = None,
+        attachments: Sequence[Any] = (),
     ) -> list[ToolOutcome]:
         """Run every tool the model asked for, in parallel, under the rails."""
         ctx = ToolContext(
             agent=self.name, run_id=run_id, step=step, workspace=self.workspace,
             memory=memory, harness=self.harness,
             state={"result": result, "guard": guard, "subagent_memory": subagent_memory,
-                   "notebook": notebook, "relay": relay},
+                   "notebook": notebook, "relay": relay,
+                   # What came with the task, for a tool that works on it — an
+                   # image to edit, say.
+                   "attachments": list(attachments)},
         )
 
         async def one(call: ToolUseBlock) -> ToolOutcome:

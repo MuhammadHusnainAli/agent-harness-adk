@@ -8,6 +8,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Image generation — `ImageGenerator`**
+- `ImageGenerator()` makes images with the engine whose key is set: Gemini
+  (`gemini-2.5-flash-image`, `gemini-3-pro-image-preview`, Imagen), OpenAI
+  (`gpt-image-1`, or any server with the same API) and Replicate (any hosted
+  model). All over HTTP; no dependency is added. A list of engines is a
+  fallback chain.
+- Reference images: a path, a URL, bytes, an `ImageBlock`, or an image made
+  earlier, sent with the prompt to edit, restyle or keep a likeness. An agent
+  names a file in its workspace, an earlier image, an attachment
+  (`attachment:1`) or an http(s) address — never a path on the machine. Each is
+  verified to be an image from its bytes; URLs are fetched from public
+  addresses only, with a size cap.
+- Every generation is an `ImageJob`: `submit` returns it at once, with
+  `status`, `fraction`, `describe()`, `wait()`, `cancel()` and `result()`;
+  `generate` waits for it. `on_progress` receives an `ImageProgress` at every
+  step. Replicate predictions are polled and report the model's own progress.
+- `images.tools()`: `generate_image(prompt, references, aspect_ratio, count,
+  name)` and `image_status(job_id, wait, cancel)`. The image is saved to the
+  workspace under `images/`, added to `result.artifacts`, and shown to the
+  model. A job that outlives `wait` is collected with `image_status`.
+- Retries with back-off on 429, 5xx, timeouts and an answer with no image; the
+  next engine on a refused key, an exhausted quota or unsupported references; a
+  circuit breaker per engine. A prompt the provider refuses is not retried and
+  not taken to another provider. `timeout`, `deadline`, `max_count`,
+  `max_images`, `max_concurrency`; a cancelled job is cancelled at the provider;
+  what comes back is checked to be an image; `cost_per_image` is charged to the
+  run's budget; keys are redacted from errors.
+- `FakeImages` for tests; `ImageEngine` to subclass, or a function, for a
+  service of your own; `image_engines()`; `AGENT_HARNESS_IMAGES`.
+- A tool's context now carries what came with the task:
+  `ctx.state["attachments"]`.
+- `agent-harness image [PROMPT] [--engine] [--model] [--reference] [--aspect]
+  [--count] [--name] [--out]`, and `--images` on `run` and `chat`.
+- `examples/22_images.py`.
+
 **Browser and computer use — `Browser`, `computer_tool`**
 - `Browser()` starts Chrome, Chromium or Edge headless and drives it over the
   DevTools protocol with the harness's own WebSocket client: no dependency is

@@ -98,6 +98,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/21_browser.py",
      "Browser and computer use: an agent opens pages and fills in a form by the "
      "page's numbered elements, then works the same browser by mouse and screenshot."),
+    ("examples/22_images.py",
+     "Image generation: a job watched as it runs, reference images, a fallback "
+     "engine, and an agent that makes a picture and a variation of it."),
 ]
 
 

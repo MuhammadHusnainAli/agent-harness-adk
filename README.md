@@ -613,6 +613,7 @@ Built-ins in `agent_harness.toolkits`:
 | `make_corpus_search` | keyword search over documents you hand it |
 | `web_search`, `make_search_tool`, `WebSearch` | web search over Tavily, Brave, Exa, Serper, Google, SearXNG or keyless DuckDuckGo — retries, fallback engines, domain policy, cache. [More below](#web-search) |
 | `make_fetch_tool`, `make_http_tool` | domain allowlist, private-address refusal, HTML stripping |
+| `ImageGenerator().tools()` | image generation with reference images — Gemini, OpenAI, Replicate — as jobs with progress, retries and fallback. [More below](#image-generation) |
 | `Browser().tools()`, `computer_tool` | a real browser the agent drives by numbered elements, and a mouse and keyboard for a model that sees. [More below](#browser-and-computer-use) |
 | `parse_document` | text, Markdown, CSV, TSV, JSON, JSONL, HTML, XML with no dependencies; PDF, DOCX and OCR with an optional install each |
 | `bar_chart`, `line_chart`, `render_report` | inline SVG that works in light and dark, plus markdown reports |
@@ -817,6 +818,96 @@ A web page is text from strangers. An agent that browses will read instructions
 that are not yours; keep it to the domains it needs, and put `permission="ask"`,
 a guardrail or a human in front of anything it can change.
 `examples/21_browser.py` runs a browser against a shop served on the spot.
+
+## Image generation
+
+```python
+from agent_harness import Agent, ImageGenerator
+
+images = ImageGenerator()                      # the engine whose key is set
+agent = Agent("designer", "Make what is asked for, look at it, improve it.",
+              tools=images.tools(), workspace="./studio")
+await agent.run("A poster for the autumn sale, in the style of this photo.",
+                attachments=["storefront.jpg"])
+```
+
+| Engine | Set | Default model | References |
+|---|---|---|---|
+| `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash-image` — or `gemini-3-pro-image-preview`, or an `imagen-…` model | up to 14 (none for Imagen) |
+| `openai` | `OPENAI_API_KEY` | `gpt-image-1`; `base_url=` for anything that speaks the same API | up to 16 |
+| `replicate` | `REPLICATE_API_TOKEN` | `black-forest-labs/flux-kontext-pro`; any hosted model by name | as the model takes them |
+
+All three are spoken to over HTTP. Name one, or several to fall back through:
+
+```python
+from agent_harness.toolkits import GeminiImages, ReplicateImages
+
+images = ImageGenerator("gemini", model="gemini-3-pro-image-preview")
+images = ImageGenerator([GeminiImages(), "openai"], aspect_ratio="16:9",
+                        cost_per_image=0.04, max_images=50)
+images = ImageGenerator(ReplicateImages(model="google/nano-banana",
+                                        reference_key="image_input", reference_list=True))
+
+made = await images.generate("a red fox in snow, 35mm photograph",
+                             references=["fox.jpg"], count=2)
+made[0].save("fox.png")           # .data, .media_type, .width, .height, .engine, .model
+```
+
+**Reference images** are what a picture is made from, or made to look like: a
+photo to edit, a style to follow, a character to keep the likeness of. In your
+own code a reference is a path, a URL, bytes, an `ImageBlock`, or an image made
+earlier. The agent names one by what it can see — a file in its workspace, an
+image it generated earlier (`"images/poster.png"`), an attachment that came
+with the task (`"attachment:1"`), an http(s) address — and never by a path on
+this machine. `images.tools(references=[...])` gives every generation the same
+ones: a brand's style, a character sheet. Each reference is checked to be an
+image, by its bytes and not its name, before it is sent anywhere.
+
+**Progress.** Every generation is a job:
+
+```python
+job = await images.submit("a city at dusk", count=4)
+while not job.done:
+    print(job.describe())         # running on replicate — 40%, 12s (processing)
+    await asyncio.sleep(2)
+made = job.result()               # or: await job.wait(60), job.cancel()
+
+ImageGenerator(on_progress=lambda p: print(p.status, p.fraction, p.message))
+```
+
+The agent has the same. `generate_image` waits up to `wait=120` seconds; a job
+that outlives the wait comes back as a job id, and `image_status` checks on it,
+waits for it, collects it or cancels it — so a slow model does not hold a run
+hostage, and the agent is told not to start the same image twice. Replicate
+reports how far along it is; Gemini and OpenAI answer in one piece, so their
+progress is the stage and the time.
+
+What the agent gets back is where the image went, its size, and — with
+`show=True`, the default — the image itself, so a model that sees can judge it
+and try again. Images are written to the agent's workspace under `images/`
+(or `output_dir=` when there is none) and listed in `result.artifacts`.
+
+When it goes wrong:
+
+- **Retried**: 429, 5xx, timeouts, dropped connections — with back-off, honouring
+  `Retry-After` — and a model that answered with words and no picture.
+- **Passed to the next engine**: a refused key, an exhausted quota, an engine
+  that cannot take the references given. One that keeps failing is left alone
+  for a minute.
+- **Not retried and not passed on**: a prompt the provider *refused*. The agent
+  is told it was refused and why; another provider is not a way round that.
+- **Bounded**: `timeout=180` seconds an attempt, `deadline=600` the whole job,
+  `max_count=4` images a request, `max_images=` in total, `max_concurrency=3` at
+  once. A job that is cancelled or runs out of time is cancelled at the provider.
+- **Checked**: what comes back must be an image; an error page is a failure.
+- **Counted**: `cost_per_image=` is charged to the run's budget, and stops a run
+  like any other spend. Failures name the engine and never the key.
+
+`FakeImages` draws without a key or a network, for tests; an engine of your own
+is a function of an `ImageRequest` or an `ImageEngine` subclass.
+`agent-harness image` lists the engines, `agent-harness image "a red fox"
+--reference fox.jpg --aspect 16:9` makes one, and `--images` gives the tools to
+`run` and `chat`. `examples/22_images.py` runs all of it offline.
 
 ## OpenAPI → tools
 
@@ -2401,6 +2492,8 @@ agent-harness voice --input question.wav --output answer.wav
 agent-harness run "start it" --mode cowork --sandbox docker --state .harness --keep-sandbox
 agent-harness run "carry on" --mode cowork --sandbox docker --state .harness --session ses_4f1c
 agent-harness run "what is on the front page of example.com?" --browser
+agent-harness image "a red fox in snow" --reference fox.jpg --aspect 16:9
+agent-harness run "design a logo for a bakery" --images --workspace ./studio
 agent-harness search "heat pump subsidy" --recency year --engine brave
 agent-harness search                    # the search engines, and which are set up
 agent-harness models
