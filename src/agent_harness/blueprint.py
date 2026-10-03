@@ -115,6 +115,9 @@ class AgentEntry(BaseModel):
     output_schema: dict[str, Any] | None = None
     version: str | None = None
     versions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: An agent served somewhere else over A2A, instead of one built here: its
+    #: URL, or {url: ..., token_env: PRICING_TOKEN, timeout: 120}.
+    a2a: str | dict[str, Any] | None = None
 
 
 class Blueprint(BaseModel):
@@ -269,6 +272,9 @@ class Blueprint(BaseModel):
                 f"no agent {name!r} in this blueprint; declared: "
                 f"{', '.join(sorted(self.agents)) or 'none'}")
         entry = self.agents[name]
+        if entry.a2a is not None:
+            built[name] = self._remote(name, entry, harness)
+            return built[name]
         registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
 
         kwargs: dict[str, Any] = {
@@ -333,6 +339,27 @@ class Blueprint(BaseModel):
                 self._build(target, built, tools=tools, harness=agent.harness,
                             **common), **options))
         return agent
+
+    @staticmethod
+    def _remote(name: str, entry: AgentEntry, harness: Any) -> Any:
+        """An agent declared by where it is served, not by how it is built."""
+        import os
+
+        from .a2a import RemoteAgent
+
+        options = {"url": entry.a2a} if isinstance(entry.a2a, str) else dict(entry.a2a)
+        url = options.pop("url", None)
+        if not url:
+            raise ConfigurationError(f"{name}: `a2a` needs a `url`")
+        # A secret is named, never written in the file.
+        variable = options.pop("token_env", None)
+        if variable:
+            options["token"] = os.environ.get(variable)
+            if not options["token"]:
+                raise ConfigurationError(
+                    f"{name}: the environment variable {variable} is not set")
+        return RemoteAgent(url, name=name, description=entry.description,
+                           harness=harness, identity=entry.identity, **options)
 
     def _version(self, spec: dict[str, Any]) -> AgentVersion:
         version = AgentVersion.of(dict(spec))

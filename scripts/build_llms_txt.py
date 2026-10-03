@@ -83,6 +83,9 @@ EXAMPLES: list[tuple[str, str]] = [
     ("examples/16_workflows.py",
      "A declared workflow in YAML: parallel lookups, a foreach, a branch, and a "
      "write-and-review loop, with shared state between the steps."),
+    ("examples/17_a2a.py",
+     "A2A: an agent served over the agent-to-agent protocol on a real socket, "
+     "called by a client, streamed, and used as another agent's sub-agent."),
 ]
 
 

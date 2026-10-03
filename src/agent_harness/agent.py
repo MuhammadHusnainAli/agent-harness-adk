@@ -766,12 +766,17 @@ class Agent:
         return self.skills.add(skill)
 
     def add_subagent(self, entry: Any) -> Agent:
-        """Attach a sub-agent, given an Agent or a SubAgentSpec."""
+        """Attach a sub-agent, given an Agent, a SubAgentSpec, or an agent
+        somewhere else (`a2a.RemoteAgent`)."""
         from .subagents import SubAgentSpec, build_agent
 
-        child = entry if isinstance(entry, Agent) else build_agent(
-            entry if isinstance(entry, SubAgentSpec) else SubAgentSpec(**entry), parent=self
-        )
+        if isinstance(entry, Agent) or (
+                not isinstance(entry, (dict, SubAgentSpec))
+                and callable(getattr(entry, "run", None)) and hasattr(entry, "name")):
+            child = entry
+        else:
+            child = build_agent(entry if isinstance(entry, SubAgentSpec)
+                                else SubAgentSpec(**entry), parent=self)
         self._subagents[child.name] = child
         # Rebuilt, not just added: the tool's schema carries the roster, and a
         # stale enum would hide every sub-agent attached after the first.

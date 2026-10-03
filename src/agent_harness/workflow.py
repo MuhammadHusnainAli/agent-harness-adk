@@ -498,7 +498,8 @@ class Workflow:
         given: dict[str, Any] = (dict(agents) if isinstance(agents, Mapping)
                                  else {a.name: a for a in agents or ()})
         if harness is None:
-            harness = next((a.harness for a in given.values()), None) or Harness()
+            harness = next((a.harness for a in given.values()
+                            if getattr(a, "harness", None) is not None), None) or Harness()
         self.harness = harness
         self.tools = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.agents = self._agents(given, blueprint)

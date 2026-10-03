@@ -8,6 +8,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+**Agent-to-agent protocol — `agent_harness.a2a`**
+- `A2AServer(agent)` serves an agent over the JSON-RPC binding of A2A 0.3: the
+  agent card, `message/send`, `message/stream` (SSE), `tasks/get`,
+  `tasks/cancel`, `tasks/resubscribe` and the push-notification methods. It is
+  an ASGI application (`uvicorn myapp:server`), with a small server of its own
+  for development (`await server.serve()`); a mapping serves several agents.
+- Built for many replicas: tasks and conversations are kept in the harness's
+  session store (`TaskStore`, `SessionTaskStore`, `MemoryTaskStore`); a message
+  retried with the same `messageId` is one task; `max_concurrency` and
+  `max_queue` answer `429` with `Retry-After` when full; `task_timeout`; a task
+  whose worker was lost is reported failed; cancel and re-subscribe work from
+  any replica; `/healthz`; drain on shutdown.
+- `auth=`: a token, several, token → identity, or a function of the headers.
+  Tasks and conversations belong to their caller, and each conversation runs on
+  its own instance of the agent.
+- Push notifications to https webhooks, off unless `push_notifications=` allows.
+- `A2AClient`: `card`, `send`, `stream`, `get`, `cancel`, `wait`, `resubscribe`,
+  with retries that keep the message id.
+- `RemoteAgent` — an A2A agent as a sub-agent, a tool (`as_tool`), or a workflow
+  step; `a2a:` on an agent in a blueprint or workflow file. A remote failure is
+  `result.error`. Registers with governance when given a harness.
+- `agent-harness a2a serve | card URL | send URL TEXT [--stream]`.
+- `examples/17_a2a.py`.
+
 **Declared workflows — `agent_harness.Workflow`**
 - A workflow written in YAML or JSON and run as written:
   `Workflow.from_file(path, agents=, tools=, harness=)`, `.run(inputs)`,

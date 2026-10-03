@@ -1125,6 +1125,123 @@ result = await boss.run("Summarise how Q3 went, with the numbers cited.")
 
 `result.data["plan"]` and `result.data["review"]` carry the full record.
 
+## A2A: agents that talk to other frameworks' agents
+
+The [agent-to-agent protocol](https://a2a-protocol.org) is how an agent built
+with one framework calls an agent built with another. Both sides are here: serve
+any of your agents over A2A, and use anyone else's as if it were one of yours.
+There is no SDK — the server is a plain ASGI application and the client is
+`httpx`.
+
+### Serving an agent
+
+```python
+# myapp.py
+from agent_harness import Agent, Harness
+from agent_harness.a2a import A2AServer
+
+harness = Harness(sessions="postgresql://user:pass@host/agents")
+agent = Agent("pricing", "Quote prices from the price list.",
+              description="Quotes plan prices.", tools=[price_list], harness=harness)
+
+server = A2AServer(agent, auth={"sk-live-1": {"user_id": "acme-bot", "tenant_id": "acme"}})
+```
+
+```bash
+uvicorn myapp:server --workers 8          # it is an ASGI app: any ASGI server runs it
+agent-harness a2a serve --name pricing --token sk-live-1   # or the built-in one, to develop
+```
+
+That serves the agent card at `/.well-known/agent-card.json` and the JSON-RPC
+binding of A2A 0.3: `message/send`, `message/stream` (SSE, token by token),
+`tasks/get`, `tasks/cancel`, `tasks/resubscribe` and the push-notification
+methods. A message becomes a task; the answer is its `response` artefact; a
+`contextId` carries the conversation on; files and structured data in a message
+reach the agent as attachments.
+
+`A2AServer({"billing": billing, "orders": orders})` serves several agents, each
+under its own name.
+
+### Calling one
+
+```python
+from agent_harness.a2a import A2AClient, RemoteAgent
+
+async with A2AClient("https://agents.example.com/pricing", token="sk-…") as client:
+    task = await client.send("What does the gold plan cost?")
+    task.text, task.state, task.context_id
+
+    async for event in client.stream("And for 12 seats?", context_id=task.context_id):
+        print(event.text, end="")
+
+    task = await client.send("Price the whole catalogue.", blocking=False)
+    task = await client.wait(task.id)                  # or client.get / client.cancel
+```
+
+A `RemoteAgent` is that agent wearing the shape the harness expects, so it goes
+wherever one of your own would:
+
+```python
+pricing = await RemoteAgent.connect("https://agents.example.com/pricing", token="sk-…")
+
+Agent("manager", subagents=[pricing])                   # delegated to, like any sub-agent
+Agent("manager", tools=[pricing.as_tool("ask_pricing")])
+Workflow.from_file("quote.yaml", agents=[pricing])      # an `agent: pricing` step
+```
+
+```yaml
+# or declared, in a blueprint or a workflow file
+agents:
+  pricing:
+    description: Quotes plan prices.
+    a2a: {url: "https://agents.example.com/pricing", token_env: PRICING_TOKEN}
+```
+
+A failed or unreachable remote agent is a `result.error`, never an exception in
+the middle of your run. On a governed harness a remote agent must be registered
+before anything is delegated to it — pass it the harness
+(`RemoteAgent.connect(url, harness=harness, identity={...})`).
+
+### Running it at scale
+
+The server is written to be one of many replicas behind a load balancer.
+
+- **A replica keeps nothing another one needs.** Tasks and conversations live in
+  the harness's session store. Name a database there
+  (`Harness(sessions="postgresql://…")`, or Redis, MongoDB, DynamoDB, …) and any
+  replica can answer `tasks/get`, carry on a `contextId`, cancel a task or
+  re-subscribe to it — whichever replica is running it. `store=` takes a
+  `TaskStore` of your own.
+- **A message sent twice is one task.** The task id is derived from the caller
+  and the `messageId`, so a client that retries a request it never saw the
+  answer to gets the first task back — even from a different replica — and the
+  model is paid for once. `A2AClient` retries with the same id for that reason.
+- **A full replica says so.** `max_concurrency` tasks run, `max_queue` wait, and
+  past that the answer is `429` with `Retry-After` rather than a queue that
+  grows without end. `GET /healthz` reports what is running and is `503` while
+  draining.
+- **Nothing waits for ever.** `task_timeout` ends a task that runs too long. A
+  task whose worker died is reported `failed` the next time anyone asks, not
+  `working` for ever. A streaming connection gets a keep-alive comment so a
+  proxy does not close it, and a caller who hangs up stops the stream, not the
+  task.
+- **Callers are told, not polled, if you allow it.**
+  `push_notifications=True` lets a caller register an https webhook (never a
+  private or loopback address) that is sent the task when it is over.
+- **Every caller has their own.** `auth` is a token, several, a token → identity
+  mapping, or a function of the request headers. A caller's tasks and
+  conversations are stamped with who they are; anyone else asking is told there
+  is no such task. Each conversation runs on its own instance of the agent,
+  acting for its caller, so nothing one caller said is in another's memory.
+- **Shutdown is orderly.** On the ASGI lifespan shutdown the server stops taking
+  work, gives what is running a moment, and records the rest as cancelled.
+
+Tasks are kept until you delete them — give the store a TTL
+(`session_provider("redis://…", ttl=7 * 86_400)`) or clear them yourself.
+
+Not there yet: the gRPC and REST bindings, `input-required` (a task that stops to
+ask the caller something), and signed or authenticated-extended agent cards.
+
 ## MCP
 
 ```python
@@ -2008,6 +2125,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+**Agent-to-agent protocol — `agent_harness.a2a`**
+- `A2AServer(agent)` serves an agent over the JSON-RPC binding of A2A 0.3: the
+  agent card, `message/send`, `message/stream` (SSE), `tasks/get`,
+  `tasks/cancel`, `tasks/resubscribe` and the push-notification methods. It is
+  an ASGI application (`uvicorn myapp:server`), with a small server of its own
+  for development (`await server.serve()`); a mapping serves several agents.
+- Built for many replicas: tasks and conversations are kept in the harness's
+  session store (`TaskStore`, `SessionTaskStore`, `MemoryTaskStore`); a message
+  retried with the same `messageId` is one task; `max_concurrency` and
+  `max_queue` answer `429` with `Retry-After` when full; `task_timeout`; a task
+  whose worker was lost is reported failed; cancel and re-subscribe work from
+  any replica; `/healthz`; drain on shutdown.
+- `auth=`: a token, several, token → identity, or a function of the headers.
+  Tasks and conversations belong to their caller, and each conversation runs on
+  its own instance of the agent.
+- Push notifications to https webhooks, off unless `push_notifications=` allows.
+- `A2AClient`: `card`, `send`, `stream`, `get`, `cancel`, `wait`, `resubscribe`,
+  with retries that keep the message id.
+- `RemoteAgent` — an A2A agent as a sub-agent, a tool (`as_tool`), or a workflow
+  step; `a2a:` on an agent in a blueprint or workflow file. A remote failure is
+  `result.error`. Registers with governance when given a harness.
+- `agent-harness a2a serve | card URL | send URL TEXT [--stream]`.
+- `examples/17_a2a.py`.
 
 **Declared workflows — `agent_harness.Workflow`**
 - A workflow written in YAML or JSON and run as written:
@@ -4011,7 +4152,7 @@ An MCP server misbehaved.
 
 ## Also exported
 
-`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`
+`Handoff`, `HandoffRecord`, `OpenAICompatibleProvider`, `OpenRouterProvider`, `GroqProvider`, `TogetherProvider`, `DeepSeekProvider`, `MistralProvider`, `XAIProvider`, `FireworksProvider`, `CerebrasProvider`, `OllamaProvider`, `LMStudioProvider`, `VLLMProvider`, `list_llm_providers`, `describe_llm_provider`, `check_llm_provider`, `ping_llm_provider`, `ProviderSpec`, `ProviderField`, `ProviderCheck`, `ParameterPlan`, `validate_parameters`, `RetryPolicy`, `RetryEvent`, `CircuitBreaker`, `Governance`, `AgentIdentity`, `QuotaExceededError`, `AuthenticationError`, `InvalidRequestError`, `ModelNotFoundError`, `ContextWindowExceededError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderUnavailableError`, `WorkflowError`, `Workflow`, `WorkflowSpec`, `WorkflowResult`, `WorkflowEvent`, `StepResult`, `A2AServer`, `A2AClient`, `RemoteAgent`, `A2AError`
 
 ---
 
@@ -5623,6 +5764,116 @@ async def main() -> None:
           f"drafts={result.steps['email'].iterations} · "
           f"{result.steps_run} steps · ${result.cost_usd:.4f}")
     await harness.aclose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## examples/17_a2a.py
+
+A2A: an agent served over the agent-to-agent protocol on a real socket, called by a client, streamed, and used as another agent's sub-agent.
+
+```python
+"""A2A: serve an agent to anyone, and call one as if it were yours.
+
+One process here plays both sides. A pricing agent is served over the
+agent-to-agent protocol on a real socket; a manager — which could just as well
+be a different framework on a different continent — finds it by its card and
+uses it as a sub-agent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from _common import pick_provider
+
+from agent_harness import Agent, FakeProvider, Harness, tool, tool_call
+from agent_harness.a2a import A2AClient, A2AServer, RemoteAgent
+
+TOKEN = "sk-demo-token"
+
+
+@tool
+def price_list(plan: str) -> str:
+    """The monthly price of a plan.
+
+    Args:
+        plan: the plan's name.
+    """
+    return {"gold": "40 EUR per seat", "silver": "15 EUR per seat"}.get(
+        plan.lower(), "no such plan")
+
+
+async def main() -> None:
+    provider, model = pick_provider()
+    scripted = provider is not None
+
+    def scripts(*turns: object) -> FakeProvider | None:
+        return FakeProvider(list(turns), stream_words=True) if scripted else None
+
+    # --- the side that serves ----------------------------------------------
+    pricing = Agent(
+        "pricing", "You know the price list. Look a price up before you quote it.",
+        description="Quotes plan prices from the price list.",
+        tools=[price_list], model=model, harness=Harness(), memory=False,
+        provider=scripts(
+            tool_call("price_list", plan="gold"),
+            "The gold plan is 40 EUR per seat, per month.",
+            "For 12 seats that is 480 EUR per month.",
+            tool_call("price_list", plan="silver"),
+            "Silver is 15 EUR per seat, per month."),
+    )
+    server = A2AServer(pricing, auth={TOKEN: {"user_id": "acme-bot", "tenant_id": "acme"}})
+    started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    serving = asyncio.create_task(
+        server.serve("127.0.0.1", 0, ready=started.set_result))
+    url = await started
+    print(f"pricing is served at {url}\n")
+
+    # --- any A2A client can call it -------------------------------------------
+    async with A2AClient(url, token=TOKEN) as client:
+        card = await client.card()
+        print(f"card       {card['name']} v{card['version']} — {card['description']}")
+        print(f"           A2A {card['protocolVersion']}, streaming: "
+              f"{card['capabilities']['streaming']}, auth: "
+              f"{', '.join(card.get('securitySchemes', {'none': 0}))}")
+
+        task = await client.send("What does the gold plan cost?")
+        print(f"\nsend       {task.state}: {task.text}")
+
+        print("stream     ", end="")
+        async for event in client.stream("And for 12 seats?",
+                                         context_id=task.context_id):
+            if event.kind == "artifact-update":
+                print(event.text, end="", flush=True)
+            elif event.final:
+                print(f"   [{event.state}]")
+
+    # --- and your own agents can use it as one of theirs ------------------------
+    remote = await RemoteAgent.connect(url, token=TOKEN)
+    manager = Agent(
+        "manager", "Answer the customer. Ask the pricing agent for any price.",
+        subagents=[remote], model=model, harness=Harness(), memory=False,
+        provider=scripts(
+            tool_call("delegate", agent_name="pricing",
+                      task="What does the silver plan cost per seat?"),
+            "Silver is 15 EUR per seat each month."),
+    )
+    result = await manager.run("How much is silver?")
+    print(f"\nmanager    {result.output}")
+    print(f"           delegated to: {[c.agent for c in result.children]} over A2A")
+
+    health = server.health()
+    print(f"\nserver     {health['completed']} tasks completed, "
+          f"{health['running']} running, capacity {health['capacity']}")
+
+    await remote.aclose()
+    serving.cancel()
+    await asyncio.gather(serving, return_exceptions=True)
+    await pricing.harness.aclose()
+    await manager.harness.aclose()
 
 
 if __name__ == "__main__":

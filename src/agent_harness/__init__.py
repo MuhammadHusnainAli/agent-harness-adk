@@ -248,7 +248,9 @@ _LAZY = {"MCPServer": "mcp", "MCPClient": "mcp", "MCPManager": "mcp",
          # language, which lives with governance.
          "Workflow": "workflow", "WorkflowSpec": "workflow",
          "WorkflowResult": "workflow", "WorkflowEvent": "workflow",
-         "StepResult": "workflow"}
+         "StepResult": "workflow",
+         "A2AServer": "a2a", "A2AClient": "a2a", "RemoteAgent": "a2a",
+         "A2AError": "a2a"}
 
 
 def __getattr__(name: str):
@@ -506,6 +508,10 @@ __all__ = [
     "WorkflowResult",
     "WorkflowEvent",
     "StepResult",
+    "A2AServer",
+    "A2AClient",
+    "RemoteAgent",
+    "A2AError",
     "PermissionDenied",
     "BudgetExceeded",
     "GuardrailTripped",

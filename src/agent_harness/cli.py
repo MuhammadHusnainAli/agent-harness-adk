@@ -342,6 +342,48 @@ async def _workflow(args: argparse.Namespace) -> int:
         await harness.aclose()
 
 
+async def _a2a(args: argparse.Namespace) -> int:
+    from .a2a import A2AClient, A2AServer
+
+    if args.action == "serve":
+        harness = _harness(args)
+        agent = _agent(args, harness)
+        server = A2AServer(agent, url=args.public_url, auth=args.token or None,
+                           max_concurrency=args.max_concurrency)
+        try:
+            await server.serve(args.host, args.port, ready=lambda url: print(
+                f"{agent.name} is served over A2A at {url}\n"
+                f"  card   {url}/.well-known/agent-card.json\n"
+                f"  auth   {'bearer token' if args.token else 'none — anyone may call'}\n"
+                "This is the development server; for production run the ASGI app "
+                "under uvicorn.", file=sys.stderr))
+        finally:
+            await harness.aclose()
+        return 0
+
+    if not args.target:
+        raise SystemExit(f"a2a {args.action} needs the agent's URL")
+    async with A2AClient(args.target, token=(args.token or [None])[0]) as client:
+        if args.action == "card":
+            print(json.dumps(await client.card(), indent=2))
+            return 0
+        if not args.text:
+            raise SystemExit("a2a send needs something to send")
+        if args.stream:
+            state = ""
+            async for event in client.stream(args.text, context_id=args.context):
+                if event.kind == "artifact-update":
+                    print(event.text, end="", flush=True)
+                state = event.state or state
+            print()
+            return 0 if state == "completed" else 1
+        task = await client.send(args.text, context_id=args.context)
+        print(task.text or task.error or "")
+        print(f"\n[{task.state} · task {task.id} · context {task.context_id}]",
+              file=sys.stderr)
+        return 0 if task.ok else 1
+
+
 def _models(args: argparse.Namespace) -> int:
     rows = sorted(MODELS.values(), key=lambda m: (m.provider, m.id))
     print(f"{'model':<26} {'provider':<10} {'tier':<9} {'in $/M':>8} {'out $/M':>8} "
@@ -761,6 +803,27 @@ def build_parser() -> argparse.ArgumentParser:
     flow.add_argument("--approve", action="store_true",
                       help="ask before any tool that needs approval")
 
+    a2a = sub.add_parser(
+        "a2a", help="serve an agent over the agent-to-agent protocol, or call one")
+    a2a.add_argument("action", choices=["serve", "card", "send"],
+                     help="serve: serve an agent · card URL: print an agent's card · "
+                          "send URL TEXT: send it a message")
+    a2a.add_argument("target", nargs="?", default=None, help="the agent's URL")
+    a2a.add_argument("text", nargs="?", default=None, help="what to send")
+    a2a.add_argument("--host", default="127.0.0.1")
+    a2a.add_argument("--port", type=int, default=8000)
+    a2a.add_argument("--public-url", default=None,
+                     help="the URL others reach this agent at, for its card")
+    a2a.add_argument("--token", action="append", default=[],
+                     help="serve: a bearer token callers must send (repeatable) · "
+                          "card, send: the token to send")
+    a2a.add_argument("--max-concurrency", type=int, default=64,
+                     help="serve: how many tasks run at once")
+    a2a.add_argument("--stream", action="store_true", help="send: stream the answer")
+    a2a.add_argument("--context", default=None,
+                     help="send: the context id of a conversation to carry on")
+    common(a2a)
+
     sub.add_parser("models", help="list the models the harness knows and their prices")
 
     providers = sub.add_parser(
@@ -848,6 +911,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_voice(args))
         if args.command == "workflow":
             return asyncio.run(_workflow(args))
+        if args.command == "a2a":
+            return asyncio.run(_a2a(args))
         if args.command == "models":
             return _models(args)
         if args.command == "providers":

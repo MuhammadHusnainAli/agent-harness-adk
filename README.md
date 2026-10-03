@@ -1113,6 +1113,123 @@ result = await boss.run("Summarise how Q3 went, with the numbers cited.")
 
 `result.data["plan"]` and `result.data["review"]` carry the full record.
 
+## A2A: agents that talk to other frameworks' agents
+
+The [agent-to-agent protocol](https://a2a-protocol.org) is how an agent built
+with one framework calls an agent built with another. Both sides are here: serve
+any of your agents over A2A, and use anyone else's as if it were one of yours.
+There is no SDK — the server is a plain ASGI application and the client is
+`httpx`.
+
+### Serving an agent
+
+```python
+# myapp.py
+from agent_harness import Agent, Harness
+from agent_harness.a2a import A2AServer
+
+harness = Harness(sessions="postgresql://user:pass@host/agents")
+agent = Agent("pricing", "Quote prices from the price list.",
+              description="Quotes plan prices.", tools=[price_list], harness=harness)
+
+server = A2AServer(agent, auth={"sk-live-1": {"user_id": "acme-bot", "tenant_id": "acme"}})
+```
+
+```bash
+uvicorn myapp:server --workers 8          # it is an ASGI app: any ASGI server runs it
+agent-harness a2a serve --name pricing --token sk-live-1   # or the built-in one, to develop
+```
+
+That serves the agent card at `/.well-known/agent-card.json` and the JSON-RPC
+binding of A2A 0.3: `message/send`, `message/stream` (SSE, token by token),
+`tasks/get`, `tasks/cancel`, `tasks/resubscribe` and the push-notification
+methods. A message becomes a task; the answer is its `response` artefact; a
+`contextId` carries the conversation on; files and structured data in a message
+reach the agent as attachments.
+
+`A2AServer({"billing": billing, "orders": orders})` serves several agents, each
+under its own name.
+
+### Calling one
+
+```python
+from agent_harness.a2a import A2AClient, RemoteAgent
+
+async with A2AClient("https://agents.example.com/pricing", token="sk-…") as client:
+    task = await client.send("What does the gold plan cost?")
+    task.text, task.state, task.context_id
+
+    async for event in client.stream("And for 12 seats?", context_id=task.context_id):
+        print(event.text, end="")
+
+    task = await client.send("Price the whole catalogue.", blocking=False)
+    task = await client.wait(task.id)                  # or client.get / client.cancel
+```
+
+A `RemoteAgent` is that agent wearing the shape the harness expects, so it goes
+wherever one of your own would:
+
+```python
+pricing = await RemoteAgent.connect("https://agents.example.com/pricing", token="sk-…")
+
+Agent("manager", subagents=[pricing])                   # delegated to, like any sub-agent
+Agent("manager", tools=[pricing.as_tool("ask_pricing")])
+Workflow.from_file("quote.yaml", agents=[pricing])      # an `agent: pricing` step
+```
+
+```yaml
+# or declared, in a blueprint or a workflow file
+agents:
+  pricing:
+    description: Quotes plan prices.
+    a2a: {url: "https://agents.example.com/pricing", token_env: PRICING_TOKEN}
+```
+
+A failed or unreachable remote agent is a `result.error`, never an exception in
+the middle of your run. On a governed harness a remote agent must be registered
+before anything is delegated to it — pass it the harness
+(`RemoteAgent.connect(url, harness=harness, identity={...})`).
+
+### Running it at scale
+
+The server is written to be one of many replicas behind a load balancer.
+
+- **A replica keeps nothing another one needs.** Tasks and conversations live in
+  the harness's session store. Name a database there
+  (`Harness(sessions="postgresql://…")`, or Redis, MongoDB, DynamoDB, …) and any
+  replica can answer `tasks/get`, carry on a `contextId`, cancel a task or
+  re-subscribe to it — whichever replica is running it. `store=` takes a
+  `TaskStore` of your own.
+- **A message sent twice is one task.** The task id is derived from the caller
+  and the `messageId`, so a client that retries a request it never saw the
+  answer to gets the first task back — even from a different replica — and the
+  model is paid for once. `A2AClient` retries with the same id for that reason.
+- **A full replica says so.** `max_concurrency` tasks run, `max_queue` wait, and
+  past that the answer is `429` with `Retry-After` rather than a queue that
+  grows without end. `GET /healthz` reports what is running and is `503` while
+  draining.
+- **Nothing waits for ever.** `task_timeout` ends a task that runs too long. A
+  task whose worker died is reported `failed` the next time anyone asks, not
+  `working` for ever. A streaming connection gets a keep-alive comment so a
+  proxy does not close it, and a caller who hangs up stops the stream, not the
+  task.
+- **Callers are told, not polled, if you allow it.**
+  `push_notifications=True` lets a caller register an https webhook (never a
+  private or loopback address) that is sent the task when it is over.
+- **Every caller has their own.** `auth` is a token, several, a token → identity
+  mapping, or a function of the request headers. A caller's tasks and
+  conversations are stamped with who they are; anyone else asking is told there
+  is no such task. Each conversation runs on its own instance of the agent,
+  acting for its caller, so nothing one caller said is in another's memory.
+- **Shutdown is orderly.** On the ASGI lifespan shutdown the server stops taking
+  work, gives what is running a moment, and records the rest as cancelled.
+
+Tasks are kept until you delete them — give the store a TTL
+(`session_provider("redis://…", ttl=7 * 86_400)`) or clear them yourself.
+
+Not there yet: the gRPC and REST bindings, `input-required` (a task that stops to
+ask the caller something), and signed or authenticated-extended agent cards.
+
 ## MCP
 
 ```python
