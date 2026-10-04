@@ -243,7 +243,7 @@ from .types import (
 )
 from .versioning import AgentVersion
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 # MCP pulls in the HTTP stack, and most agents never touch it — so it loads on
 # first use. `from agent_harness import MCPServer` still works. Governance is

@@ -13,8 +13,8 @@ authors:
 repository-code: "https://github.com/MuhammadHusnainAli/agent-harness-adk"
 url: "https://pypi.org/project/agent-harness-adk/"
 license: MIT
-version: "0.1.4"
-date-released: "2026-09-24"
+version: "0.2.0"
+date-released: "2026-10-05"
 keywords:
   - artificial intelligence
   - large language models
