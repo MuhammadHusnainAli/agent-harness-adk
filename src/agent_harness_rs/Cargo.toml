@@ -1,0 +1,96 @@
+[package]
+name = "agent-harness-adk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A fast, lightweight harness for building production AI agents: agents, tools, skills, prompts, providers and the runtime rails underneath them."
+authors = ["MuhammadHusnainAli <muhammad.husnain.ali.738@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/MuhammadHusnainAli/agent-harness-adk"
+homepage = "https://github.com/MuhammadHusnainAli/agent-harness-adk"
+keywords = ["agents", "llm", "ai", "anthropic", "openai"]
+categories = ["api-bindings", "asynchronous", "development-tools"]
+include = ["src/**/*.rs", "examples/**/*.rs", "tests/**/*.rs", "Cargo.toml", "README.md", "LICENSE", "track.md"]
+
+[lib]
+# Published as agent-harness-adk, imported as agent_harness â€” same as the Python package.
+name = "agent_harness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-harness"
+path = "src/bin/agent-harness.rs"
+required-features = ["cli"]
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait = "0.1.92"
+axum = "0.8.9"
+base64 = "0.23.1"
+blake2 = "0.11.0"
+bytes = "1.12.1"
+# The `agent-harness` command line (the `cli` feature).
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+# Ed25519 audit signatures (governance). Pure Rust (RustCrypto).
+ed25519-dalek = "2.2.0"
+# zlib for DynamoDB session bodies (pure Rust: miniz_oxide).
+flate2 = "1.1.5"
+futures = "0.3.34"
+glob = "0.3.4"
+hmac = "0.13.0"
+httpdate = "1.0.3"
+indexmap = { version = "2.14.2", features = ["serde"] }
+# Image dimensions for the document toolkit's OCR metadata (pure Rust, no deps).
+imagesize = "0.14"
+# Time zones for the `now` tool (IANA database bundled on Windows).
+jiff = "0.2"
+mime_guess = "2.0.5"
+minijinja = { version = "3.0.5", features = ["serde"] }
+mongodb = { version = "3.10.0", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
+redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"], optional = true }
+# PDF text for the document toolkit (pure Rust, behind the `pdf` feature).
+pdf-extract = { version = "0.12", optional = true }
+regex = "1.13.1"
+# DOCX: word/document.xml read with roxmltree out of a zip (deflate via miniz_oxide).
+roxmltree = "0.20"
+# RS256 for Google service-account keys (already built for rustls).
+ring = "0.17.14"
+rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "query", "http2", "rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order"] }
+serde_yaml = "0.9.34"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki"], optional = true }
+sha1 = "0.11.0"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "process", "io-util", "io-std", "net"] }
+# The realtime voice WebSocket: TLS on `ring`, never aws-lc.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+tracing = "0.1.44"
+uuid = { version = "1.29.0", features = ["v4", "v5"] }
+webpki-roots = "1.0.11"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+[features]
+default = ["sqlite", "pdf"]
+# PDF text extraction in the document toolkit.
+pdf = ["dep:pdf-extract"]
+# SQLite memory, sessions and vectors (bundled: no system library needed).
+sqlite = ["dep:rusqlite"]
+# PostgreSQL memory and sessions, and the pgvector store.
+postgres = ["dep:sqlx", "sqlx/postgres"]
+# MySQL / MariaDB memory and sessions.
+mysql = ["dep:sqlx", "sqlx/mysql"]
+# Redis memory and sessions, and the Redis vector store.
+redis = ["dep:redis"]
+# MongoDB memory and sessions, and the Atlas vector store.
+mongodb = ["dep:mongodb"]
+# The `agent-harness` command: cargo install agent-harness-adk --features cli
+cli = ["dep:clap", "tokio/signal"]
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "test-util"] }
